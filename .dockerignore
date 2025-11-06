@@ -1,0 +1,4 @@
+.dockerignore
+Dockerfile
+.devcontainer/
+.pre-commit-config.yaml

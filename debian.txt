@@ -1,0 +1,13 @@
+automake
+coreutils
+libboost-all-dev
+libssl-dev
+libtool
+libmagic-dev
+
+# Big Yara specific
+make
+gcc
+g++
+build-essential
+pkg-config

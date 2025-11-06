@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+    <div class="results">
+        <div class="page-header">
+            <h3>Retrohunts</h3>
+        </div>
+        <div class="overview">
+            <table class="table table-striped table-bordered">
+                <thead>
+                    <tr>
+                        <th>Submitted</td>
+                        <th>Hunt ID</th>
+                        <th>Type</th>
+                        <th width="200px">Snippet</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Progress</th>
+                        <th>Matches</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for hunt in hunts %}
+                    <tr>
+                        <td>{{hunt.submitted_time}}</td>
+                        <td><a href="/hunts/{{hunt.id}}">{{hunt.id}}</td>
+                        <td>{{hunt.search_type}}</td>
+                        <td>{{hunt.search|truncate(100,true,'...')}}</td>
+                        <td>{{hunt.status}}</td>
+                        {% if hunt.duration %}
+                        <td>{{hunt.duration|duration}}</td>
+                        {% else %}
+                        <td>Unknown</td>
+                        {% endif %}
+                        <td>{{hunt.tool_matches_done}} / {{hunt.tool_matches_total}}</td>
+                        <td>
+                            {% if hunt.tool_match_count %}
+                                {{hunt.tool_match_count}}
+                            {% else %}
+                                0
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+{% endblock %}

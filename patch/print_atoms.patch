@@ -1,0 +1,97 @@
+diff -ur a/libyara/atoms.c b/libyara/atoms.c
+--- a/libyara/atoms.c	2022-08-08 11:29:28.000000000 +0000
++++ b/libyara/atoms.c	2023-01-25 01:13:46.808064897 +0000
+@@ -1300,6 +1300,10 @@
+   // Initialize atom list
+   *atoms = NULL;
+ 
++  printf("RE:");
++  yr_atoms_tree_node_print(atom_tree->root_node);
++  printf("\n");
++
+   // Choose the atoms that will be used.
+   FAIL_ON_ERROR_WITH_CLEANUP(
+       _yr_atoms_choose(config, atom_tree->root_node, atoms, min_atom_quality),
+@@ -1512,8 +1516,25 @@
+   switch (node->type)
+   {
+   case ATOM_TREE_LEAF:
+-    for (int i = 0; i < node->atom.length; i++)
+-      printf("%02X", node->atom.bytes[i]);
++    printf("\"");
++    bool masked = false;
++    for (int i = 0; i < node->atom.length; i++) 
++    {
++      if (node->atom.mask[i] == 0xFF)
++      {
++        if (masked) 
++        {
++          printf("\",\"");
++          masked = false;
++        }
++        printf("%02X", node->atom.bytes[i]);
++      }
++      else 
++      {
++        masked = true;
++      }
++    }
++    printf("\"");
+     break;
+ 
+   case ATOM_TREE_AND:
+diff -ur a/libyara/include/yara/atoms.h b/libyara/include/yara/atoms.h
+--- a/libyara/include/yara/atoms.h	2022-08-08 11:29:28.000000000 +0000
++++ b/libyara/include/yara/atoms.h	2023-01-25 01:12:29.630492283 +0000
+@@ -132,4 +132,6 @@
+ 
+ void yr_atoms_list_destroy(YR_ATOM_LIST_ITEM* list_head);
+ 
++void yr_atoms_tree_node_print(YR_ATOM_TREE_NODE* node);
++
+ #endif
+diff -ur a/libyara/parser.c b/libyara/parser.c
+--- a/libyara/parser.c	2022-08-08 11:29:28.000000000 +0000
++++ b/libyara/parser.c	2023-01-25 01:12:29.630492283 +0000
+@@ -450,6 +450,9 @@
+       offsetof(YR_STRING, chained_to),
+       EOL));
+ 
++  printf("STRING:%s\n", identifier);
++  printf("FLAGS:%d\n", modifier.flags);
++
+   YR_STRING* string = (YR_STRING*) yr_arena_ref_to_ptr(
+       compiler->arena, string_ref);
+ 
+@@ -536,6 +539,20 @@
+ 
+   if (result == ERROR_SUCCESS)
+   {
++    YR_ATOM_LIST_ITEM* item = atom_list;
++    while (item != NULL)
++    {
++      if (item->atom.length > 0)
++      {
++        printf("ATOM:");
++        for (int p = 0; p < item->atom.length; p++)
++        {
++          printf("%02X", item->atom.bytes[p]);
++        }
++        printf("\n");
++      }
++      item = item->next;
++    }
+     // Add the string to Aho-Corasick automaton.
+     result = yr_ac_add_string(
+         compiler->automaton,
+@@ -1026,6 +1043,10 @@
+   FAIL_ON_ERROR(yr_hash_table_add_uint32(
+       compiler->rules_table, identifier, ns->name, compiler->current_rule_idx));
+ 
++ YR_RULE* current_rule = _yr_compiler_get_rule_by_idx(
++      compiler, compiler->current_rule_idx);
++  printf("RULE:%s\n", current_rule->identifier);
++
+   return ERROR_SUCCESS;
+ }
+ 

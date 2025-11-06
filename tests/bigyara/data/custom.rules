@@ -1,0 +1,25 @@
+# FUTURE suricata - implement
+### Required to use uricontent ###
+preprocessor frag3_global: \
+	max_frags 65536
+preprocessor frag3_engine: \
+	policy first
+preprocessor stream5_global: \
+	max_tcp 8192, \
+	track_tcp yes, \
+	track_udp no, \
+	show_rebuilt_packets
+preprocessor stream5_tcp: \
+	policy first
+preprocessor http_inspect: \
+	global iis_unicode_map /etc/snort/unicode.map 1252
+preprocessor http_inspect_server: \
+	server default profile all ports { 80 }
+##################################	
+
+
+# Sample rule for simplebeacon.pcap
+alert udp any any -> any 53 (msg:"SimpleBeacon domain: www.gamble.co"; content:"www"; content:"gamble"; content:"co"; sid:999999; rev:1;)
+
+
+# Write lab rules here

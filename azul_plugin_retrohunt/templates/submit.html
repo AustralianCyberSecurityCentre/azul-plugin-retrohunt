@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+    <div class="page-header">
+        <h3>Submit Retrohunt</h3>
+    </div>
+    <div class="submit">
+        <form method="post" action="{{ request.app.url_path_for('submit') }}" class="form-horizontal" enctype="application/x-www-form-urlencoded">
+            <div class="control-group">
+                <label class="control-label" for="type"><h4>Hunt Type</h4></label><br/><br/>
+                <input type="radio" class="form-control" name="search_type" value="Yara" checked="checked"> Yara </input>
+                <!--<input type="radio" class="form-control" name="search_type" value="Suricata"> Suricata </input>--><!-- # FUTURE suricata - implement-->
+            </div>
+            <div class="control-group">
+                <label class="control-label" for="search"><h4>Search</h4></label><br/><br/>
+                <textarea name="search" class="form-control" id="search" style="width:600px;height:200px;"></textarea>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Submit</button>
+                <button type="reset" class="btn">Cancel</button>
+            </div>
+        </form>
+    </div>
+{% endblock %}
