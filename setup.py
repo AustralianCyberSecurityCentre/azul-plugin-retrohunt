@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Setup script."""
+
 import os
 import subprocess  # noqa S404  # nosec: B404
 import sys
