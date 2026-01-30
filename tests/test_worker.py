@@ -201,7 +201,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                 request_data = azm.RetrohuntEvent.model_validate(events[0])
 
                 cur_expected_result = EXPECTED_REQUESTS[idx]
-                print(f"processing expected request {idx+1}")
+                print(f"processing expected request {idx + 1}")
 
                 cur_expected_result["source"]["timestamp"] = request_data.source.timestamp
                 cur_expected_result["kafka_key"] = request_data.kafka_key

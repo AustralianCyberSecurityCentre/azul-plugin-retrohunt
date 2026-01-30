@@ -11,6 +11,8 @@ ARG PIP_CERT
 ARG PIP_CLIENT_CERT
 ARG PIP_TRUSTED_HOST
 ARG PIP_INDEX_URL
+ARG UV_DEFAULT_INDEX
+ARG UV_INSECURE_HOST
 ARG GIT_BRANCH_NAME
 ARG PIP_EXTRA_INDEX_URL
 
@@ -22,11 +24,12 @@ RUN apt-get update && \
     rm -rf /tmp/src/debian.txt /var/lib/apt/lists/*
 # copy all files not in .dockerignore
 COPY ./ /tmp/src
-RUN pip install build setuptools_scm
+RUN pip install uv
+RUN uv pip install --system hatchling hatch-vcs
 # build package
-RUN cd /tmp/src && python -m build . --outdir /tmp/
+RUN cd /tmp/src && uv build . --out-dir /tmp/
 # install package
-RUN pip install \
+RUN uv pip install --system \
     --find-links /tmp/ \
     # Version specified to ensure the package that was just built is installed instead of a newer version of the package.
     azul-plugin-retrohunt==$(cd /tmp/src && python -m setuptools_scm)
@@ -34,10 +37,10 @@ RUN pip install \
 # If on dev branch, install dev versions of azul packages (locate packages)
 # Note pip install --pre --upgrade --no-deps is not valid because it doesn't install the requirements of dev azul packages which are needed.
 RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ] ; then \
-    pip freeze | grep 'azul-.*==' | cut -d "=" -f 1 | xargs -I {} pip install --find-links /tmp/ --upgrade '{}>=0.0.1.dev' ;fi
+    pip freeze | grep 'azul-.*==' | cut -d "=" -f 1 | xargs -I {} uv pip install --system --find-links /tmp/ --upgrade '{}>=0.0.1.dev' ;fi
 # re-run install sdist to get correct version of current package after dev install.
 RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ] ; then \
-    pip install --find-links /tmp/ azul-plugin-retrohunt==$(cd /tmp/src && python -m setuptools_scm);fi
+    uv pip install --system --find-links /tmp/ azul-plugin-retrohunt==$(cd /tmp/src && python -m setuptools_scm);fi
 
 
 FROM $REGISTRY/$BASE_IMAGE:$BASE_TAG AS base
@@ -66,8 +69,7 @@ ARG UID=21000
 ARG GID=21000
 # test scripts will be installed to the local user bin dir. Add local bin path for the azul user.
 ENV PATH="/home/azul/.local/bin:$PATH"
-COPY requirements_tests.txt /tmp/src/
-RUN pip install -r /tmp/src/requirements_tests.txt
+RUN uv pip install --system --group dev
 COPY --chown=azul ./tests /tmp/tests
 RUN --mount=type=secret,uid=$UID,gid=$GID,id=testSecret export $(cat /run/secrets/testSecret) && \
     python -m pytest --tb=short /tmp/tests

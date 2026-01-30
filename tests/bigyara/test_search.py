@@ -69,7 +69,6 @@ def fetch_from_dict(path: str, unused: dict) -> bytes:
 
 
 class TestSearch(test_utils.BaseIngestorIndexerTest):
-
     def setUp(self):
         self.string_content: list[bytes] = [b"abcdefgh", b"ABCDRSTVFGH", b"abcdabcd"]
         return super().setUp()

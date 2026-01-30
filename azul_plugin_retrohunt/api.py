@@ -14,11 +14,7 @@ from azul_metastore import query
 from azul_metastore.restapi.quick import qr
 from fastapi import APIRouter, Depends, HTTPException
 
-from azul_plugin_retrohunt.models import (
-    RetrohuntResponse,
-    RetrohuntsResponse,
-    RetrohuntSubmission,
-)
+from azul_plugin_retrohunt.models import RetrohuntResponse, RetrohuntsResponse, RetrohuntSubmission
 
 router = APIRouter()
 
@@ -39,7 +35,7 @@ def hunt_results(hunt_id: str, ctx=Depends(qr.ctx)):
             raise HTTPException(status_code=404, detail="Retrohunt Id not found")
         response.raise_for_status()
     except Exception as ex:  # FUTURE specific exception types
-        raise HTTPException(status_code=500, detail=f"Error contacting upstream retrohunt service. {str(ex)}")
+        raise HTTPException(status_code=500, detail=f"Error contacting upstream retrohunt service. {str(ex)}") from ex
 
     # enrich/filter based on metastore
     hunt = response.json()["data"]
@@ -53,7 +49,7 @@ def hunt_results(hunt_id: str, ctx=Depends(qr.ctx)):
             hashes.extend(matches)
     if hashes:
         # query as one aggregated multisearch
-        entities = list(zip(["binary"] * len(hashes), hashes))
+        entities = list(zip(["binary"] * len(hashes), hashes, strict=False))
         summaries = query.read_entities(ctx, entities=entities)
         sumdict = {s.id: s for s in summaries}
         hunt["tool_matches_total"] = len(summaries)
@@ -77,7 +73,9 @@ def list_hunts(ctx=Depends(qr.ctx), limit: int = 50):
             raise HTTPException(status_code=404, detail="Retrohunt Id not found")
         r.raise_for_status()
     except Exception as ex:
-        raise HTTPException(status_code=500, detail="Error contacting upstream retrohunt service. %s" % str(ex))
+        raise HTTPException(
+            status_code=500, detail="Error contacting upstream retrohunt service. %s" % str(ex)
+        ) from ex
 
     # enrich/filter based on metastore
     results = r.json()["data"]
@@ -93,7 +91,7 @@ def list_hunts(ctx=Depends(qr.ctx), limit: int = 50):
             if matches:
                 hashes.extend(matches)
         if hashes:
-            entities = list(zip(["binary"] * len(hashes), hashes))
+            entities = list(zip(["binary"] * len(hashes), hashes, strict=False))
             hunt["tool_matches_total"] = len([x.id for x in query.check_entities(ctx, entities=entities) if x.exists])
             hunt.pop("results", None)
 
@@ -114,7 +112,9 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
         response = httpx.post(retrohunt_server + "/api/v1/hunts", json=request, timeout=120)
         response.raise_for_status()
     except Exception as ex:
-        raise HTTPException(status_code=500, detail="Error contacting upstream retrohunt service. %s" % str(ex))
+        raise HTTPException(
+            status_code=500, detail="Error contacting upstream retrohunt service. %s" % str(ex)
+        ) from ex
 
     submission = response.json()
 
