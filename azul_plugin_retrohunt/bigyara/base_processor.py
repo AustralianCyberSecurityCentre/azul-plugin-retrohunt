@@ -36,7 +36,7 @@ class BaseYaraProcessor:
         if dir.exists():
             for f in dir.iterdir():
                 if f.is_file:
-                    if exclude_files_with_str_in_name is None or not (exclude_files_with_str_in_name in f.name):
+                    if exclude_files_with_str_in_name is None or exclude_files_with_str_in_name not in f.name:
                         size += f.stat().st_size
                 else:
                     logger.warning(f"Ignoring the directory '{f}' when checking the size of directory '{dir}'")
