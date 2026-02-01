@@ -32,7 +32,7 @@ RUN cd /tmp/src && uv build . --out-dir /tmp/
 RUN uv pip install --system \
     --find-links /tmp/ \
     # Version specified to ensure the package that was just built is installed instead of a newer version of the package.
-    azul-plugin-retrohunt==$(cd /tmp/src && python -m setuptools_scm)
+    azul-plugin-retrohunt==$(cd /tmp/src && hatchling version)
 
 # If on dev branch, install dev versions of azul packages (locate packages)
 # Note pip install --pre --upgrade --no-deps is not valid because it doesn't install the requirements of dev azul packages which are needed.
@@ -40,7 +40,7 @@ RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ] ; then \
     pip freeze | grep 'azul-.*==' | cut -d "=" -f 1 | xargs -I {} uv pip install --system --find-links /tmp/ --upgrade '{}>=0.0.1.dev' ;fi
 # re-run install sdist to get correct version of current package after dev install.
 RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ] ; then \
-    uv pip install --system --find-links /tmp/ azul-plugin-retrohunt==$(cd /tmp/src && python -m setuptools_scm);fi
+    uv pip install --system --find-links /tmp/ azul-plugin-retrohunt==$(cd /tmp/src && hatchling version);fi
 
 
 FROM $REGISTRY/$BASE_IMAGE:$BASE_TAG AS base

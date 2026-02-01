@@ -40,7 +40,6 @@ dependencies = [
     "pydantic>2",
     "python-multipart>=0.0.22",
     "semantic-version>=2.10.0",
-    "setuptools>=80.10.2",
     "starlette-exporter>=0.23.0",
     "uvicorn>=0.40.0",
     "wheel>=0.46.3",
