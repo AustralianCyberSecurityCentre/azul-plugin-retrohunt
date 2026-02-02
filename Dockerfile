@@ -67,7 +67,7 @@ ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
 ARG UID=21000
 ARG GID=21000
-# Easist way to install with uv managing packages.
+# Easiest way to install with uv managing packages.
 USER root
 COPY ./pyproject.toml ./pyproject.toml
 RUN uv pip install --system --group dev
