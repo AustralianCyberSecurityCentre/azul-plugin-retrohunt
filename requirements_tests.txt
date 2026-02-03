@@ -1,6 +1,0 @@
-azul-runner[test-utils]
-cart
-respx
-pytest
-tox
-urllib3

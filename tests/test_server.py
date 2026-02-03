@@ -46,7 +46,7 @@ class TestIndex(unittest.IsolatedAsyncioTestCase):
 
         request = server.RetrohuntSubmission
         request.search_type = "Yara"
-        request.search = "rule r {strings: $a=" " condition: $a}"
+        request.search = "rule r {strings: $a= condition: $a}"
         request.submitter = "tester"
         request.security = "OFFICIAL"
         background_tasks = BackgroundTasks()
@@ -92,7 +92,7 @@ class TestIndexUpdate(unittest.TestCase):
             entity=azm.RetrohuntEvent.RetrohuntEntity(
                 id="hunt_20200820040230",
                 search_type="Yara",
-                search="rule r {strings: $a=" " condition: $a}",
+                search="rule r {strings: $a= condition: $a}",
                 status=azm.HuntState.SUBMITTED,
             ),
             timestamp=str_to_datetime("2020-08-20T04:02:30.062458"),

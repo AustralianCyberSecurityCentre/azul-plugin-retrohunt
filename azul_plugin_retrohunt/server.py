@@ -329,7 +329,9 @@ async def redoc_html(req: Request) -> HTMLResponse:
 
 @click.command()
 @click.option(
-    "--host", help="The network interface address to listen on (all by default).", default="0.0.0.0"  # nosec B104
+    "--host",
+    help="The network interface address to listen on (all by default).",
+    default="0.0.0.0",  # nosec B104
 )
 @click.option("--port", help="The port number to listen on.", default=8852)
 @click.option("--workers", help="Number of http workers to handling incoming requests.", default=1)

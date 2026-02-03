@@ -129,9 +129,7 @@ class TestExecute(test_template.TestPlugin, RetrohuntBaseTest):
         data1: bytes = b"here is some content to index"
         data2: bytes = b"lets try and make sure it's over the hundred bytes"
         data3: bytes = b"But it can't be all in one file because that won't get indexed!"
-        data4: bytes = (
-            b"This won't be added to the cache at all because it is over 100 bytes and therefore can't be indexed. Enough content to push it over 100 bytes."
-        )
+        data4: bytes = b"This won't be added to the cache at all because it is over 100 bytes and therefore can't be indexed. Enough content to push it over 100 bytes."
         # Verify 3 files get ingested. (Note 1 file generates itself + a metadata file)
         # First two files will get indexed without issue.
         self.do_execution(data_in=[("content", data1)], no_multiprocessing=True)
