@@ -222,9 +222,9 @@ def _broad_phase_search(
 
             for search_string in search_strings:
                 # run bgparse
-                process: subprocess.CompletedProcess[bytes] = subprocess.run(
+                process: subprocess.CompletedProcess[bytes] = subprocess.run(  # noqa: S602
                     f"{executables['bgparse']}  {search_string}{index}",
-                    shell=True,  # noqa: S602  # nosec: B602
+                    shell=True,  # noqa: S602
                     capture_output=True,
                 )
 

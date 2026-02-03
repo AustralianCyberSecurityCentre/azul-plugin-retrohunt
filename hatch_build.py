@@ -15,5 +15,5 @@ class CustomBuildHook(BuildHookInterface):
         # Runs before build
         print("Running custom build steps...")
         protoc_command = ["make", "compile"]
-        if subprocess.call(protoc_command) != 0:
+        if subprocess.call(protoc_command) != 0:  # noqa: S603
             sys.exit(-1)

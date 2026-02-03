@@ -1,5 +1,3 @@
-# FUTURE UV IS USEFUL
-uv.lock
 # Created by https://www.toptal.com/developers/gitignore/api/python,vim,visualstudiocode,intellij+all
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,vim,visualstudiocode,intellij+all
 
@@ -279,3 +277,5 @@ BigGrep-*
 yara-*
 
 .ruff_cache
+# FUTURE UV IS USEFUL
+uv.lock
