@@ -167,9 +167,9 @@ class BigYaraIndexer(BaseYaraProcessor):
                 tmp_file_write.writelines("\n".join(self._get_files_to_index_with_meta(folder_path)))
 
             # NOTE - adding the -d and -v flags to bgindex causes it to fail when processing binaries.
-            process: subprocess.CompletedProcess[bytes] = subprocess.run(
+            process: subprocess.CompletedProcess[bytes] = subprocess.run(  # noqa: S602
                 f"cat '{tmp_file.name}' | '{executables['bgindex']}' -p '{hidden_index_file}' -z -L",
-                shell=True,  # noqa: S602  # nosec: B602
+                shell=True,  # noqa: S602
                 timeout=timeout_minutes * 60,
                 stderr=subprocess.PIPE,
             )
