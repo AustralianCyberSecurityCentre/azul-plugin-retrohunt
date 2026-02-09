@@ -16,7 +16,7 @@ import semantic_version
 import uvicorn
 from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
-from azul_bedrock.exceptions import BaseError
+from azul_bedrock.exceptions_bedrock import BaseError
 from fastapi import BackgroundTasks, FastAPI, Form
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from starlette.requests import Request
