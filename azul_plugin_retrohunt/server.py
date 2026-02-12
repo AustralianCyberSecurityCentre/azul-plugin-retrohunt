@@ -8,15 +8,15 @@ import traceback
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime
+from importlib.resources import files
 
 import click
 import pendulum
-import pkg_resources
 import semantic_version
 import uvicorn
 from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
-from azul_bedrock.exceptions import BaseError
+from azul_bedrock.exceptions_bedrock import BaseError
 from fastapi import BackgroundTasks, FastAPI, Form
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from starlette.requests import Request
@@ -52,7 +52,8 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
-app.mount("/static", StaticFiles(directory=pkg_resources.resource_filename(__name__, "static/")))
+static_path = files(__package__).joinpath("static")
+app.mount("/static", StaticFiles(directory=str(static_path)))
 app.add_middleware(
     PrometheusMiddleware,
     app_name="retrohunt_server",
@@ -61,7 +62,9 @@ app.add_middleware(
 )
 app.add_route("/metrics", handle_metrics)
 
-templates = Jinja2Templates(directory=pkg_resources.resource_filename(__name__, "templates/"))
+
+templates_path = files(__package__).joinpath("templates")
+templates = Jinja2Templates(directory=str(templates_path))
 
 hunts = OrderedDict[str, azm.RetrohuntEvent.RetrohuntEntity]()
 

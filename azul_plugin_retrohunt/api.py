@@ -9,7 +9,7 @@ This is to be installed/deployed in the azul-restapi-server.
 import os
 
 import httpx
-from azul_bedrock.exceptions import BaseError
+from azul_bedrock.bedrock_exceptions import BaseError
 from azul_metastore import query
 from azul_metastore.restapi.quick import qr
 from fastapi import APIRouter, Depends, HTTPException
