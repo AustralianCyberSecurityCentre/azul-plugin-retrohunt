@@ -27,7 +27,6 @@ dependencies = [
     "aiofiles>=25.1.0",
     "azul-bedrock>=10.0.15",
     "azul-runner>=4.0.0",
-    "azul-security>=10.0.11",
     "click>=8.3.1",
     "fastapi>=0.128.0",
     "httpx>=0.28.1",
