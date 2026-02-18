@@ -26,10 +26,14 @@ log_root_handler.setFormatter(
 log_root.addHandler(log_root_handler)
 
 prom_number_of_indexes_created = Counter(
-    "retrohunt_bgis_created", "Total number of bgi indices that retrohunt indexer has created.", ["index", "type"]
+    "retrohunt_bgis_created",
+    "Total number of bgi indices that retrohunt indexer has created.",
+    ["index", "type"],
 )
 prom_bgi_directory_bytes = Gauge(
-    "retrohunt_indexer_bytes_in_bgi_directory", "Total bytes in bgi directory for a particular index.", ["index"]
+    "retrohunt_indexer_bytes_in_bgi_directory",
+    "Total bytes in bgi directory for a particular index.",
+    ["index"],
 )
 PERIODIC_INDEX_NAME = "periodic"
 SIZE_BASED_INDEX_NAME = "sizebased"
@@ -44,7 +48,11 @@ def run_indexer(
     """Run an indexer of the provided type with the provided root_path."""
     # Future allow for multiple indexer types at once. - as long as the indexer isn't overworked this will save lots
     # of RAM/CPU allocations.
-    indexer = BigYaraIndexer(index_root_path, indexerSettings.name, int(indexerSettings.max_bytes_before_indexing))
+    indexer = BigYaraIndexer(
+        index_root_path,
+        indexerSettings.name,
+        int(indexerSettings.max_bytes_before_indexing),
+    )
     prom_number_of_indexes_created.labels(indexer._processor_name, PERIODIC_INDEX_NAME)
     prom_number_of_indexes_created.labels(indexer._processor_name, SIZE_BASED_INDEX_NAME)
     prom_bgi_directory_bytes.labels(indexer._processor_name).set(indexer.count_bytes_for_dir(indexer.bgi_directory))
@@ -78,7 +86,11 @@ def run_indexer(
                 indexer.save_indexing_dir(path_to_index)
                 # Periodic indexing name or a split periodic index so override the name so it can be overridden.
                 if periodic_folder_name in path_to_index.name:
-                    indexer.generate_index(path_to_index, periodic_bgi_name, indexerSettings.timeout_minutes)
+                    indexer.generate_index(
+                        path_to_index,
+                        periodic_bgi_name,
+                        indexerSettings.timeout_minutes,
+                    )
                     prom_number_of_indexes_created.labels(indexer._processor_name, PERIODIC_INDEX_NAME).inc()
                 # Normal indexing, file will be named based on time of indexing.
                 else:

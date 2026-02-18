@@ -1,23 +1,19 @@
 """
-RetroHunt Server Tests
+RetroHunt Tests
 ======================
 
 The webserver presents an interface to submit and monitor retrohunt jobs.
 These tests exercise some of the api entrypoints.
+Note: we are removing the server in favour of fastapi endpoints in future.
 """
 
-import copy
 import json
 import unittest
 from datetime import datetime, timezone
-import fakeredis
 from unittest.mock import patch
 
-
-import respx
+import fakeredis
 from azul_bedrock import dispatcher
-from azul_bedrock import models_network as azm
-from fastapi import BackgroundTasks
 
 from azul_plugin_retrohunt import server
 
@@ -37,17 +33,16 @@ def str_to_datetime(datetime_string):
     date = datetime.strptime(datetime_string[:19], "%Y-%m-%dT%H:%M:%S")
     return date.replace(tzinfo=timezone.utc)
 
+
 class TestIndex(unittest.IsolatedAsyncioTestCase):
     """Submit a new retrohunt via the API and ensure we can pull the same hunt back."""
+
     async def asyncSetUp(self):
         # Create a fake Redis instance for each test
         self.fake_redis = fakeredis.FakeRedis()
         self.fake_redis.REDIS_EXPIRATION = 30
         # Patch the module-level redis client in retrohunt.py
-        self.patcher = patch(
-            "azul_plugin_retrohunt.retrohunt.redis",
-            self.fake_redis
-        )
+        self.patcher = patch("azul_plugin_retrohunt.retrohunt.redis", self.fake_redis)
         self.patcher.start()
 
     async def asyncTearDown(self):

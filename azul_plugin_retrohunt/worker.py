@@ -3,22 +3,27 @@
 import json
 import logging
 import os
+import socket
 import sys
-import time
 import threading
 from datetime import datetime
 from io import StringIO
 from time import sleep
-import socket
+
 import pendulum
 from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
 from prometheus_client import Counter, Summary, start_http_server
 
 from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
-from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
 from azul_plugin_retrohunt.redis import get_redis
-prom_jobs_run = Counter("retrohunt_worker_jobs_run", "Total jobs run by prometheus and their final status", ["status"])
+from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
+
+prom_jobs_run = Counter(
+    "retrohunt_worker_jobs_run",
+    "Total jobs run by prometheus and their final status",
+    ["status"],
+)
 prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a workers run.")
 
 PLUGIN_NAME = "RetroHunter"
@@ -47,6 +52,7 @@ MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max o
 
 redis = get_redis()
 
+
 def capture_logs(level: int = logging.INFO) -> StringIO:
     """Return a StringIO that will capture relevant logs."""
     log_format = "%(asctime)s %(message)s"
@@ -63,7 +69,10 @@ def capture_logs(level: int = logging.INFO) -> StringIO:
     log_handler = logging.StreamHandler(logs)
     log_handler.setFormatter(logging.Formatter(log_format, log_date_format))
 
-    tracked_loggers: list[logging.Logger] = [logging.getLogger("retrohunt.worker"), logging.getLogger("bigyara")]
+    tracked_loggers: list[logging.Logger] = [
+        logging.getLogger("retrohunt.worker"),
+        logging.getLogger("bigyara"),
+    ]
 
     for logger in tracked_loggers:
         logger.setLevel(level)
@@ -91,7 +100,7 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
     redis.set(job.entity.id, json.dumps(job.model_dump()), ex=redis.REDIS_EXPIRATION)
-    #dp.submit_events(events=[job], model=azm.ModelType.Retrohunt)
+    # dp.submit_events(events=[job], model=azm.ModelType.Retrohunt)
     return job
 
 
@@ -199,7 +208,14 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         else:
             raise Exception("Unknown search type.")
 
-        search(search_query, search_enum_type, index_dirs, get_data_from_azul, update_job, recursive=True)
+        search(
+            search_query,
+            search_enum_type,
+            index_dirs,
+            get_data_from_azul,
+            update_job,
+            recursive=True,
+        )
 
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
@@ -222,29 +238,20 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
         job = _update_progress(job, logs)
 
+
 def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
     """Helper to aquire lock on retrohunt job."""
     lock_key = f"retrohunt:{job_id}:lock"
     return redis_client.set(lock_key, worker_id, nx=True, ex=ttl_seconds)
 
-def heartbeat_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
-    lock_key = f"retrohunt:{job_id}:lock"
-    current_owner = redis_client.get(lock_key)
-
-    if current_owner == worker_id:
-        redis_client.expire(lock_key, ttl_seconds)
-        return True
-
-    return False
 
 def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: threading.Event):
-    """
-    Starts a background heartbeat thread that periodically refreshes the lock TTL.
+    """Starts a background heartbeat thread that periodically refreshes the lock TTL.
+
     The heartbeat stops when stop_event is set.
     """
-
     lock_key = f"retrohunt:{job_id}:lock"
-    refresh_interval = ttl_seconds // 3   # refresh every 1/3 of TTL
+    refresh_interval = ttl_seconds // 3  # refresh every 1/3 of TTL
 
     def beat():
         while not stop_event.is_set():
@@ -318,7 +325,6 @@ def main():
 
             _, msgs = events[0]
             msg_id, payload = msgs[0]
-
 
         # Load the full event from Redis
         event_json = redis.get(payload["hunt_id"])

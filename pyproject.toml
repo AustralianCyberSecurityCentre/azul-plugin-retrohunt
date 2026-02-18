@@ -86,6 +86,7 @@ dev = [
     "respx>=0.22.0",
     "tox>=4.34.1",
     "urllib3>=2.6.3",
+    "fakeredis>=2.23.0",
 ]
 
 [tool.ruff]

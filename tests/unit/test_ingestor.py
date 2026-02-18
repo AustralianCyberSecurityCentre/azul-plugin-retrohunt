@@ -60,7 +60,11 @@ class TestExecute(test_template.TestPlugin, RetrohuntBaseTest):
         """Test LRU hash cache evicts correctly."""
         with tempfile.TemporaryDirectory(prefix="retrotest_") as tmp_dir:
             CACHE_SIZE = 2
-            config = {"index_path": tmp_dir, "name_suffix": "test", "hash_cache_size": CACHE_SIZE}
+            config = {
+                "index_path": tmp_dir,
+                "name_suffix": "test",
+                "hash_cache_size": CACHE_SIZE,
+            }
 
             data: list[bytes] = [
                 b"here is some content to index",
@@ -79,13 +83,20 @@ class TestExecute(test_template.TestPlugin, RetrohuntBaseTest):
                 return cache_object
 
             with mock.patch(
-                "azul_plugin_retrohunt.ingestor.RetrohuntIngestor._create_hash_cache", mock_create_hash_cache
+                "azul_plugin_retrohunt.ingestor.RetrohuntIngestor._create_hash_cache",
+                mock_create_hash_cache,
             ):
                 local_coordinator = coordinator.Coordinator(
-                    self.PLUGIN_TO_TEST, azr_settings.parse_config(self.PLUGIN_TO_TEST, config)
+                    self.PLUGIN_TO_TEST,
+                    azr_settings.parse_config(self.PLUGIN_TO_TEST, config),
                 )
                 result = self.do_execution(
-                    data_in=[("content", data[0]), ("content", data[1]), ("content", data[0]), ("content", data[2])],
+                    data_in=[
+                        ("content", data[0]),
+                        ("content", data[1]),
+                        ("content", data[0]),
+                        ("content", data[2]),
+                    ],
                     provided_coordinator=local_coordinator,
                 )
                 self.assertJobResult(result, JobResult(state=State(State.Label.COMPLETED_EMPTY)))
@@ -149,22 +160,34 @@ class TestExecute(test_template.TestPlugin, RetrohuntBaseTest):
         self.assertIn(hashlib.sha256(data3).hexdigest(), cache_dir)
 
         # New index ready directory should exist
-        self.assertIn("20020108", list(dir.name for dir in self.ingestor_cache_directory.parent.iterdir()))
+        self.assertIn(
+            "20020108",
+            list(dir.name for dir in self.ingestor_cache_directory.parent.iterdir()),
+        )
 
         mini_data = b"abcdef"
         aug_stream_data = b"djafksdjfksadfjksdkfjskdfjskdfjksdfkjsdkfj"
         # check that only one file is added when using multiple labels
-        self.do_execution(data_in=[("content", mini_data), ("assemblyline", aug_stream_data)], no_multiprocessing=True)
+        self.do_execution(
+            data_in=[("content", mini_data), ("assemblyline", aug_stream_data)],
+            no_multiprocessing=True,
+        )
         self.assertEqual(len(list(self.ingestor_cache_directory.iterdir())), 4)
 
     def test_run_indexer_on_a_non_content_stream_type(self):
-        self.indexers_cfg[self.indexer_cfg_name].stream_labels = ["content", "assemblyline"]
+        self.indexers_cfg[self.indexer_cfg_name].stream_labels = [
+            "content",
+            "assemblyline",
+        ]
         self._reapply_indexer_cfg()
 
         mini_data = b"abcdef"
         aug_stream_data = b"djafksdjfksadfjksdkfjskdfjskdfjksdfkjsdkfj"
         # check that only one file is added when using multiple labels
-        self.do_execution(data_in=[("content", mini_data), ("assemblyline", aug_stream_data)], no_multiprocessing=True)
+        self.do_execution(
+            data_in=[("content", mini_data), ("assemblyline", aug_stream_data)],
+            no_multiprocessing=True,
+        )
         f_names = [f.name for f in self.ingestor_cache_directory.iterdir()]
 
         # Check that both content labels had their content added.
@@ -189,7 +212,10 @@ class TestExecute(test_template.TestPlugin, RetrohuntBaseTest):
         mini_data = b"abcdef"
         aug_stream_data = b"djafksdjfksadfjksdkfjskdfjskdfjksdfkjsdkfj"
         # check that only one file is added when using multiple labels
-        self.do_execution(data_in=[("content", mini_data), ("assemblyline", aug_stream_data)], no_multiprocessing=True)
+        self.do_execution(
+            data_in=[("content", mini_data), ("assemblyline", aug_stream_data)],
+            no_multiprocessing=True,
+        )
         f_names = [f.name for f in self.ingestor_cache_directory.iterdir()]
 
         # Check just augmented stream data was added.
@@ -280,7 +306,9 @@ class TestExecute(test_template.TestPlugin, RetrohuntBaseTest):
         self.assertEqual(len(f_names_content_cache), 0)
         self.assertEqual(len(f_names_alt_indexer_cache), 2)
 
-    def test_adding_content_for_two_indexers_but_one_filters_one_label_and_one_filters_the_other(self):
+    def test_adding_content_for_two_indexers_but_one_filters_one_label_and_one_filters_the_other(
+        self,
+    ):
         """Have two indexers but one only accepts alt streams and there is an alt stream."""
         # Set original indexer to only take alt-streams.
         self.indexers_cfg[self.indexer_cfg_name].stream_labels = ["assemblyline"]
@@ -296,7 +324,10 @@ class TestExecute(test_template.TestPlugin, RetrohuntBaseTest):
         # Add data to both caches with the file being too large for one but still add it to the other.
         data = b"ajksdfjkasdfkljsadfljkdfljksfaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa this content is too long for the base cache. because it's more than 100 bytes."
         aug_data = b"aug data!"
-        self.do_execution(data_in=[("content", data), ("assemblyline", aug_data)], no_multiprocessing=True)
+        self.do_execution(
+            data_in=[("content", data), ("assemblyline", aug_data)],
+            no_multiprocessing=True,
+        )
         f_names_content_cache = [f.name for f in self.ingestor_cache_directory.iterdir()]
         f_names_alt_indexer_cache = [f.name for f in alt_indexer_cache_path.iterdir()]
 
@@ -365,7 +396,8 @@ class TestExecute(test_template.TestPlugin, RetrohuntBaseTest):
         self._reapply_indexer_cfg()
         # Add Run plugin against 2 files and a periodic index should be created.
         self.do_execution(
-            data_in=[("content", data1), ("content", data2), ("content", data3)], no_multiprocessing=True
+            data_in=[("content", data1), ("content", data2), ("content", data3)],
+            no_multiprocessing=True,
         )
 
         cache_dir = [f.name for f in self.ingestor_cache_directory.iterdir()]

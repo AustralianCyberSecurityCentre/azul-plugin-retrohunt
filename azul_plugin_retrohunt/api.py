@@ -9,18 +9,20 @@ This is to be installed/deployed in the azul-restapi-server.
 import os
 
 import httpx
-from azul_bedrock.bedrock_exceptions import BaseError
+from azul_bedrock.exceptions_bedrock import BaseError
 from azul_metastore import query
 from azul_metastore.restapi.quick import qr
 from fastapi import APIRouter, Depends, HTTPException
-from azul_plugin_retrohunt.retrohunt import RetrohuntService
+
 from azul_plugin_retrohunt.models import RetrohuntResponse, RetrohuntsResponse, RetrohuntSubmission
+from azul_plugin_retrohunt.retrohunt import RetrohuntService
 
 router = APIRouter()
 service = RetrohuntService()
 
 # keep the old server up while we prepare to integrate retrohunt with the webui
 retrohunt_server = os.getenv("RETROHUNT_SERVER", "http://localhost:8852")
+
 
 @router.get(
     "/retrohunts/{hunt_id}",
@@ -36,7 +38,10 @@ def hunt_results(hunt_id: str, ctx=Depends(qr.ctx)):
             raise HTTPException(status_code=404, detail="Retrohunt Id not found")
         response.raise_for_status()
     except Exception as ex:  # FUTURE specific exception types
-        raise HTTPException(status_code=500, detail=f"Error contacting upstream retrohunt service. {str(ex)}") from ex
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error contacting upstream retrohunt service. {str(ex)}",
+        ) from ex
 
     # enrich/filter based on metastore
     hunt = response.json()["data"]
@@ -75,7 +80,8 @@ def list_hunts(ctx=Depends(qr.ctx), limit: int = 50):
         r.raise_for_status()
     except Exception as ex:
         raise HTTPException(
-            status_code=500, detail="Error contacting upstream retrohunt service. %s" % str(ex)
+            status_code=500,
+            detail="Error contacting upstream retrohunt service. %s" % str(ex),
         ) from ex
 
     # enrich/filter based on metastore
@@ -114,12 +120,14 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
         response.raise_for_status()
     except Exception as ex:
         raise HTTPException(
-            status_code=500, detail="Error contacting upstream retrohunt service. %s" % str(ex)
+            status_code=500,
+            detail="Error contacting upstream retrohunt service. %s" % str(ex),
         ) from ex
 
     submission = response.json()
 
     return submission
+
 
 # restapi endpoints will be for webui integration
 @router.get(
@@ -128,11 +136,10 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     responses={404: {"model": BaseError, "description": "The retrohunt was not found"}},
     **qr.kw,
 )
-def hunt_results(hunt_id: str, ctx=Depends(qr.ctx)):
+def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
     """Fetch details of specified hunt."""
-    
     response = RetrohuntService.get_hunts(hunt_id)
-     
+
     # enrich/filter based on metastore
     hunt = response["data"]
     # mismatch in field namings between webapi/metastore and messaging/retrohunt api
@@ -160,12 +167,16 @@ def hunt_results(hunt_id: str, ctx=Depends(qr.ctx)):
     return qr.fr(ctx, hunt)
 
 
-@router.get("/v0/retrohunt/retrohunts", response_model=RetrohuntsResponse, responses={404: {"model": BaseError, "description": "No retrohunts found"}}, **qr.kw)
+@router.get(
+    "/v0/retrohunt/retrohunts",
+    response_model=RetrohuntsResponse,
+    responses={404: {"model": BaseError, "description": "No retrohunts found"}},
+    **qr.kw,
+)
 def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
     """Return list of hunts."""
-   
     r = RetrohuntService.list_hunts(limit)
-    
+
     # enrich/filter based on metastore
     results = r["data"]
 
@@ -187,15 +198,18 @@ def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
     return qr.fr(ctx, results)
 
 
-@router.post("/v0/retrohunt/retrohunts", response_model=RetrohuntResponse, responses={404: {"model": BaseError, "description": "Issue submitting hunt"}}, **qr.kw)
+@router.post(
+    "/v0/retrohunt/retrohunts",
+    response_model=RetrohuntResponse,
+    responses={404: {"model": BaseError, "description": "Issue submitting hunt"}},
+    **qr.kw,
+)
 def submit_hunt_route(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     """Submit a new retrohunt for processing."""
-
     enriched = submission.model_copy(update={"submitter": ctx.user_info.username})
     # submit the hunt and get the id
     hunt_id = RetrohuntService.submit_hunt(enriched)
     # get the hunt entity
     hunt = RetrohuntService.get_hunts(hunt_id)
-    
-    return qr.fr(ctx, hunt["data"])
 
+    return qr.fr(ctx, hunt["data"])
