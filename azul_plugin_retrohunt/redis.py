@@ -12,7 +12,7 @@ class RedisProvider:
 
     def __init__(self, db: int):
         """Initialize the Redis client using environment variables or localhost defaults."""
-        endpoint = os.getenv("REDIS_ENDPOINT")
+        endpoint = os.getenv("REDIS_ENDPOINT", "localhost:6379")
         username = os.getenv("REDIS_USERNAME", None)
         password = os.getenv("REDIS_PASSWORD", None)
 
