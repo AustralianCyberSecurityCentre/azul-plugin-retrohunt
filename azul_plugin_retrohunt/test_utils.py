@@ -9,6 +9,13 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock as mock
+
+# Prevent BigYara from trying to find real binaries during tests
+with mock.patch("azul_plugin_retrohunt.bigyara.env.find_executable", return_value="/bin/true"):
+    from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+    from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
+
 
 from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
 from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor

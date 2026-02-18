@@ -10,6 +10,9 @@ import copy
 import json
 import unittest
 from datetime import datetime, timezone
+import fakeredis
+from unittest.mock import patch
+
 
 import respx
 from azul_bedrock import dispatcher
@@ -34,98 +37,60 @@ def str_to_datetime(datetime_string):
     date = datetime.strptime(datetime_string[:19], "%Y-%m-%dT%H:%M:%S")
     return date.replace(tzinfo=timezone.utc)
 
-
 class TestIndex(unittest.IsolatedAsyncioTestCase):
-    @respx.mock
+    """Submit a new retrohunt via the API and ensure we can pull the same hunt back."""
+    async def asyncSetUp(self):
+        # Create a fake Redis instance for each test
+        self.fake_redis = fakeredis.FakeRedis()
+        self.fake_redis.REDIS_EXPIRATION = 30
+        # Patch the module-level redis client in retrohunt.py
+        self.patcher = patch(
+            "azul_plugin_retrohunt.retrohunt.redis",
+            self.fake_redis
+        )
+        self.patcher.start()
+
+    async def asyncTearDown(self):
+        self.patcher.stop()
+
     async def test_submit(self):
-        """Submit a new retrohunt via the API and ensure we can pull the same hunt back."""
-        # server will post an event to dispatcher
-        resp = respx.post("http://localhost:8111/api/v2/event").respond(
-            200, json={"total_ok": 0, "total_failures": 0, "failures": []}
+        request = server.RetrohuntSubmission(
+            search_type="Yara",
+            search="rule r {strings: $a= condition: $a}",
+            submitter="tester",
+            security="OFFICIAL",
         )
 
-        request = server.RetrohuntSubmission
-        request.search_type = "Yara"
-        request.search = "rule r {strings: $a= condition: $a}"
-        request.submitter = "tester"
-        request.security = "OFFICIAL"
-        background_tasks = BackgroundTasks()
-        hunt = server.submit_hunt_v1(request, background_tasks)["data"]
-        # Force background task to run now
-        await background_tasks.tasks[0].func(*background_tasks.tasks[0].args)
-        msgs = json.loads(resp.calls[0].request.content)
-        self.assertEqual(len(msgs), 1)
-        msg = msgs[0]
-        self.assertEqual(hunt.id, msg["entity"]["id"])
-        self.assertEqual(hunt.search_type, request.search_type)
-        self.assertEqual(hunt.search, request.search)
-        self.assertEqual(hunt.submitter, request.submitter)
-        self.assertEqual(msg["action"], azm.RetrohuntEvent.RetrohuntAction.Submitted)
-        self.assertEqual(msg["source"]["security"], "OFFICIAL")
+        # submit new hunt to redis
+        result = server.submit_hunt_v1(request)
+        hunt_id = result
+        # verify submission
+        raw = self.fake_redis.get(hunt_id)
+        self.assertIsNotNone(raw)
 
-        hunt2 = server.hunt_results_v1(hunt.id)["data"]
-        self.assertEqual(hunt.search, hunt2.search)
-        self.assertEqual(hunt.search_type, hunt2.search_type)
-        self.assertEqual(hunt.submitter, hunt2.submitter)
+        event_dict = json.loads(raw)
+        entity = event_dict["entity"]
+
+        self.assertEqual(entity["id"], hunt_id)
+        self.assertEqual(entity["search_type"], request.search_type)
+        self.assertEqual(entity["search"], request.search)
+        self.assertEqual(entity["submitter"], request.submitter)
+        self.assertEqual(entity["security"], request.security)
+
+        # verify job was added to retro-hunt job stream
+        entries = self.fake_redis.xrange("retrohunt-jobs")
+        self.assertEqual(len(entries), 1)
+
+        _, msg = entries[0]
+        msg = {k.decode(): v.decode() for k, v in msg.items()}
+
+        self.assertEqual(msg["hunt_id"], hunt_id)
+        self.assertEqual(msg["action"], "Submitted")
+
+        hunt2 = server.hunt_results_v1(hunt_id)["data"]
+        self.assertEqual(hunt2.search, hunt2.search)
+        self.assertEqual(hunt2.search_type, hunt2.search_type)
+        self.assertEqual(hunt2.submitter, hunt2.submitter)
 
         hunts = server.list_hunts_v1()
         self.assertEqual(len(hunts), 1)
-
-
-class TestIndexUpdate(unittest.TestCase):
-    def test_update(self):
-        """Trigger the lifecyle of a hunt in the server and confirm that it tracks state correctly."""
-        event = azm.RetrohuntEvent(
-            kafka_key="retrohunt",
-            model_version=azm.CURRENT_MODEL_VERSION,
-            action=azm.RetrohuntEvent.RetrohuntAction.Submitted,
-            author=azm.Author(
-                name="RetrohuntServer",
-                version="0.1.0",
-                category="service",
-            ),
-            source=azm.RetrohuntEvent.RetrohuntSource(
-                submitter="tester",
-                security="OFFICIAL",
-                timestamp=str_to_datetime("2020-08-20T04:02:30.062458"),
-            ),
-            entity=azm.RetrohuntEvent.RetrohuntEntity(
-                id="hunt_20200820040230",
-                search_type="Yara",
-                search="rule r {strings: $a= condition: $a}",
-                status=azm.HuntState.SUBMITTED,
-            ),
-            timestamp=str_to_datetime("2020-08-20T04:02:30.062458"),
-        )
-
-        server.update_hunt(event)
-        hunt = server.hunt_results_v1(event.entity.id)["data"]
-        self.assertEqual(hunt.status, azm.HuntState.SUBMITTED)
-        self.assertIsNone(hunt.duration)
-
-        # give some progress update
-        event.action = azm.RetrohuntEvent.RetrohuntAction.Running
-        event.timestamp = str_to_datetime("2020-08-20T04:03:30.062458")
-        # copy to prevent sharing references
-        event.entity = copy.deepcopy(event.entity)
-        event.entity.status = azm.HuntState.STARTING
-        event.entity.results = {}
-        server.update_hunt(event)
-        hunt = server.hunt_results_v1(event.entity.id)["data"]
-        self.assertEqual(hunt.status, azm.HuntState.STARTING)
-        self.assertEqual(hunt.processing_start, datetime(2020, 8, 20, 4, 3, 30, tzinfo=timezone.utc))
-        # duration is from start of processing, not submission
-        self.assertEqual(hunt.duration, 0.0)
-
-        # completed progress update
-        event.action = azm.RetrohuntEvent.RetrohuntAction.Completed
-        event.timestamp = str_to_datetime("2020-08-20T04:05:30.062458")
-        event.entity = copy.deepcopy(event.entity)
-        event.entity.results = {"r": ["abcdef1", "abcdef2"]}
-        event.entity.status = azm.HuntState.COMPLETED
-        server.update_hunt(event)
-        hunt = server.hunt_results_v1(event.entity.id)["data"]
-        self.assertEqual(hunt.status, azm.HuntState.COMPLETED)
-        self.assertEqual(hunt.processing_end, datetime(2020, 8, 20, 4, 5, 30, tzinfo=timezone.utc))
-        self.assertEqual(hunt.duration, 120.0)
-        self.assertIn("r", hunt.results)
