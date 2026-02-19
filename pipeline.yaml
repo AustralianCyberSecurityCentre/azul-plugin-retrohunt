@@ -35,3 +35,4 @@ extends:
     is_deploy: true
     deploy_subdir: azul-dev
     python_integration: true
+    docker_target: tester
