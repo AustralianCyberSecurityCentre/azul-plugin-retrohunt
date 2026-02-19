@@ -4,7 +4,7 @@ RetroHunt Worker Tests
 
 The worker is responsible for waiting on hunt submissions
 and triggering the required bigyara search, publishing
-progress events as it executes.
+progress events as it executes. test.
 """
 
 import copy
