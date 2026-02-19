@@ -40,19 +40,14 @@ def mock_bigyara():
     """
 
     # Prevent env import side effects
-    with mock.patch.dict(
-        "sys.modules",
-        {"azul_plugin_retrohunt.bigyara.env": mock.MagicMock()}
-    ):
+    with mock.patch.dict("sys.modules", {"azul_plugin_retrohunt.bigyara.env": mock.MagicMock()}):
 
         def count_content_files(folder_path: Path) -> int:
             """Count only real content files (exclude BigYara metadata)."""
             return sum(
                 1
                 for p in folder_path.iterdir()
-                if p.is_file()
-                and not p.name.startswith(".")
-                and not p.name.endswith("-meta")
+                if p.is_file() and not p.name.startswith(".") and not p.name.endswith("-meta")
             )
 
         def fake_generate_index(self, folder_path, bgi_name_override=None, *_):
@@ -80,8 +75,5 @@ def mock_bigyara():
 
             return True
 
-        with mock.patch(
-            "azul_plugin_retrohunt.bigyara.index.BigYaraIndexer.generate_index",
-            new=fake_generate_index
-        ):
+        with mock.patch("azul_plugin_retrohunt.bigyara.index.BigYaraIndexer.generate_index", new=fake_generate_index):
             yield

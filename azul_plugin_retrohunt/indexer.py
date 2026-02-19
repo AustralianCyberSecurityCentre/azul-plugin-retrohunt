@@ -18,7 +18,9 @@ from azul_plugin_retrohunt.settings import RetrohuntSettings
 def get_bigyara_indexer():
     """Lazy importer."""
     from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+
     return BigYaraIndexer
+
 
 logger = logging.getLogger("retrohunt.indexer")
 

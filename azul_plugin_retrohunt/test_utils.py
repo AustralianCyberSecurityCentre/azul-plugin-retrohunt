@@ -29,7 +29,9 @@ def get_indexer_class():
         The BigYaraIndexer class from azul_plugin_retrohunt.bigyara.index.
     """
     from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+
     return BigYaraIndexer
+
 
 def get_ingestor_class():
     """Lazily import and return the BigYaraIngestor class.
@@ -45,6 +47,7 @@ def get_ingestor_class():
         The BigYaraIngestor class from azul_plugin_retrohunt.bigyara.ingest.
     """
     from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
+
     return BigYaraIngestor
 
 
@@ -124,7 +127,6 @@ class BaseIngestorIndexerTest(RetrohuntBaseTest, unittest.TestCase):
             self.indexer_cfg_name,
             self.indexers_cfg[self.indexer_cfg_name].max_bytes_before_indexing,
         )
-
 
     def modify_content_stream_label_config(self, new_labels: list[str]):
         """Modify the labels for the indexer and ingestor."""
