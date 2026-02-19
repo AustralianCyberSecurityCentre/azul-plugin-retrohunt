@@ -12,12 +12,13 @@ import click
 from prometheus_client import Counter, Gauge, start_http_server
 from pydantic.types import ByteSize
 
-#from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+from azul_plugin_retrohunt.settings import RetrohuntSettings
+
+
 def get_bigyara_indexer():
+    """Lazy importer."""
     from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
     return BigYaraIndexer
-
-from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 logger = logging.getLogger("retrohunt.indexer")
 
