@@ -12,15 +12,22 @@ import unittest
 import unittest.mock as mock
 
 # Prevent BigYara from trying to find real binaries during tests
-with mock.patch("azul_plugin_retrohunt.bigyara.env.find_executable", return_value="/bin/true"):
-    from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
-    from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
+#with mock.patch("azul_plugin_retrohunt.bigyara.env.find_executable", return_value="/bin/true"):
+#    from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+#    from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
 
 
-from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
-from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
+#from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+#from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
 from azul_plugin_retrohunt.models import FileMetadata
 from azul_plugin_retrohunt.settings import RetrohuntSettings
+def get_indexer_class():
+    from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+    return BigYaraIndexer
+
+def get_ingestor_class():
+    from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
+    return BigYaraIngestor
 
 
 class RetrohuntBaseTest:
@@ -84,7 +91,7 @@ class BaseIngestorIndexerTest(RetrohuntBaseTest, unittest.TestCase):
 
     def recreate_content_ingestor(self):
         """Recreate the ingestor with the current config."""
-        self.ingestor = BigYaraIngestor(
+        self.ingestor = get_ingestor_class()(
             self.base_temp_dir,
             self.indexer_cfg_name,
             self.indexers_cfg[self.indexer_cfg_name].max_bytes_before_indexing,
@@ -94,11 +101,12 @@ class BaseIngestorIndexerTest(RetrohuntBaseTest, unittest.TestCase):
 
     def recreate_content_indexer(self):
         """Recreate the indexer with the current config."""
-        self.indexer = BigYaraIndexer(
+        self.indexer = get_indexer_class()(
             self.base_temp_dir,
             self.indexer_cfg_name,
             self.indexers_cfg[self.indexer_cfg_name].max_bytes_before_indexing,
         )
+
 
     def modify_content_stream_label_config(self, new_labels: list[str]):
         """Modify the labels for the indexer and ingestor."""

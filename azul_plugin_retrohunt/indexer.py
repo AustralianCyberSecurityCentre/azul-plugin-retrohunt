@@ -12,7 +12,11 @@ import click
 from prometheus_client import Counter, Gauge, start_http_server
 from pydantic.types import ByteSize
 
-from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+#from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+def get_bigyara_indexer():
+    from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+    return BigYaraIndexer
+
 from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 logger = logging.getLogger("retrohunt.indexer")
@@ -48,7 +52,7 @@ def run_indexer(
     """Run an indexer of the provided type with the provided root_path."""
     # Future allow for multiple indexer types at once. - as long as the indexer isn't overworked this will save lots
     # of RAM/CPU allocations.
-    indexer = BigYaraIndexer(
+    indexer = get_bigyara_indexer()(
         index_root_path,
         indexerSettings.name,
         int(indexerSettings.max_bytes_before_indexing),
