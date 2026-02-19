@@ -1,15 +1,19 @@
-import os
+"""Build retrohunt and yara ready to be bundled for install."""
+
+# hatch_build.py
 import subprocess
 import sys
+
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
-class CustomBuildHook(BuildHookInterface):
-    def initialize(self, version, build_data):
-        # Skip build steps when running inside tox
-        if os.environ.get("TOX_ENV_NAME"):
-            print("Skipping custom build steps inside tox...")
-            return
 
+class CustomBuildHook(BuildHookInterface):
+    """Build hook for running actions at build time."""
+
+    def initialize(self, version, build_data):
+        """Build retrohunt and yara ready to be bundled for install."""
+        # Runs before build
         print("Running custom build steps...")
-        if subprocess.call(["make", "compile"]) != 0:
+        protoc_command = ["make", "compile"]
+        if subprocess.call(protoc_command) != 0:  # noqa: S603
             sys.exit(-1)
