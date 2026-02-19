@@ -277,6 +277,11 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             periodic_index_frequency_min=periodic_freq,
         )
 
+        # --- Replace the real indexer with a MagicMock that supports the expected API ---
+        self.indexer = mock.MagicMock()
+        self.indexer.add_data_to_index_cache = mock.MagicMock()
+        self.indexer.generate_index = mock.MagicMock()
+
         # --- ensure the MagicMock ingestion method actually writes data ---
         def real_add(data, meta):
             self.indexer.add_data_to_index_cache(self.ingestor.cache_directory, data, meta)
