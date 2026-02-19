@@ -76,9 +76,9 @@ RUN uv pip install --system --group dev
 USER azul
 # test scripts will be installed to the local user bin dir. Add local bin path for the azul user.
 ENV PATH="/home/azul/.local/bin:$PATH"
-COPY --chown=azul ./tests/unit /tmp/tests/unit
+COPY --chown=azul ./tests /tmp/tests
 RUN --mount=type=secret,uid=$UID,gid=$GID,id=testSecret export $(cat /run/secrets/testSecret) && \
-    pytest -o cache_dir=/tmp/cache --tb=short /tmp/tests/unit
+    pytest -o cache_dir=/tmp/cache --tb=short /tmp/tests
 # generate empty file to copy to `release` stage so this stage is not skipped due to optimisations.
 RUN touch /tmp/testingpassed
 
