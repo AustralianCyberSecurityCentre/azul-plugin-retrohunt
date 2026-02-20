@@ -3,33 +3,42 @@
 import os
 
 import redis
-
+from redis.exceptions import RedisError
+from .settings import RetrohuntSettings
 
 class RedisProvider:
     """Redis provider class."""
 
     REDIS_EXPIRATION = 30
 
-    def __init__(self, db: int):
-        """Initialize the Redis client using environment variables or localhost defaults."""
-        endpoint = os.getenv("REDIS_ENDPOINT", "localhost:6379")
-        username = os.getenv("REDIS_USERNAME", None)
-        password = os.getenv("REDIS_PASSWORD", None)
+    def __init__(self, db: int, settings: RetrohuntSettings | None = None):
+        """Initialize the Redis client using environment variables."""
+        settings = settings or RetrohuntSettings()
+        redis_cfg = settings.redis
 
-        if endpoint:
-            host, port = endpoint.split(":")
-        else:
-            host = "localhost"
-            port = 6379
+        # Validate required fields
+        if not redis_cfg.endpoint:
+            raise ValueError("REDIS_HOST is required but not set")
+        if not redis_cfg.port:
+            raise ValueError("REDIS_PORT is required but not set")
+        
+        selected_db = redis_cfg.db if redis_cfg.db is not None else db
 
-        self.client = redis.Redis(
-            host=host,
-            port=int(port),
-            username=username,
-            password=password,
-            db=db,
-            decode_responses=True,
-        )
+        try:
+            self.client = redis.Redis(
+                host=redis_cfg.endpoint,
+                port=int(redis_cfg.port),
+                username=redis_cfg.username,
+                password=redis_cfg.password,
+                db=selected_db,
+                decode_responses=True,
+            )
+
+            # Optional: test the connection immediately
+            self.client.ping()
+
+        except RedisError as e:
+            raise RuntimeError(f"Failed to connect to Redis at {redis_cfg.endpoint}:{redis_cfg.port}") from e
 
     def get(self, key):
         """Retrieve a value from Redis by key."""
@@ -74,5 +83,6 @@ def get_redis():
     """Return a singleton RedisProvider instance."""
     global _redis_instance
     if _redis_instance is None:
-        _redis_instance = RedisProvider(db=15)
+        settings = RetrohuntSettings()
+        _redis_instance = RedisProvider(db=15, settings=settings)
     return _redis_instance

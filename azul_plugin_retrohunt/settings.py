@@ -3,7 +3,7 @@
 import tempfile
 
 from annotated_types import Gt, Lt
-from pydantic import BaseModel, ByteSize
+from pydantic import BaseModel, ByteSize, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Annotated
 
@@ -32,7 +32,21 @@ class RetrohuntSettings(BaseSettings):
         # seconds between getting the CPU and RAM stats while indexing (must be greater than 0 and less than 30)
         seconds_between_gathering_cpu_and_ram_metrics: Annotated[float, Gt(0), Lt(30)] = 5
         run_once: bool = False
+    
+    class RedisSettings(BaseSettings):
+        endpoint: str | None = Field(None, alias="REDIS_HOST")
+        port: int | None = Field(None, alias="REDIS_PORT")
+        username: str | None = Field(None, alias="REDIS_USERNAME")
+        password: str | None = Field(None, alias="REDIS_PASSWORD")
+        db: int | None = Field(None, alias="REDIS_DB")
 
+        model_config = SettingsConfigDict(
+            env_prefix="",          # no prefix needed
+            extra="ignore",
+            populate_by_name=True,
+        )
+
+    redis: RedisSettings = RedisSettings()
     # should be common for all indexers/ingestors.
     root_path: str = tempfile.gettempdir()
     indexers: dict[str, Indexer] = dict()

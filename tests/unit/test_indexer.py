@@ -209,14 +209,8 @@ class TestIndexer(test_utils.BaseIngestorIndexerTest):
 
         # Successfully index the split directories and override periodic.bgi until there is only one copy.
         folders_to_be_indexed = list(self.indexer.get_folders_ready_for_indexing())
-        self.assertIn(
-            self.retrohunt_settings.periodic_index_folder_name,
-            folders_to_be_indexed[0].name,
-        )
-        self.assertIn(
-            self.retrohunt_settings.periodic_index_folder_name,
-            folders_to_be_indexed[1].name,
-        )
+        self.assertIn(self.retrohunt_settings.periodic_index_folder_name, folders_to_be_indexed[0].name)
+        self.assertIn(self.retrohunt_settings.periodic_index_folder_name, folders_to_be_indexed[1].name)
         self.assertEqual(len(folders_to_be_indexed), 2)
         self._run_indexer_like_indexer_main()
         bgi_indices = list(self.indexer.bgi_directory.iterdir())

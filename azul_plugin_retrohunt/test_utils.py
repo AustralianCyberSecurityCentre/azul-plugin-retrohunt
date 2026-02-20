@@ -10,45 +10,10 @@ import shutil
 import tempfile
 import unittest
 
-# Prevent BigYara from trying to find real binaries during tests
+from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
+from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
 from azul_plugin_retrohunt.models import FileMetadata
 from azul_plugin_retrohunt.settings import RetrohuntSettings
-
-
-def get_indexer_class():
-    """Lazily import and return the BigYaraIndexer class.
-
-    BigYara's environment module performs executable discovery at import time,
-    which can raise errors during testing when the real bgindex/bgdump binaries
-    are not available. By deferring the import until this function is called,
-    tests can safely patch or mock BigYara before the module is loaded.
-
-    Returns:
-    -------
-    type
-        The BigYaraIndexer class from azul_plugin_retrohunt.bigyara.index.
-    """
-    from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
-
-    return BigYaraIndexer
-
-
-def get_ingestor_class():
-    """Lazily import and return the BigYaraIngestor class.
-
-    Similar to get_indexer_class(), this function avoids importing the BigYara
-    ingestion module at test collection time. The BigYara environment performs
-    binary lookup during import, so delaying the import allows tests to apply
-    mocks or environment overrides before the module is loaded.
-
-    Returns:
-    -------
-    type
-        The BigYaraIngestor class from azul_plugin_retrohunt.bigyara.ingest.
-    """
-    from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
-
-    return BigYaraIngestor
 
 
 class RetrohuntBaseTest:
@@ -112,7 +77,7 @@ class BaseIngestorIndexerTest(RetrohuntBaseTest, unittest.TestCase):
 
     def recreate_content_ingestor(self):
         """Recreate the ingestor with the current config."""
-        self.ingestor = get_ingestor_class()(
+        self.ingestor = BigYaraIngestor(
             self.base_temp_dir,
             self.indexer_cfg_name,
             self.indexers_cfg[self.indexer_cfg_name].max_bytes_before_indexing,
@@ -122,7 +87,7 @@ class BaseIngestorIndexerTest(RetrohuntBaseTest, unittest.TestCase):
 
     def recreate_content_indexer(self):
         """Recreate the indexer with the current config."""
-        self.indexer = get_indexer_class()(
+        self.indexer = BigYaraIndexer(
             self.base_temp_dir,
             self.indexer_cfg_name,
             self.indexers_cfg[self.indexer_cfg_name].max_bytes_before_indexing,
