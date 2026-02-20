@@ -14,7 +14,8 @@ from azul_plugin_retrohunt.settings import CACHE_DIR_NAME
 class TestBigYaraIngest(test_utils.BaseIngestorIndexerTest):
     def test_cache_dir_exists(self):
         self.assertEqual(
-            str(self.ingestor.cache_directory), os.path.join(self.ingestor.base_directory, CACHE_DIR_NAME)
+            str(self.ingestor.cache_directory),
+            os.path.join(self.ingestor.base_directory, CACHE_DIR_NAME),
         )
         # Cache directory should exist
         self.assertTrue(self.ingestor.cache_directory.exists())
@@ -24,7 +25,8 @@ class TestBigYaraIngest(test_utils.BaseIngestorIndexerTest):
 
     def test_add_data_to_index_cache(self):
         self.ingestor.add_data_to_index_cache(
-            b"abcdefghijklmnopqrstuvwxyz", FileMetadata(stream_label="content", stream_source="testing")
+            b"abcdefghijklmnopqrstuvwxyz",
+            FileMetadata(stream_label="content", stream_source="testing"),
         )
         # Should have the original file and it's metadata added.
         data = list(self.ingestor.cache_directory.iterdir())
@@ -46,10 +48,12 @@ class TestBigYaraIngest(test_utils.BaseIngestorIndexerTest):
 
     def test_count_number_of_bytes_in_cache_dir(self):
         self.ingestor.add_data_to_index_cache(
-            b"abcdefghijklmnopqrstuvwxyz", FileMetadata(stream_label="content", stream_source="testing")
+            b"abcdefghijklmnopqrstuvwxyz",
+            FileMetadata(stream_label="content", stream_source="testing"),
         )
         self.ingestor.add_data_to_index_cache(
-            b"random-other-data", FileMetadata(stream_label="content", stream_source="testing")
+            b"random-other-data",
+            FileMetadata(stream_label="content", stream_source="testing"),
         )
         bytes_in_cache_dir = self.ingestor._count_number_of_bytes_in_cache_dir()
         # Number of bytes in directory excluding metadata
@@ -82,7 +86,12 @@ class TestBigYaraIngest(test_utils.BaseIngestorIndexerTest):
         # check a file too big too small and in the range.
         basic_meta = FileMetadata(stream_label="content", stream_source="testing")
         self.assertRaises(IngestFileSizeException, self.ingestor._can_file_size_can_be_added, 3)
-        self.assertRaises(IngestFileSizeException, self.ingestor.add_data_to_index_cache, b"abc", basic_meta)
+        self.assertRaises(
+            IngestFileSizeException,
+            self.ingestor.add_data_to_index_cache,
+            b"abc",
+            basic_meta,
+        )
         self.ingestor._can_file_size_can_be_added(40)
         self.ingestor.add_data_to_index_cache(b"abcdefghijklmnopqrstuvwxyz", basic_meta)
         self.assertRaises(IngestFileSizeException, self.ingestor._can_file_size_can_be_added, 500)
@@ -133,7 +142,10 @@ class TestBigYaraIngest(test_utils.BaseIngestorIndexerTest):
         dirs[-1].parent.joinpath("string-folder").touch()
         # re-read the directory with the new file added.
         dirs = list(self.indexer.get_folders_ready_for_indexing())
-        self.assertEqual([d.name for d in dirs], one_to_two_hund + newer_one_to_ten + ["string-folder"])
+        self.assertEqual(
+            [d.name for d in dirs],
+            one_to_two_hund + newer_one_to_ten + ["string-folder"],
+        )
 
     def test_copy_cache_directory(self):
         one_to_ten = list(str(i) for i in range(1, 10))
@@ -143,10 +155,14 @@ class TestBigYaraIngest(test_utils.BaseIngestorIndexerTest):
             )
             # Check contents of cache directory is equal to contents of periodic directory.
             dirs = list(self.indexer.get_folders_ready_for_indexing())
-            self.assertEqual([d.name for d in dirs], [self.retrohunt_settings.periodic_index_folder_name])
+            self.assertEqual(
+                [d.name for d in dirs],
+                [self.retrohunt_settings.periodic_index_folder_name],
+            )
             self.assertEqual(len(dirs), 1)
             self.assertCountEqual(
-                [x.name for x in dirs[0].iterdir()], [y.name for y in self.ingestor.cache_directory.iterdir()]
+                [x.name for x in dirs[0].iterdir()],
+                [y.name for y in self.ingestor.cache_directory.iterdir()],
             )
 
             # Attempt to create multiple sub directories which should fail because the periodic index already exists.
@@ -155,7 +171,10 @@ class TestBigYaraIngest(test_utils.BaseIngestorIndexerTest):
 
             # Verify the cache now holds more files than the periodic directory due to more files being added to cache
             # And the files failing to copy to the periodic because it already exists
-            self.assertGreater(len(list(self.ingestor.cache_directory.iterdir())), len(list(dirs[0].iterdir())))
+            self.assertGreater(
+                len(list(self.ingestor.cache_directory.iterdir())),
+                len(list(dirs[0].iterdir())),
+            )
 
             # Remove the old periodic index file
             target_dir = self.ingestor.get_path_of_next_ingest_ready_dir()
@@ -164,4 +183,7 @@ class TestBigYaraIngest(test_utils.BaseIngestorIndexerTest):
 
             # Should be equal now because we re-copied.
             self.ingestor.copy_cache_for_indexer(self.retrohunt_settings.periodic_index_folder_name)
-            self.assertEqual(len(list(self.ingestor.cache_directory.iterdir())), len(list(dirs[0].iterdir())))
+            self.assertEqual(
+                len(list(self.ingestor.cache_directory.iterdir())),
+                len(list(dirs[0].iterdir())),
+            )

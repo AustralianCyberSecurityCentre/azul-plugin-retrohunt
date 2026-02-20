@@ -37,6 +37,7 @@ dependencies = [
     "prometheus-client>=0.24.1",
     "pydantic>2",
     "python-multipart>=0.0.22",
+    "redis>=5.0.0",
     "semantic-version>=2.10.0",
     "starlette-exporter>=0.23.0",
     "uvicorn>=0.40.0",
@@ -47,10 +48,10 @@ dependencies = [
 [project.scripts]
 azul-plugin-retroingestor = "azul_plugin_retrohunt.ingestor:main"
 azul-plugin-retroindexer = "azul_plugin_retrohunt.indexer:main"
-azul-plugin-retroserver = "azul_plugin_retrohunt.server:main"
 azul-plugin-retroworker = "azul_plugin_retrohunt.worker:main"
 
-[project.entry-points."my_plugin_group"]
+# [project.entry-points."my_plugin_group"]
+[project.entry-points."azul_restapi.plugin"]
 retrohunt = "azul_plugin_retrohunt.api:router"
 
 [project.urls]
@@ -85,6 +86,7 @@ dev = [
     "respx>=0.22.0",
     "tox>=4.34.1",
     "urllib3>=2.6.3",
+    "fakeredis>=2.23.0",
 ]
 
 [tool.ruff]

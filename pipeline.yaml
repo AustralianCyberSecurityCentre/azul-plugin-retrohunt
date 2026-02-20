@@ -30,7 +30,8 @@ extends:
   template: v2/stages/test-build-publish.yaml@PipelineTemplates
   parameters:
     is_python: true
+    is_python_package: false
     is_dev: true
-    is_docker: true
     is_deploy: true
     deploy_subdir: azul-dev
+    python_integration: true

@@ -391,6 +391,17 @@ tox -e style
 tox -e test
 ```
 
+## Integration tests
+
+To run the integration tests locally use the script:
+
+```bash
+# start the redis server
+docker compose up
+# run the tests
+./tests/run_integration_tests.sh
+```
+
 ## Dependency management
 
 Dependencies are managed in the requirements.txt, requirements_test.txt and debian.txt file.

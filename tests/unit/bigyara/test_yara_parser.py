@@ -3,12 +3,7 @@ import tempfile
 import unittest
 
 from azul_plugin_retrohunt.bigyara.env import executables
-from azul_plugin_retrohunt.bigyara.yara_parse import (
-    YaraRule,
-    YaraString,
-    _get_atoms_from_regex,
-    _parse_yara_with_exe,
-)
+from azul_plugin_retrohunt.bigyara.yara_parse import YaraRule, YaraString, _get_atoms_from_regex, _parse_yara_with_exe
 
 TEST_RULE_1 = """
 rule weak_test {

@@ -25,7 +25,9 @@ from azul_plugin_retrohunt.settings import BGI_DIR_NAME, STATE_DIR_NAME
 from .env import executables
 
 prom_number_of_bgi_fails = Counter(
-    "retrohunt_index_fails", "Number of index failures of different types (split,delete)", ["index", "type"]
+    "retrohunt_index_fails",
+    "Number of index failures of different types (split,delete)",
+    ["index", "type"],
 )
 # FUTURE: investigate whether there is an alternative to biggrep that allows index merging.
 # FUTURE: if searching has a command line interface, then indexing should have one too.
@@ -143,7 +145,12 @@ class BigYaraIndexer(BaseYaraProcessor):
             else:
                 logger.warning("Ignoring file {file_path} because it has metadata but no corresponding data file.")
 
-    def generate_index(self, folder_path: pathlib.Path, bgi_name_override: str = None, timeout_minutes: int = 60):
+    def generate_index(
+        self,
+        folder_path: pathlib.Path,
+        bgi_name_override: str = None,
+        timeout_minutes: int = 60,
+    ):
         """Generate a bgi index for the added files."""
         self._cleanup_old_bgis()
         if not folder_path.exists():
