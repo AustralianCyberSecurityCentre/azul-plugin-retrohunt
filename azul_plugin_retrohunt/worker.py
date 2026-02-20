@@ -50,8 +50,6 @@ log_root.addHandler(log_root_handler)
 
 MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max of 500kB of logs
 
-redis = get_redis()
-
 
 def capture_logs(level: int = logging.INFO) -> StringIO:
     """Return a StringIO that will capture relevant logs."""
@@ -82,6 +80,7 @@ def capture_logs(level: int = logging.INFO) -> StringIO:
 
 def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEvent:
     """Update with latest job status and publish."""
+    redis = get_redis()
     job.timestamp = pendulum.now()
     if logs:
         logs.seek(0, os.SEEK_END)
@@ -250,6 +249,7 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 
     The heartbeat stops when stop_event is set.
     """
+    redis = get_redis()
     lock_key = f"retrohunt:{job_id}:lock"
     refresh_interval = ttl_seconds // 3  # refresh every 1/3 of TTL
 
@@ -274,6 +274,7 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 
 def main():
     """Start the retrohunt worker."""
+    redis = get_redis()
     global dp
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     logs: StringIO = capture_logs(logging.INFO)

@@ -24,11 +24,16 @@ class RedisProvider:
             host = redis_cfg.endpoint
             port = redis_cfg.port
         else:
-            # Production case: endpoint contains "host:port"
-            if ":" not in redis_cfg.endpoint:
-                raise ValueError("REDIS_PORT is not set and endpoint does not contain a port (expected host:port)")
-            host, port_str = redis_cfg.endpoint.split(":", 1)
-            port = int(port_str)
+            if ":" in redis_cfg.endpoint:
+                # Production-style "host:port"
+                host, port_str = redis_cfg.endpoint.split(":", 1)
+                port = int(port_str)
+            else:
+                # Production or integration CI must provide a port
+                raise ValueError(
+                    "REDIS_PORT is required unless running in test mode. "
+                    "Endpoint must be host:port or REDIS_PORT must be set."
+                )
 
         # Determine DB (env var overrides constructor)
         selected_db = redis_cfg.db if redis_cfg.db is not None else db
@@ -91,5 +96,6 @@ def get_redis():
     global _redis_instance
     if _redis_instance is None:
         settings = RetrohuntSettings()
+        # db = 15. db 0 to 3 is used by dispatcher.
         _redis_instance = RedisProvider(db=15, settings=settings)
     return _redis_instance

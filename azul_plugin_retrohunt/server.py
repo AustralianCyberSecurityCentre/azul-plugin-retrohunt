@@ -26,7 +26,7 @@ from azul_plugin_retrohunt.models import (
     RetrohuntsResponse,
     RetrohuntSubmission,
 )
-from azul_plugin_retrohunt.retrohunt import RetrohuntService
+from azul_plugin_retrohunt.retrohunt import get_retrohunt_service
 from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
@@ -66,8 +66,6 @@ END_STATES: list[str] = [
 dp: dispatcher.DispatcherAPI = None
 settings = RetrohuntSettings()
 
-rs = RetrohuntService()
-
 
 @app.get(
     "/api/v1/hunts/{hunt_id}",
@@ -76,6 +74,7 @@ rs = RetrohuntService()
 )
 def hunt_results_v1(hunt_id: str):
     """Get details of requested retrohunt."""
+    rs = get_retrohunt_service()
     return rs.get_hunts(hunt_id)
 
 
@@ -85,6 +84,7 @@ def hunt_results_v1(hunt_id: str):
 )
 def list_hunts_v1(limit: int = 100):
     """Get the latest list of retrohunts by submission time."""
+    rs = get_retrohunt_service()
     return rs.list_hunts(limit)
 
 
@@ -96,6 +96,7 @@ def submit_hunt_v1(
     submission: RetrohuntSubmission,
 ):
     """Submit a new retrohunt to process."""
+    rs = get_retrohunt_service()
     return rs.submit_hunt(submission)
 
 
@@ -115,6 +116,7 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
         submitter=SERVICE_NAME,
         security=None,
     )
+    rs = get_retrohunt_service()
     huntid = rs.submit_hunt(submission)
 
     return RedirectResponse(url=f"/hunts/{huntid}", status_code=302)  # POST -> GET
@@ -124,6 +126,7 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 @app.get("/hunts", include_in_schema=False)
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     """List the latest retrohunts by submission time."""
+    rs = get_retrohunt_service()
     ordered_hunts = rs.list_hunts(limit)
     return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
 
@@ -131,6 +134,7 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
 @app.get("/hunts/{id}", include_in_schema=False)
 async def hunt_results(request: Request) -> HTMLResponse:
     """Get the details/results of the specified retrohunt."""
+    rs = get_retrohunt_service()
     hunt = rs.get_hunts(request.path_params["id"])
     if hunt is None:
         raise HTTPException(status_code=404, detail="Hunt not found")
