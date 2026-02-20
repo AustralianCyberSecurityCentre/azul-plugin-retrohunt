@@ -1,10 +1,10 @@
 """Redis provider utilities for managing connections, locks, and simple Redis operations."""
 
-import os
-
 import redis
 from redis.exceptions import RedisError
+
 from .settings import RetrohuntSettings
+
 
 class RedisProvider:
     """Redis provider class."""
@@ -12,33 +12,40 @@ class RedisProvider:
     REDIS_EXPIRATION = 30
 
     def __init__(self, db: int, settings: RetrohuntSettings | None = None):
-        """Initialize the Redis client using environment variables."""
         settings = settings or RetrohuntSettings()
         redis_cfg = settings.redis
 
-        # Validate required fields
         if not redis_cfg.endpoint:
             raise ValueError("REDIS_HOST is required but not set")
-        if not redis_cfg.port:
-            raise ValueError("REDIS_PORT is required but not set")
-        
+
+        # Determine host + port
+        if redis_cfg.port is not None:
+            # Normal case: port provided explicitly (integration tests)
+            host = redis_cfg.endpoint
+            port = redis_cfg.port
+        else:
+            # Production case: endpoint contains "host:port"
+            if ":" not in redis_cfg.endpoint:
+                raise ValueError("REDIS_PORT is not set and endpoint does not contain a port (expected host:port)")
+            host, port_str = redis_cfg.endpoint.split(":", 1)
+            port = int(port_str)
+
+        # Determine DB (env var overrides constructor)
         selected_db = redis_cfg.db if redis_cfg.db is not None else db
 
         try:
             self.client = redis.Redis(
-                host=redis_cfg.endpoint,
-                port=int(redis_cfg.port),
+                host=host,
+                port=port,
                 username=redis_cfg.username,
                 password=redis_cfg.password,
                 db=selected_db,
                 decode_responses=True,
             )
-
-            # Optional: test the connection immediately
             self.client.ping()
 
         except RedisError as e:
-            raise RuntimeError(f"Failed to connect to Redis at {redis_cfg.endpoint}:{redis_cfg.port}") from e
+            raise RuntimeError(f"Failed to connect to Redis at {host}:{port}") from e
 
     def get(self, key):
         """Retrieve a value from Redis by key."""
