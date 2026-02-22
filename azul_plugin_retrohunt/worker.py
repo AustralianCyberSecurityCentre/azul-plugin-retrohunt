@@ -99,7 +99,6 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
     redis.set(job.entity.id, json.dumps(job.model_dump()), ex=redis.REDIS_EXPIRATION)
-    # dp.submit_events(events=[job], model=azm.ModelType.Retrohunt)
     return job
 
 
