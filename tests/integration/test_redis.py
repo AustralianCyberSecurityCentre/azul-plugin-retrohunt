@@ -2,11 +2,13 @@ import json
 import pytest
 import unittest
 
+
 @pytest.mark.usefixtures("monkeypatch")
 class TestRedis(unittest.TestCase):
     def setUp(self):
         """setup function for integration tests. We do this to allow running integration tests locally."""
         import pytest
+
         mp = pytest.MonkeyPatch()
         mp.setenv("REDIS_HOST", "localhost")
         mp.setenv("REDIS_PORT", "6379")
