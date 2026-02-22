@@ -1,19 +1,40 @@
 import json
+import pytest
 import unittest
 
-from azul_plugin_retrohunt.models import RetrohuntSubmission
-from azul_plugin_retrohunt.redis import get_redis
-from azul_plugin_retrohunt.retrohunt import RetrohuntService
-
-
+@pytest.mark.usefixtures("monkeypatch")
 class TestRedis(unittest.TestCase):
+    def setUp(self):
+        """setup function for integration tests. We do this to allow running integration tests locally."""
+        import pytest
+        mp = pytest.MonkeyPatch()
+        mp.setenv("REDIS_HOST", "localhost")
+        mp.setenv("REDIS_PORT", "6379")
+        mp.setenv("REDIS_USERNAME", "")
+        mp.setenv("REDIS_PASSWORD", "")
+        mp.setenv("REDIS_DB", "0")
+        self._mp = mp
+
+        # Import AFTER env vars are set
+        from azul_plugin_retrohunt.models import RetrohuntSubmission
+        from azul_plugin_retrohunt.redis import get_redis
+        from azul_plugin_retrohunt.retrohunt import RetrohuntService
+
+        self.RetrohuntSubmission = RetrohuntSubmission
+        self.get_redis = get_redis
+        self.RetrohuntService = RetrohuntService
+
+    def tearDown(self):
+        """tear down function for integration tests."""
+        self._mp.undo()
+
     def test_submit_hunt_creates_event_and_stream_entry(self):
         """Submit a hunt and stream entry."""
-        rs = RetrohuntService()
-        redis = get_redis()
+        rs = self.RetrohuntService()
+        redis = self.get_redis()
         redis.flush()
 
-        submission = RetrohuntSubmission(
+        submission = self.RetrohuntSubmission(
             search_type="wide",
             search="foo",
             submitter="tester",

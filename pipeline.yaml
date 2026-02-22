@@ -33,5 +33,6 @@ extends:
     is_python_package: false
     is_dev: true
     is_deploy: true
+    is_docker: true
     deploy_subdir: azul-dev
     python_integration: true
