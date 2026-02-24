@@ -148,57 +148,118 @@ class RetrohuntService:
         """Used in cronjob to remove redis jobs and entries older than 30 days."""
         redis = self.redis
         now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=30)
 
-        self._cleanup_hunts(redis, cutoff)
-        self._cleanup_stream(redis, cutoff)
+        cutoff_30d = now - timedelta(days=30)
+        cutoff_3d = now - timedelta(days=3)
 
-    def _cleanup_hunts(self, redis, cutoff):
-        """Remove RetrohuntEntity entries older than 30 days."""
+        self._cleanup_hunts(redis, cutoff_30d, cutoff_3d)
+        self._cleanup_stream(redis, cutoff_30d, cutoff_3d)
+
+    def _cleanup_hunts(self, redis, cutoff_30d, cutoff_3d):
+        """Remove RetrohuntEntity entries older than 30 days, or older than 3 days if not completed."""
         cursor = 0
         pattern = "retrohunt_*"
 
         while True:
             cursor, keys = redis.client.scan(cursor=cursor, match=pattern, count=100)
+
             for key in keys:
-                raw = redis.client.get(key)
+                # Normalize all key forms
+                key_str = key.decode() if isinstance(key, bytes) else key
+                key_bytes = key_str.encode()
+
+                # Try all forms when reading
+                raw = redis.client.get(key) or redis.client.get(key_str) or redis.client.get(key_bytes)
+
                 if not raw:
+                    redis.client.delete(key)
+                    redis.client.delete(key_str)
+                    redis.client.delete(key_bytes)
                     continue
 
                 try:
                     entity = json.loads(raw)
                     ts_str = entity.get("submitted_time")
+                    status = entity.get("status")
                     if not ts_str:
                         redis.client.delete(key)
+                        redis.client.delete(key_str)
+                        redis.client.delete(key_bytes)
                         continue
 
                     submitted = datetime.fromisoformat(ts_str)
                 except Exception:
-                    # malformed → delete
                     redis.client.delete(key)
+                    redis.client.delete(key_str)
+                    redis.client.delete(key_bytes)
                     continue
 
-                if submitted < cutoff:
+                # Rule 1: older than 30 days
+                if submitted < cutoff_30d:
                     redis.client.delete(key)
+                    redis.client.delete(key_str)
+                    redis.client.delete(key_bytes)
+                    continue
+
+                # Rule 2: stale >3 days and not completed
+                if submitted < cutoff_3d and status != "completed":
+                    redis.client.delete(key)
+                    redis.client.delete(key_str)
+                    redis.client.delete(key_bytes)
+                    continue
 
             if cursor == 0:
                 break
 
-    def _cleanup_stream(self, redis, cutoff):
-        """Remove stream entries older than 30 days."""
+    def _cleanup_stream(self, redis, cutoff_30d, cutoff_3d):
+        """Remove stream entries older than 30 days or whose hunts are stale or missing."""
         stream = "retrohunt-jobs"
 
-        # XRANGE returns entries sorted by ID
         entries = redis.client.xrange(stream, min="-", max="+")
 
-        for entry_id, _ in entries:
-            # Stream ID format: "<ms>-<seq>"
+        for entry_id, fields in entries:
             entry_id = entry_id.decode()
+
+            # Parse timestamp from stream ID "<ms>-<seq>"
             ms_str, _ = entry_id.split("-")
             ts = datetime.fromtimestamp(int(ms_str) / 1000, tz=timezone.utc)
 
-            if ts < cutoff:
+            # Rule 1: delete entries older than 30 days
+            if ts < cutoff_30d:
                 redis.client.xdel(stream, entry_id)
+                continue
+
+            # Normalize keys + values (fakeredis uses bytes)
+            fields = {
+                (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+                for k, v in fields.items()
+            }
+
+            hunt_id = fields.get("id")
+            if not hunt_id:
+                redis.client.xdel(stream, entry_id)
+                continue
+
+            # --- CRITICAL FIX: check both string and bytes keys ---
+            raw = redis.client.get(hunt_id) or redis.client.get(hunt_id.encode())
+
+            # Rule 3: hunt entity was deleted → delete stream entry
+            if not raw:
+                redis.client.xdel(stream, entry_id)
+                continue
+
+            try:
+                entity = json.loads(raw)
+                status = entity.get("status")
+                submitted = datetime.fromisoformat(entity.get("submitted_time"))
+            except Exception:
+                redis.client.xdel(stream, entry_id)
+                continue
+
+            # Rule 2: stale jobs older than 3 days and not completed
+            if submitted < cutoff_3d and status != "completed":
+                redis.client.xdel(stream, entry_id)
+                continue
 
 
 _retrohunt_service = None

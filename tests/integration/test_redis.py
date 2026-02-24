@@ -28,8 +28,8 @@ class TestRedis(unittest.TestCase):
         self.RetrohuntService = RetrohuntService
 
     def tearDown(self):
-        """tear down function for integration tests."""
-        self._mp.undo()
+        if hasattr(self, "_mp"):
+            self._mp.undo()
 
     def test_submit_hunt_creates_event_and_stream_entry(self):
         """Submit a hunt and stream entry."""
