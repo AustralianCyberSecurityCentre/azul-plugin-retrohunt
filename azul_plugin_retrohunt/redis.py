@@ -19,7 +19,7 @@ class RedisProvider:
 
         # Determine host + port
         if redis_cfg.port is not None:
-            # port provided explicitly (integration tests)
+            #port provided explicitly (integration tests)
             host = redis_cfg.endpoint
             port = redis_cfg.port
         else:
@@ -35,7 +35,6 @@ class RedisProvider:
 
         # Determine DB (env var overrides constructor)
         selected_db = redis_cfg.db if redis_cfg.db is not None else db
-        print("Starting client")
         try:
             self.client = redis.Redis(
                 host=host,
@@ -49,9 +48,7 @@ class RedisProvider:
 
         except Exception as e:
             raise RuntimeError(f"Failed to connect to Redis at {host}:{port}") from e
-        if self.client is not None:
-            print("Client started ", self.client)
-
+       
     def get(self, key):
         """Retrieve a value from Redis by key."""
         return self.client.get(key)
@@ -94,10 +91,8 @@ _redis_instance = None
 def get_redis():
     """Return a singleton RedisProvider instance."""
     global _redis_instance
-    print("Get redis called.")
     if _redis_instance is None:
         settings = RetrohuntSettings()
-        print("Settings ", settings)
         # db = 15. db 0 to 3 is used by dispatcher.
         _redis_instance = RedisProvider(db=15, settings=settings)
     return _redis_instance
