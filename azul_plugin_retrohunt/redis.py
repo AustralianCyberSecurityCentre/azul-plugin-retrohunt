@@ -19,7 +19,7 @@ class RedisProvider:
 
         # Determine host + port
         if redis_cfg.port is not None:
-            #port provided explicitly (integration tests)
+            # port provided explicitly (integration tests)
             host = redis_cfg.endpoint
             port = redis_cfg.port
         else:
