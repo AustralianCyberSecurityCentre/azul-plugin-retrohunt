@@ -48,7 +48,7 @@ class RedisProvider:
 
         except Exception as e:
             raise RuntimeError(f"Failed to connect to Redis at {host}:{port}") from e
-       
+
     def get(self, key):
         """Retrieve a value from Redis by key."""
         return self.client.get(key)

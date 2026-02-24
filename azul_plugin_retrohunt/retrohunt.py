@@ -15,6 +15,7 @@ from azul_plugin_retrohunt.models import SERVICE_NAME, SERVICE_VERSION, Retrohun
 logger = logging.getLogger("retrohunt.service")
 redis = None
 
+
 class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
@@ -24,6 +25,7 @@ class RetrohuntService:
         global redis
         if redis is None:
             from .redis import get_redis
+
             redis = get_redis()
         return redis
 
