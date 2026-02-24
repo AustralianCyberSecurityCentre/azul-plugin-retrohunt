@@ -69,7 +69,6 @@ ARG UV_INSECURE_HOST
 ARG PIP_EXTRA_INDEX_URL
 ARG UID=21000
 ARG GID=21000
-
 # Easiest way to install with uv managing packages.
 USER root
 COPY ./pyproject.toml ./pyproject.toml
@@ -79,7 +78,7 @@ USER azul
 ENV PATH="/home/azul/.local/bin:$PATH"
 COPY --chown=azul ./tests /tmp/tests
 RUN --mount=type=secret,uid=$UID,gid=$GID,id=testSecret export $(cat /run/secrets/testSecret) && \
-    pytest -o cache_dir=/tmp/cache --tb=short /tmp/tests/unit
+    pytest -o cache_dir=/tmp/cache --tb=short /tmp/tests
 # generate empty file to copy to `release` stage so this stage is not skipped due to optimisations.
 RUN touch /tmp/testingpassed
 
