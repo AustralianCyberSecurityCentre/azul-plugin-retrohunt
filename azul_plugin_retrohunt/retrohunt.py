@@ -13,23 +13,19 @@ from fastapi import HTTPException
 from azul_plugin_retrohunt.models import SERVICE_NAME, SERVICE_VERSION, RetrohuntSubmission
 
 logger = logging.getLogger("retrohunt.service")
-
+redis = None
 
 class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
-    def __init__(self):
-        self._redis = None
-
     @property
     def redis(self):
         """Lazy loader so we don't create the client before env variables are injected in local testing."""
-        if self._redis is None:
+        global redis
+        if redis is None:
             from .redis import get_redis
-
-            self._redis = get_redis()
-
-        return self._redis
+            redis = get_redis()
+        return redis
 
     def get_hunts(self, hunt_id: str):
         """Get details of requested retrohunt."""
