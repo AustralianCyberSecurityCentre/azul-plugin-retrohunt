@@ -49,6 +49,7 @@ dependencies = [
 azul-plugin-retroingestor = "azul_plugin_retrohunt.ingestor:main"
 azul-plugin-retroindexer = "azul_plugin_retrohunt.indexer:main"
 azul-plugin-retroworker = "azul_plugin_retrohunt.worker:main"
+azul-plugin-retroserver = "azul_plugin_retrohunt.__main__:main"
 
 # [project.entry-points."my_plugin_group"]
 [project.entry-points."azul_restapi.plugin"]

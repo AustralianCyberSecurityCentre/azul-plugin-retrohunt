@@ -4,27 +4,32 @@ import json
 import logging
 import uuid
 from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 
 import pendulum
 from azul_bedrock import models_network as azm
 from fastapi import HTTPException
 
 from azul_plugin_retrohunt.models import SERVICE_NAME, SERVICE_VERSION, RetrohuntSubmission
-from azul_plugin_retrohunt.redis import get_redis
-from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 logger = logging.getLogger("retrohunt.service")
-
-settings = RetrohuntSettings()
 
 
 class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
     def __init__(self):
-        # Retrohunt uses DB 15 (DBs 0–3 are used by dispatcher.)
-        # Work your way down if you require more redis db's for retrohunt. ie. db=14
-        self.redis = get_redis()
+        self._redis = None
+
+    @property
+    def redis(self):
+        """Lazy loader so we don't create the client before env variables are injected in local testing."""
+        if self._redis is None:
+            from .redis import get_redis
+
+            self._redis = get_redis()
+
+        return self._redis
 
     def get_hunts(self, hunt_id: str):
         """Get details of requested retrohunt."""
@@ -129,7 +134,7 @@ class RetrohuntService:
 
         event_dict = event.model_dump()
 
-        self.redis.set(retrohunt_id, json.dumps(event_dict), ex=self.redis.REDIS_EXPIRATION)
+        self.redis.set(retrohunt_id, json.dumps(event_dict))
         self.redis.xadd("retrohunt-jobs", {"hunt_id": retrohunt_id, "action": "Submitted"})
 
         if retrohunt_id is None:
@@ -138,6 +143,62 @@ class RetrohuntService:
                 detail="There was an issue submitting the hunt.",
             )
         return retrohunt_id
+
+    def run_periodic_tasks(self):
+        """Used in cronjob to remove redis jobs and entries older than 30 days."""
+        redis = self.redis
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=30)
+
+        self._cleanup_hunts(redis, cutoff)
+        self._cleanup_stream(redis, cutoff)
+
+    def _cleanup_hunts(self, redis, cutoff):
+        """Remove RetrohuntEntity entries older than 30 days."""
+        cursor = 0
+        pattern = "retrohunt_*"
+
+        while True:
+            cursor, keys = redis.client.scan(cursor=cursor, match=pattern, count=100)
+            for key in keys:
+                raw = redis.client.get(key)
+                if not raw:
+                    continue
+
+                try:
+                    entity = json.loads(raw)
+                    ts_str = entity.get("submitted_time")
+                    if not ts_str:
+                        redis.client.delete(key)
+                        continue
+
+                    submitted = datetime.fromisoformat(ts_str)
+                except Exception:
+                    # malformed → delete
+                    redis.client.delete(key)
+                    continue
+
+                if submitted < cutoff:
+                    redis.client.delete(key)
+
+            if cursor == 0:
+                break
+
+    def _cleanup_stream(self, redis, cutoff):
+        """Remove stream entries older than 30 days."""
+        stream = "retrohunt-jobs"
+
+        # XRANGE returns entries sorted by ID
+        entries = redis.client.xrange(stream, min="-", max="+")
+
+        for entry_id, _ in entries:
+            # Stream ID format: "<ms>-<seq>"
+            entry_id = entry_id.decode()
+            ms_str, _ = entry_id.split("-")
+            ts = datetime.fromtimestamp(int(ms_str) / 1000, tz=timezone.utc)
+
+            if ts < cutoff:
+                redis.client.xdel(stream, entry_id)
 
 
 _retrohunt_service = None

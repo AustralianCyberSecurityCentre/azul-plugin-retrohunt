@@ -160,7 +160,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
 
         import azul_plugin_retrohunt.worker as worker_module
 
-        # --- Spy on hunt() to assert lock is held at the right moment ---
+        # Spy on hunt() to assert lock is held at the right moment
         def hunt_side_effect(*args, **kwargs):
             # Lock MUST exist when hunt() is called
             assert self.fake_redis.get(f"retrohunt:{job_id}:lock") is not None
@@ -250,7 +250,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         into Redis.
         """
 
-        # --- Test data ---
+        # Test data
         content1 = (
             b"When installing a PowerShell Preview release for Linux via a Package Repository, the package name"
             b" changes from powershell to powershell-preview"
@@ -277,30 +277,30 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             periodic_index_frequency_min=periodic_freq,
         )
 
-        # --- Replace the real indexer with a MagicMock that supports the expected API ---
+        # Replace the real indexer with a MagicMock that supports the expected API
         self.indexer = mock.MagicMock()
         self.indexer.add_data_to_index_cache = mock.MagicMock()
         self.indexer.generate_index = mock.MagicMock()
 
-        # --- ensure the MagicMock ingestion method actually writes data ---
+        # ensure the MagicMock ingestion method actually writes data
         def real_add(data, meta):
             self.indexer.add_data_to_index_cache(self.ingestor.cache_directory, data, meta)
 
         self.ingestor.add_data_to_index_cache = real_add
 
-        # --- Build index using the TEST indexer ---
+        # Build index using the TEST indexer
         self.ingestor.add_data_to_index_cache(content1, FileMetadata(stream_label="content", stream_source="samples"))
         self.ingestor.add_data_to_index_cache(content2, FileMetadata(stream_label="content", stream_source="samples"))
         self.ingestor.add_data_to_index_cache(content3, FileMetadata(stream_label="content", stream_source="samples"))
 
         self.indexer.generate_index(self.ingestor.cache_directory)
 
-        # --- Create a fake .bgi index file ---
+        # Create a fake .bgi index file
         fake_index = self.ingestor.cache_directory / "test.bgi"
         with open(fake_index, "wb") as f:
             f.write(b"FAKEINDEX")
 
-        # --- Patch dispatcher get_binary so the worker can fetch file content ---
+        # Patch dispatcher get_binary so the worker can fetch file content
         from hashlib import sha256
         from types import SimpleNamespace
 
@@ -319,7 +319,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         def fake_get_binary(source=None, label=None, sha256=None, **kwargs):
             return SimpleNamespace(content=test_content[sha256])
 
-        # --- Mock BigYara search to reproduce expected results ---
+        # Mock BigYara search to reproduce expected results
         def fake_search(query, query_type, index_dirs, get_data, update_job, recursive):
             # Simulate parsing rules
             update_job(SearchPhaseEnum.ATOM_PARSE, 1, 1, ("r", [sha1]))
@@ -356,7 +356,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                         job = copy.deepcopy(SUBMISSION)
                         index_dirs = [self.ingestor.cache_directory]
 
-                        # --- Run the hunt ---
+                        # Run the hunt
                         r_worker.hunt(index_dirs, job, None)
 
                         update_mock.assert_called()
@@ -369,7 +369,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                             f"Expected job stored in redis under key {redis_key}",
                         )
 
-                        # --- Validate final job state ---
+                        # Validate final job state
                         stored_job = azm.RetrohuntEvent.model_validate(json.loads(stored_raw))
                         entity = stored_job.entity
 

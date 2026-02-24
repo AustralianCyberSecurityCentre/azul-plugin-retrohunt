@@ -16,7 +16,7 @@ from azul_bedrock import models_network as azm
 from prometheus_client import Counter, Summary, start_http_server
 
 from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
-from azul_plugin_retrohunt.redis import get_redis
+from azul_plugin_retrohunt.retrohunt import RetrohuntService
 from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
 
 prom_jobs_run = Counter(
@@ -80,7 +80,7 @@ def capture_logs(level: int = logging.INFO) -> StringIO:
 
 def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEvent:
     """Update with latest job status and publish."""
-    redis = get_redis()
+    rs = RetrohuntService()
     job.timestamp = pendulum.now()
     if logs:
         logs.seek(0, os.SEEK_END)
@@ -98,7 +98,7 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             # Jump to end again
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
-    redis.set(job.entity.id, json.dumps(job.model_dump()), ex=redis.REDIS_EXPIRATION)
+    rs.redis.set(job.entity.id, json.dumps(job.model_dump()))
     return job
 
 
@@ -248,20 +248,20 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 
     The heartbeat stops when stop_event is set.
     """
-    redis = get_redis()
+    rs = RetrohuntService()
     lock_key = f"retrohunt:{job_id}:lock"
     refresh_interval = ttl_seconds // 3  # refresh every 1/3 of TTL
 
     def beat():
         while not stop_event.is_set():
             # Check if we still own the lock
-            current_owner = redis.client.get(lock_key)
+            current_owner = rs.redis.client.get(lock_key)
             if current_owner != worker_id:
                 # Lost the lock — stop heartbeating
                 return
 
             # Refresh TTL
-            redis.client.expire(lock_key, ttl_seconds)
+            rs.redis.client.expire(lock_key, ttl_seconds)
 
             # Sleep until next refresh or until stop_event is set
             stop_event.wait(refresh_interval)
@@ -273,7 +273,7 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 
 def main():
     """Start the retrohunt worker."""
-    redis = get_redis()
+    rs = RetrohuntService()
     global dp
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     logs: StringIO = capture_logs(logging.INFO)
@@ -295,7 +295,7 @@ def main():
     # poll for retrohunt submissions to work on
     while True:
         # Claim any stale jobs first
-        stream, messages = redis.xautoclaim(
+        stream, messages = rs.redis.xautoclaim(
             "retrohunt-jobs",
             "retrohunt-workers",
             worker_id,
@@ -308,7 +308,7 @@ def main():
             msg_id, payload = messages[0]
         else:
             # no stale jobs, read new ones
-            events = redis.xreadgroup(
+            events = rs.redis.xreadgroup(
                 groupname="retrohunt-workers",
                 consumername=worker_id,
                 streams={"retrohunt-jobs": ">"},
@@ -327,7 +327,7 @@ def main():
             msg_id, payload = msgs[0]
 
         # Load the full event from Redis
-        event_json = redis.get(payload["hunt_id"])
+        event_json = rs.redis.get(payload["hunt_id"])
         if not event_json:
             raise RuntimeError(f"Missing event data for hunt_id={payload['hunt_id']}")
 
@@ -337,7 +337,7 @@ def main():
         if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
             continue
 
-        if not acquire_lock(redis.client, job_id, worker_id, ttl_seconds=LOCK_TTL):
+        if not acquire_lock(rs.redis.client, job_id, worker_id, ttl_seconds=LOCK_TTL):
             # Another worker is running this hunt
             continue
 
@@ -354,10 +354,10 @@ def main():
             with prom_worker_runtime.time():
                 hunt(bgi_folders, job, logs)
             # Acknowledge the message
-            redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
+            rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
         finally:
             stop_event.set()
-            redis.client.delete(f"retrohunt:{job_id}:lock")
+            rs.redis.client.delete(f"retrohunt:{job_id}:lock")
 
 
 if __name__ == "__main__":
