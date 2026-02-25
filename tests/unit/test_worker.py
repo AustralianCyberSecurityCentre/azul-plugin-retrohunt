@@ -169,7 +169,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         hunt_mock.side_effect = hunt_side_effect
 
         with (
-            mock.patch("azul_plugin_retrohunt.worker.redis", wrapped_redis),
+            mock.patch("azul_plugin_retrohunt.retrohunt.redis", wrapped_redis),
             mock.patch("fakeredis.FakeRedis.xreadgroup", side_effect=fake_xreadgroup),
             mock.patch("fakeredis.FakeRedis.xautoclaim", side_effect=fake_xautoclaim),
             mock.patch.object(self.fake_redis, "xack", wraps=self.fake_redis.xack) as xack_mock,
@@ -235,7 +235,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             self.assertEqual(first_section_val_after, result.entity.logs[:first_section_len])
             return result
 
-        with mock.patch("azul_plugin_retrohunt.worker.redis", self.fake_redis):
+        with mock.patch("azul_plugin_retrohunt.retrohunt.redis", self.fake_redis):
             with mock.patch(
                 "azul_plugin_retrohunt.worker._update_progress",
                 wraps=update_progress_wrapper,
@@ -348,7 +348,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
 
         with mock.patch("azul_plugin_retrohunt.worker.dp.get_binary", side_effect=fake_get_binary):
             with mock.patch("azul_plugin_retrohunt.worker.search", side_effect=fake_search):
-                with mock.patch("azul_plugin_retrohunt.worker.redis", self.fake_redis):
+                with mock.patch("azul_plugin_retrohunt.retrohunt.redis", self.fake_redis):
                     with mock.patch(
                         "azul_plugin_retrohunt.worker._update_progress",
                         wraps=r_worker._update_progress,
