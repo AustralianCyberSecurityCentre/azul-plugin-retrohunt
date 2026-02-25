@@ -42,7 +42,7 @@ class TestIndex(unittest.IsolatedAsyncioTestCase):
         self.fake_redis = fakeredis.FakeRedis()
         self.fake_redis.REDIS_EXPIRATION = 30
         # Patch the module-level redis client in retrohunt.py
-        self.patcher = patch("azul_plugin_retrohunt.retrohunt.redis", self.fake_redis)
+        self.patcher = patch("azul_plugin_retrohunt.redis.get_redis", return_value=self.fake_redis)
         self.patcher.start()
 
     async def asyncTearDown(self):
