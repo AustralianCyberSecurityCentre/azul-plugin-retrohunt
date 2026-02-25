@@ -10,7 +10,6 @@ progress events as it executes. test.
 import copy
 import json
 import logging
-import sys
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import StringIO
@@ -28,17 +27,9 @@ fake_index = mock.MagicMock()
 fake_index.BigYaraIndexer = mock.MagicMock()
 fake_index.BigYaraIngestor = mock.MagicMock()
 
-# Inject both fake modules BEFORE importing test_utils
-sys.modules["azul_plugin_retrohunt.bigyara.env"] = fake_env
-sys.modules["azul_plugin_retrohunt.bigyara.index"] = fake_index
-# sys.modules["azul_plugin_retrohunt.bigyara.ingest"] = fake_index  # optional but safe
-
-import importlib
 
 import respx
-import urllib3
 from azul_bedrock import dispatcher
-from azul_bedrock import models_api as azapi
 from azul_bedrock import models_network as azm
 
 import azul_plugin_retrohunt
@@ -46,7 +37,6 @@ from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt import worker as r_worker
 from azul_plugin_retrohunt.ingestor import BigYaraIngestor
 from azul_plugin_retrohunt.models import FileMetadata
-from azul_plugin_retrohunt.worker import SearchPhaseEnum
 
 
 def str_to_datetime(datetime_string):
