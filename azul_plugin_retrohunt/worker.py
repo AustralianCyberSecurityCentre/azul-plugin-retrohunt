@@ -27,7 +27,7 @@ prom_jobs_run = Counter(
 prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a workers run.")
 
 PLUGIN_NAME = "RetroHunter"
-PLUGIN_VERSION = "2025.10.10"
+PLUGIN_VERSION = "2026.02.26"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 # hunt job lock is 6 hours
 LOCK_TTL = 21600000
