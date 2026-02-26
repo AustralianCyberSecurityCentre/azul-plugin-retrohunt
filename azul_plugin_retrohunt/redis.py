@@ -10,31 +10,15 @@ class RedisProvider:
 
     REDIS_EXPIRATION = 30
 
-    def __init__(self, db: int, settings: RetrohuntSettings | None = None):
+    def __init__(self, settings: RetrohuntSettings):
         settings = settings or RetrohuntSettings()
         redis_cfg = settings.redis
 
-        if not redis_cfg.endpoint:
-            raise ValueError("REDIS_HOST is required but not set")
+        host = redis_cfg.endpoint
+        port = redis_cfg.port
 
-        # Determine host + port
-        if redis_cfg.port is not None:
-            # port provided explicitly (integration tests)
-            host = redis_cfg.endpoint
-            port = redis_cfg.port
-        else:
-            if ":" in redis_cfg.endpoint:
-                host, port_str = redis_cfg.endpoint.split(":", 1)
-                port = int(port_str)
-            else:
-                # Production or integration CI must provide a port
-                raise ValueError(
-                    "REDIS_PORT is required unless running in test mode. "
-                    "Endpoint must be host:port or REDIS_PORT must be set."
-                )
+        selected_db = redis_cfg.db
 
-        # Determine DB (env var overrides constructor)
-        selected_db = redis_cfg.db if redis_cfg.db is not None else db
         try:
             self.client = redis.Redis(
                 host=host,
@@ -93,6 +77,5 @@ def get_redis():
     global _redis_instance
     if _redis_instance is None:
         settings = RetrohuntSettings()
-        # db = 15. db 0 to 3 is used by dispatcher.
-        _redis_instance = RedisProvider(db=15, settings=settings)
+        _redis_instance = RedisProvider(settings=settings)
     return _redis_instance

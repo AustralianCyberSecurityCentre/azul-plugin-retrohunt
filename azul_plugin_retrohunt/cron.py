@@ -1,7 +1,6 @@
-"""Scheduled maintenance tasks for Retrohunt.
+"""The module is an entrypoint for a periodic task expected to be run by a Kubernetes CronJob.
 
-This module contains the cronjob entrypoint and cleanup routines
-invoked by the Kubernetes CronJob.
+It cleans up old Redis events.
 """
 
 import logging

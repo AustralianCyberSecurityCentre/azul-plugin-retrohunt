@@ -4,6 +4,15 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import fakeredis
+import os
+
+# stop pydantic flagging an issue when no env vars exist.
+os.environ["REDIS_HOST"] = "localhost"
+os.environ["REDIS_PORT"] = "6379"
+os.environ["REDIS_USERNAME"] = "testuser"
+os.environ["REDIS_PASSWORD"] = "testpass"
+os.environ["REDIS_DB"] = "0"
+os.environ["REDIS_CLEANUP_DELAY"] = "30"
 
 from azul_plugin_retrohunt.retrohunt import RetrohuntService
 
@@ -73,7 +82,6 @@ class TestCronjobCleanup(unittest.TestCase):
         self.fake_redis.xadd("retrohunt-jobs", {"id": "retrohunt_5d_stale"}, id=f"{ms_5d}-1")
         self.fake_redis.xadd("retrohunt-jobs", {"id": "retrohunt_5d_completed"}, id=f"{ms_5d_completed}-2")
         self.fake_redis.xadd("retrohunt-jobs", {"id": "retrohunt_1d"}, id=f"{ms_1d}-0")
-        print("STREAM RAW:", self.fake_redis.xrange("retrohunt-jobs"))
 
         # Run cleanup logic
         self.service.run_periodic_tasks()

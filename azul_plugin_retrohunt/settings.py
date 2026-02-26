@@ -3,7 +3,7 @@
 import tempfile
 
 from annotated_types import Gt, Lt
-from pydantic import BaseModel, ByteSize, Field
+from pydantic import BaseModel, ByteSize, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Annotated
 
@@ -36,14 +36,25 @@ class RetrohuntSettings(BaseSettings):
     class RedisSettings(BaseSettings):
         """Nested configuration for RedisProvider."""
 
-        endpoint: str | None = Field(None, alias="REDIS_HOST")
-        port: int | None = Field(None, alias="REDIS_PORT")
-        username: str | None = Field(None, alias="REDIS_USERNAME")
-        password: str | None = Field(None, alias="REDIS_PASSWORD")
-        db: int | None = Field(None, alias="REDIS_DB")
+        endpoint: str = Field(..., alias="REDIS_HOST")
+        port: int = Field(..., alias="REDIS_PORT")
+
+        @model_validator(mode="after")
+        def split_host_and_port(self):
+            """Live uses endpoint:port. integration tests have host + port separated."""
+            if ":" in self.endpoint:
+                host, port_str = self.endpoint.split(":", 1)
+                self.endpoint = host
+                self.port = int(port_str)
+
+            return self
+
+        username: str = Field(..., alias="REDIS_USERNAME")
+        password: str = Field(..., alias="REDIS_PASSWORD")
+        db: int = Field(..., alias="REDIS_DB")
+        cleanup_delay: int = Field(..., alias="REDIS_CLEANUP_DELAY")
 
         model_config = SettingsConfigDict(
-            env_prefix="",  # no prefix needed
             extra="ignore",
             populate_by_name=True,
         )

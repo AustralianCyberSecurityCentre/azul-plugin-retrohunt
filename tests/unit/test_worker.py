@@ -31,11 +31,20 @@ fake_index.BigYaraIngestor = mock.MagicMock()
 import respx
 from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
+import os
+
+# stop pydantic flagging an issue when no env vars exist.
+os.environ["REDIS_HOST"] = "localhost"
+os.environ["REDIS_PORT"] = "6379"
+os.environ["REDIS_USERNAME"] = "testuser"
+os.environ["REDIS_PASSWORD"] = "testpass"
+os.environ["REDIS_DB"] = "0"
+os.environ["REDIS_CLEANUP_DELAY"] = "30"
 
 import azul_plugin_retrohunt
 from azul_plugin_retrohunt import test_utils
-from azul_plugin_retrohunt import worker as r_worker
 from azul_plugin_retrohunt.ingestor import BigYaraIngestor
+from azul_plugin_retrohunt import worker as r_worker
 from azul_plugin_retrohunt.models import FileMetadata
 
 
@@ -79,7 +88,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         self.server = fakeredis.FakeServer()
         self.fake_redis = fakeredis.FakeRedis(server=self.server, decode_responses=True)
         self.fake_redis.REDIS_EXPIRATION = 30
-
+        self.fake_redis.flushall()
         # Set dispatcher instance on workers.
         r_worker.dp = dispatcher.DispatcherAPI(
             events_url=self.dispatcher_url,
@@ -93,8 +102,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         return resp
 
     @respx.mock
-    @mock.patch("azul_plugin_retrohunt.worker.hunt")
-    def test_worker_processes_one_job(self, hunt_mock):
+    def test_worker_processes_one_job(self, respx_mock):
         class RedisWrapper:
             def __init__(self, redis):
                 self._redis = redis
@@ -114,7 +122,9 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         job_id = SUBMISSION.entity.id
 
         # Store full event
-        self.fake_redis.set(job_id, SUBMISSION.model_dump_json())
+        job_copy = copy.deepcopy(SUBMISSION)
+        job_copy.action = azm.RetrohuntEvent.RetrohuntAction.Submitted
+        self.fake_redis.set(job_id, job_copy.model_dump_json())
 
         # Add job marker
         msg_id = self.fake_redis.xadd(
@@ -148,15 +158,10 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             mkstream=True,
         )
 
-        import azul_plugin_retrohunt.worker as worker_module
-
-        # Spy on hunt() to assert lock is held at the right moment
+        # Side effect: assert lock exists when hunt is called
         def hunt_side_effect(*args, **kwargs):
-            # Lock MUST exist when hunt() is called
             assert self.fake_redis.get(f"retrohunt:{job_id}:lock") is not None
             return None
-
-        hunt_mock.side_effect = hunt_side_effect
 
         with (
             mock.patch("azul_plugin_retrohunt.redis.get_redis", return_value=wrapped_redis),
@@ -164,8 +169,14 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             mock.patch("fakeredis.FakeRedis.xautoclaim", side_effect=fake_xautoclaim),
             mock.patch.object(self.fake_redis, "xack", wraps=self.fake_redis.xack) as xack_mock,
         ):
-            with pytest.raises(StopTestException):
-                worker_module.main()
+            hunt_mock = mock.Mock(side_effect=hunt_side_effect)
+
+            r_worker.rs._redis = None
+
+            # Patch hunt inside main()
+            with mock.patch.dict(r_worker.main.__globals__, {"hunt": hunt_mock}):
+                with pytest.raises(StopTestException):
+                    r_worker.main()
 
         # hunt() must be called once
         hunt_mock.assert_called_once()
@@ -239,7 +250,6 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         """Submit a new retrohunt and ensure the worker writes progress/results
         into Redis.
         """
-
         # Test data
         content1 = (
             b"When installing a PowerShell Preview release for Linux via a Package Repository, the package name"

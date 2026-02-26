@@ -15,6 +15,16 @@ from unittest.mock import patch
 import fakeredis
 from azul_bedrock import dispatcher
 
+import os
+
+# stop pydantic flagging an issue when no env vars exist.
+os.environ["REDIS_HOST"] = "localhost"
+os.environ["REDIS_PORT"] = "6379"
+os.environ["REDIS_USERNAME"] = "testuser"
+os.environ["REDIS_PASSWORD"] = "testpass"
+os.environ["REDIS_DB"] = "0"
+os.environ["REDIS_CLEANUP_DELAY"] = "30"
+
 from azul_plugin_retrohunt import server
 
 server.dp = dispatcher.DispatcherAPI(
@@ -41,6 +51,7 @@ class TestIndex(unittest.IsolatedAsyncioTestCase):
         # Create a fake Redis instance for each test
         self.fake_redis = fakeredis.FakeRedis()
         self.fake_redis.REDIS_EXPIRATION = 30
+
         # Patch the module-level redis client in retrohunt.py
         self.patcher = patch("azul_plugin_retrohunt.redis.get_redis", return_value=self.fake_redis)
         self.patcher.start()

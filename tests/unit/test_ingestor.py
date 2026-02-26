@@ -12,6 +12,14 @@ from azul_runner import JobResult, State, coordinator
 from azul_runner import settings as azr_settings
 from azul_runner import test_template
 
+# stop pydantic flagging an issue when no env vars exist.
+os.environ["REDIS_HOST"] = "localhost"
+os.environ["REDIS_PORT"] = "6379"
+os.environ["REDIS_USERNAME"] = "testuser"
+os.environ["REDIS_PASSWORD"] = "testpass"
+os.environ["REDIS_DB"] = "0"
+os.environ["REDIS_CLEANUP_DELAY"] = "30"
+
 from azul_plugin_retrohunt.bigyara.base_processor import BaseYaraProcessor
 from azul_plugin_retrohunt.indexer import run_indexer
 from azul_plugin_retrohunt.ingestor import RetrohuntIngestor
@@ -24,7 +32,6 @@ class TestSettingsNoEnv:
         """Just don't want to see an exception for either of these cases."""
         os.environ["plugin_root_path"] = "dummy"
         settings_work = RetrohuntSettings()
-        print(settings_work)
 
         # default indexer settings.
         indexers_cfg = {
@@ -38,7 +45,6 @@ class TestSettingsNoEnv:
             dict_indexer_config[x] = indexers_cfg[x].model_dump()
         os.environ["plugin_indexers"] = json.dumps(dict_indexer_config)
         settings_work = RetrohuntSettings()
-        print(settings_work)
 
 
 @mock.patch("pendulum.now", lambda: pendulum.parse("2002-01-08T10:10:10Z"))

@@ -50,6 +50,8 @@ log_root.addHandler(log_root_handler)
 
 MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max of 500kB of logs
 
+rs = RetrohuntService()
+
 
 def capture_logs(level: int = logging.INFO) -> StringIO:
     """Return a StringIO that will capture relevant logs."""
@@ -80,7 +82,6 @@ def capture_logs(level: int = logging.INFO) -> StringIO:
 
 def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEvent:
     """Update with latest job status and publish."""
-    rs = RetrohuntService()
     job.timestamp = pendulum.now()
     if logs:
         logs.seek(0, os.SEEK_END)
@@ -248,7 +249,6 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 
     The heartbeat stops when stop_event is set.
     """
-    rs = RetrohuntService()
     lock_key = f"retrohunt:{job_id}:lock"
     refresh_interval = ttl_seconds // 3  # refresh every 1/3 of TTL
 
@@ -273,7 +273,6 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 
 def main():
     """Start the retrohunt worker."""
-    rs = RetrohuntService()
     global dp
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     logs: StringIO = capture_logs(logging.INFO)
@@ -341,7 +340,7 @@ def main():
             # Another worker is running this hunt
             continue
 
-        # 3. Start heartbeat
+        # Start heartbeat
         stop_event = threading.Event()
         start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL, stop_event=stop_event)
 

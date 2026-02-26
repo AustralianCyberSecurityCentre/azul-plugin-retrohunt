@@ -11,6 +11,7 @@ from azul_bedrock import models_network as azm
 from fastapi import HTTPException
 
 from azul_plugin_retrohunt.models import SERVICE_NAME, SERVICE_VERSION, RetrohuntSubmission
+from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 logger = logging.getLogger("retrohunt.service")
 
@@ -144,18 +145,18 @@ class RetrohuntService:
         return retrohunt_id
 
     def run_periodic_tasks(self):
-        """Used in cronjob to remove redis jobs and entries older than 30 days."""
+        """Used in cronjob to remove redis jobs and entries older than cleanup_delay days."""
         redis = self.redis
         now = datetime.now(timezone.utc)
-
-        cutoff_30d = now - timedelta(days=30)
+        cutoff_long = RetrohuntSettings().RedisSettings().cleanup_delay
+        cutoff_30d = now - timedelta(days=cutoff_long)
         cutoff_3d = now - timedelta(days=3)
 
         self._cleanup_hunts(redis, cutoff_30d, cutoff_3d)
         self._cleanup_stream(redis, cutoff_30d, cutoff_3d)
 
     def _cleanup_hunts(self, redis, cutoff_30d, cutoff_3d):
-        """Remove RetrohuntEntity entries older than 30 days, or older than 3 days if not completed."""
+        """Remove RetrohuntEntity entries older than cleanup_delay days, or older than 3 days if not completed."""
         cursor = 0
         pattern = "retrohunt_*"
 
@@ -193,14 +194,12 @@ class RetrohuntService:
                     redis.client.delete(key_bytes)
                     continue
 
-                # Rule 1: older than 30 days
                 if submitted < cutoff_30d:
                     redis.client.delete(key)
                     redis.client.delete(key_str)
                     redis.client.delete(key_bytes)
                     continue
 
-                # Rule 2: stale >3 days and not completed
                 if submitted < cutoff_3d and status != "completed":
                     redis.client.delete(key)
                     redis.client.delete(key_str)
@@ -211,7 +210,7 @@ class RetrohuntService:
                 break
 
     def _cleanup_stream(self, redis, cutoff_30d, cutoff_3d):
-        """Remove stream entries older than 30 days or whose hunts are stale or missing."""
+        """Remove stream entries older than cleanup_delay days or whose hunts are stale or missing."""
         stream = "retrohunt-jobs"
 
         entries = redis.client.xrange(stream, min="-", max="+")
@@ -223,7 +222,6 @@ class RetrohuntService:
             ms_str, _ = entry_id.split("-")
             ts = datetime.fromtimestamp(int(ms_str) / 1000, tz=timezone.utc)
 
-            # Rule 1: delete entries older than 30 days
             if ts < cutoff_30d:
                 redis.client.xdel(stream, entry_id)
                 continue
@@ -239,10 +237,8 @@ class RetrohuntService:
                 redis.client.xdel(stream, entry_id)
                 continue
 
-            # --- CRITICAL FIX: check both string and bytes keys ---
             raw = redis.client.get(hunt_id) or redis.client.get(hunt_id.encode())
 
-            # Rule 3: hunt entity was deleted → delete stream entry
             if not raw:
                 redis.client.xdel(stream, entry_id)
                 continue
@@ -255,18 +251,6 @@ class RetrohuntService:
                 redis.client.xdel(stream, entry_id)
                 continue
 
-            # Rule 2: stale jobs older than 3 days and not completed
             if submitted < cutoff_3d and status != "completed":
                 redis.client.xdel(stream, entry_id)
                 continue
-
-
-_retrohunt_service = None
-
-
-def get_retrohunt_service():
-    """Return a singleton RetrohuntService instance."""
-    global _retrohunt_service
-    if _retrohunt_service is None:
-        _retrohunt_service = RetrohuntService()
-    return _retrohunt_service

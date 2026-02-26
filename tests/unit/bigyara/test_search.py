@@ -5,6 +5,14 @@ import tempfile
 import unittest
 from hashlib import sha256
 
+# stop pydantic flagging an issue when no env vars exist.
+os.environ["REDIS_HOST"] = "localhost"
+os.environ["REDIS_PORT"] = "6379"
+os.environ["REDIS_USERNAME"] = "testuser"
+os.environ["REDIS_PASSWORD"] = "testpass"
+os.environ["REDIS_DB"] = "0"
+os.environ["REDIS_CLEANUP_DELAY"] = "30"
+
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
 from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
