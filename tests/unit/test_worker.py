@@ -78,10 +78,6 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
     def setUp(self):
         resp = super().setUp()
 
-        # Create fake redis
-        # self.server = fakeredis.FakeServer()
-        # self.fake_redis = fakeredis.FakeRedis(server=self.server, decode_responses=True)
-        # self.fake_redis.REDIS_EXPIRATION = 30
         self.fake_redis = fakeredis.FakeRedis()
         self.fake_redis.flushdb()
         # Set dispatcher instance on workers.
@@ -219,7 +215,6 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             self.assertEqual(first_section_val_after, result.entity.logs[:first_section_len])
             return result
 
-        # with mock.patch("azul_plugin_retrohunt.redis.get_redis", return_value=self.fake_redis):
         with mock.patch(
             "azul_plugin_retrohunt.worker._update_progress",
             wraps=update_progress_wrapper,

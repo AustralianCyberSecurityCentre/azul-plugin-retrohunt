@@ -57,4 +57,4 @@ def test_submit_hunt_creates_event_and_stream_entry(service):
 
     stream_name, messages = entries[0]
     msg_id, msg_data = messages[0]
-    assert msg_data[b'hunt_id'] == hunt_id.encode()
+    assert msg_data[b"hunt_id"] == hunt_id.encode()

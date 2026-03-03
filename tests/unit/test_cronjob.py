@@ -40,10 +40,10 @@ class TestCronjobCleanup(unittest.TestCase):
         recent_1d = self.now - timedelta(days=1)  # should NOT be deleted
 
         # --- Hunt entities ---
-        entity_31d = self.create_submission(old_31d.isoformat(), azm.HuntState.SUBMITTED)
-        entity_5d_stale = self.create_submission(old_5d.isoformat(), azm.HuntState.SEARCHING_WIDE)
-        entity_5d_completed = self.create_submission(old_5d_completed.isoformat(), azm.HuntState.COMPLETED)
-        entity_1d = self.create_submission(recent_1d.isoformat(), azm.HuntState.SUBMITTED)
+        entity_31d = self.create_event(old_31d.isoformat(), azm.HuntState.SUBMITTED)
+        entity_5d_stale = self.create_event(old_5d.isoformat(), azm.HuntState.SEARCHING_WIDE)
+        entity_5d_completed = self.create_event(old_5d_completed.isoformat(), azm.HuntState.COMPLETED)
+        entity_1d = self.create_event(recent_1d.isoformat(), azm.HuntState.SUBMITTED)
 
         # Insert KV entries
         self.fake_redis.set("retrohunt_31d", entity_31d.model_dump_json())
@@ -87,7 +87,7 @@ class TestCronjobCleanup(unittest.TestCase):
         # 1-day entry survives
         self.assertTrue(any(id.startswith(str(ms_1d)) for id in ids))
 
-    def create_submission(self, submit_time, status):
+    def create_event(self, submit_time, status):
         """helper function to build retrohunt event."""
         submitter = "tester"
         search = "rule r {strings: $a= condition: $a}"
