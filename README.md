@@ -36,7 +36,7 @@ This leverages the capabilities of Cert's BigGrep indexing.
   `xargs sudo apt-get install < debian.txt`
 
 - Install required python libraries:
-  `pip install -r requirements.txt`
+  `pip install .`
 
 - Download, patch and compile required projects:
   `make`
