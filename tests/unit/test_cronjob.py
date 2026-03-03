@@ -1,20 +1,13 @@
-import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-
+from azul_bedrock import models_network as azm
 import fakeredis
-import os
+import uuid
 
-# stop pydantic flagging an issue when no env vars exist.
-os.environ["REDIS_HOST"] = "localhost"
-os.environ["REDIS_PORT"] = "6379"
-os.environ["REDIS_USERNAME"] = "testuser"
-os.environ["REDIS_PASSWORD"] = "testpass"
-os.environ["REDIS_DB"] = "0"
-os.environ["REDIS_CLEANUP_DELAY"] = "30"
-
+from azul_plugin_retrohunt import base  # noqa: F401
 from azul_plugin_retrohunt.retrohunt import RetrohuntService
+from azul_plugin_retrohunt import server
 
 
 class FakeRedisProvider:
@@ -28,10 +21,6 @@ class TestCronjobCleanup(unittest.TestCase):
     def setUp(self):
         """Setup function for test."""
         self.fake_redis = fakeredis.FakeRedis()
-        self.fake_provider = FakeRedisProvider(self.fake_redis)
-
-        self.patcher = patch("azul_plugin_retrohunt.redis.get_redis", return_value=self.fake_provider)
-        self.patcher.start()
 
         self.service = RetrohuntService()
 
@@ -40,13 +29,10 @@ class TestCronjobCleanup(unittest.TestCase):
         self.old = self.now - timedelta(days=31)
         self.new = self.now - timedelta(days=5)
 
-    def tearDown(self):
-        """Teardown function for test."""
-        self.patcher.stop()
-
-    def test_cleanup_old_hunts_and_stream(self):
+    @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
+    def test_cleanup_old_hunts_and_stream(self, mock_redis):
         """Test removal of old entries, stale entries, and stream items from redis."""
-
+        mock_redis.return_value = self.fake_redis
         # --- Hunt timestamps ---
         old_31d = self.now - timedelta(days=31)  # should be deleted (30-day rule)
         old_5d = self.now - timedelta(days=5)  # should be deleted if not completed (3-day rule)
@@ -54,22 +40,16 @@ class TestCronjobCleanup(unittest.TestCase):
         recent_1d = self.now - timedelta(days=1)  # should NOT be deleted
 
         # --- Hunt entities ---
-        entity_31d = {"submitted_time": old_31d.isoformat(), "status": "submitted"}
-        entity_5d_stale = {
-            "submitted_time": old_5d.isoformat(),
-            "status": "searching-wide",  # not completed → should be deleted
-        }
-        entity_5d_completed = {
-            "submitted_time": old_5d_completed.isoformat(),
-            "status": "completed",  # should survive
-        }
-        entity_1d = {"submitted_time": recent_1d.isoformat(), "status": "submitted"}
+        entity_31d = self.create_submission(old_31d.isoformat(), azm.HuntState.SUBMITTED)
+        entity_5d_stale = self.create_submission(old_5d.isoformat(), azm.HuntState.SEARCHING_WIDE)
+        entity_5d_completed = self.create_submission(old_5d_completed.isoformat(), azm.HuntState.COMPLETED)
+        entity_1d = self.create_submission(recent_1d.isoformat(), azm.HuntState.SUBMITTED)
 
         # Insert KV entries
-        self.fake_redis.set("retrohunt_31d", json.dumps(entity_31d))
-        self.fake_redis.set("retrohunt_5d_stale", json.dumps(entity_5d_stale))
-        self.fake_redis.set("retrohunt_5d_completed", json.dumps(entity_5d_completed))
-        self.fake_redis.set("retrohunt_1d", json.dumps(entity_1d))
+        self.fake_redis.set("retrohunt_31d", entity_31d.model_dump_json())
+        self.fake_redis.set("retrohunt_5d_stale", entity_5d_stale.model_dump_json())
+        self.fake_redis.set("retrohunt_5d_completed", entity_5d_completed.model_dump_json())
+        self.fake_redis.set("retrohunt_1d", entity_1d.model_dump_json())
 
         # --- Stream entries ---
         ms_31d = int(old_31d.timestamp() * 1000)
@@ -95,7 +75,6 @@ class TestCronjobCleanup(unittest.TestCase):
         # --- Stream checks ---
         entries = self.fake_redis.xrange("retrohunt-jobs")
         ids = [entry_id.decode() for entry_id, _ in entries]
-
         # 31-day entry removed
         self.assertFalse(any(id.startswith(str(ms_31d)) for id in ids))
 
@@ -107,3 +86,41 @@ class TestCronjobCleanup(unittest.TestCase):
 
         # 1-day entry survives
         self.assertTrue(any(id.startswith(str(ms_1d)) for id in ids))
+
+    def create_submission(self, submit_time, status):
+        """helper function to build retrohunt event."""
+        submitter = "tester"
+        search = "rule r {strings: $a= condition: $a}"
+        search_type = "Yara"
+        security = "OFFICIAL"
+
+        retrohunt_id = f"hunt_{uuid.uuid4().hex}"
+        event = azm.RetrohuntEvent(
+            model_version=azm.CURRENT_MODEL_VERSION,
+            kafka_key="retrohunt",
+            action=azm.RetrohuntEvent.RetrohuntAction.Submitted,
+            timestamp=submit_time,
+            source=azm.RetrohuntEvent.RetrohuntSource(
+                timestamp=submit_time,
+                security=security,
+                submitter=submitter,
+            ),
+            author=azm.Author(
+                name="RETRO",
+                version="01.01.01",
+                category="service",
+            ),
+            entity=azm.RetrohuntEvent.RetrohuntEntity(
+                id=retrohunt_id,
+                search_type=search_type,
+                search=search,
+                status=status,
+                submitted_time=submit_time,
+                updated=submit_time,
+                submitter=submitter,
+                security=security,
+                duration=None,
+            ),
+        )
+
+        return event

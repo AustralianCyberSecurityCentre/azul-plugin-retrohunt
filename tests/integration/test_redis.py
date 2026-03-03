@@ -16,6 +16,7 @@ def redis_env(monkeypatch):
         monkeypatch.setenv("REDIS_USERNAME", "")
         monkeypatch.setenv("REDIS_PASSWORD", "")
         monkeypatch.setenv("REDIS_DB", "0")
+        monkeypatch.setenv("REDIS_CLEANUP_DELAY", "30")
 
 
 @pytest.fixture
@@ -31,7 +32,7 @@ def test_submit_hunt_creates_event_and_stream_entry(service):
     rs, RetrohuntSubmission = service
 
     # Flush Redis before test
-    rs.redis.flush()
+    rs.redis.flushdb()
 
     submission = RetrohuntSubmission(
         search_type="wide",
@@ -51,10 +52,9 @@ def test_submit_hunt_creates_event_and_stream_entry(service):
     assert event["entity"]["search_type"] == "wide"
 
     # 2. Check stream
-    entries = rs.redis.client.xread({"retrohunt-jobs": "0-0"})
+    entries = rs.redis.xread({"retrohunt-jobs": "0-0"})
     assert entries, "Expected a job entry in the stream"
 
     stream_name, messages = entries[0]
     msg_id, msg_data = messages[0]
-
-    assert msg_data["hunt_id"] == hunt_id
+    assert msg_data[b'hunt_id'] == hunt_id.encode()

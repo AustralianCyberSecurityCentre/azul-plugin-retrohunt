@@ -2,13 +2,7 @@ import os
 import tempfile
 import unittest
 
-# stop pydantic flagging an issue when no env vars exist.
-os.environ["REDIS_HOST"] = "localhost"
-os.environ["REDIS_PORT"] = "6379"
-os.environ["REDIS_USERNAME"] = "testuser"
-os.environ["REDIS_PASSWORD"] = "testpass"
-os.environ["REDIS_DB"] = "0"
-os.environ["REDIS_CLEANUP_DELAY"] = "30"
+from azul_plugin_retrohunt import base  # noqa: F401
 
 from azul_plugin_retrohunt.bigyara.env import executables
 from azul_plugin_retrohunt.bigyara.yara_parse import YaraRule, YaraString, _get_atoms_from_regex, _parse_yara_with_exe

@@ -7,8 +7,10 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
 import pendulum
+import redis
 from azul_bedrock import models_network as azm
 from fastapi import HTTPException
+from pydantic_core import ValidationError
 
 from azul_plugin_retrohunt.models import SERVICE_NAME, SERVICE_VERSION, RetrohuntSubmission
 from azul_plugin_retrohunt.settings import RetrohuntSettings
@@ -20,16 +22,21 @@ class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
     def __init__(self, redis_client=None):
-        self._redis = redis_client
+        self._redis_client = redis_client
 
     @property
     def redis(self):
-        """Lazy loader."""
-        if self._redis is None:
-            from .redis import get_redis
-
-            self._redis = get_redis()
-        return self._redis
+        """Start redis client if not in memory. Returns client."""
+        if self._redis_client is None:
+            settings = RetrohuntSettings().RedisSettings()
+            self._redis_client = redis.Redis(
+                host=settings.endpoint,
+                port=settings.port,
+                username=settings.username,
+                password=settings.password,
+                db=settings.db,
+            )
+        return self._redis_client
 
     def get_hunts(self, hunt_id: str):
         """Get details of requested retrohunt."""
@@ -40,8 +47,8 @@ class RetrohuntService:
                 detail=f"Retrohunt with id {hunt_id} not found",
             )
         try:
-            event = azm.RetrohuntEvent.model_validate(json.loads(raw_event))
-        except Exception as err:
+            event = azm.RetrohuntEvent.model_validate_json(raw_event)
+        except ValidationError as err:
             logger.exception("Corrupted retrohunt data for id %s", hunt_id)
             logger.debug("Raw data for %s: %.300r", hunt_id, raw_event)
             raise HTTPException(
@@ -66,8 +73,8 @@ class RetrohuntService:
                 if raw_data is None:
                     continue
                 try:
-                    event = azm.RetrohuntEvent.model_validate(json.loads(raw_data))
-                except Exception:
+                    event = azm.RetrohuntEvent.model_validate_json(raw_data)
+                except ValidationError:
                     # corrupted data
                     logger.exception("Corrupted retrohunt data for id %s", key)
                     logger.debug("Raw data for %s: %.300r", key, raw_data)
@@ -159,9 +166,8 @@ class RetrohuntService:
         """Remove RetrohuntEntity entries older than cleanup_delay days, or older than 3 days if not completed."""
         cursor = 0
         pattern = "retrohunt_*"
-
         while True:
-            cursor, keys = redis.client.scan(cursor=cursor, match=pattern, count=100)
+            cursor, keys = redis.scan(cursor=cursor, match=pattern, count=100)
 
             for key in keys:
                 # Normalize all key forms
@@ -169,41 +175,40 @@ class RetrohuntService:
                 key_bytes = key_str.encode()
 
                 # Try all forms when reading
-                raw = redis.client.get(key) or redis.client.get(key_str) or redis.client.get(key_bytes)
+                raw = redis.get(key) or redis.get(key_str) or redis.get(key_bytes)
 
                 if not raw:
-                    redis.client.delete(key)
-                    redis.client.delete(key_str)
-                    redis.client.delete(key_bytes)
+                    redis.delete(key)
+                    redis.delete(key_str)
+                    redis.delete(key_bytes)
                     continue
 
                 try:
-                    entity = json.loads(raw)
-                    ts_str = entity.get("submitted_time")
-                    status = entity.get("status")
+                    event = azm.RetrohuntEvent.model_validate_json(raw)
+                    ts_str = event.entity.submitted_time
+                    status = event.entity.status
                     if not ts_str:
-                        redis.client.delete(key)
-                        redis.client.delete(key_str)
-                        redis.client.delete(key_bytes)
+                        redis.delete(key)
+                        redis.delete(key_str)
+                        redis.delete(key_bytes)
                         continue
-
-                    submitted = datetime.fromisoformat(ts_str)
+                    submitted = ts_str
                 except Exception:
-                    redis.client.delete(key)
-                    redis.client.delete(key_str)
-                    redis.client.delete(key_bytes)
+                    redis.delete(key)
+                    redis.delete(key_str)
+                    redis.delete(key_bytes)
                     continue
 
                 if submitted < cutoff_30d:
-                    redis.client.delete(key)
-                    redis.client.delete(key_str)
-                    redis.client.delete(key_bytes)
+                    redis.delete(key)
+                    redis.delete(key_str)
+                    redis.delete(key_bytes)
                     continue
 
                 if submitted < cutoff_3d and status != "completed":
-                    redis.client.delete(key)
-                    redis.client.delete(key_str)
-                    redis.client.delete(key_bytes)
+                    redis.delete(key)
+                    redis.delete(key_str)
+                    redis.delete(key_bytes)
                     continue
 
             if cursor == 0:
@@ -213,7 +218,7 @@ class RetrohuntService:
         """Remove stream entries older than cleanup_delay days or whose hunts are stale or missing."""
         stream = "retrohunt-jobs"
 
-        entries = redis.client.xrange(stream, min="-", max="+")
+        entries = redis.xrange(stream, min="-", max="+")
 
         for entry_id, fields in entries:
             entry_id = entry_id.decode()
@@ -223,7 +228,7 @@ class RetrohuntService:
             ts = datetime.fromtimestamp(int(ms_str) / 1000, tz=timezone.utc)
 
             if ts < cutoff_30d:
-                redis.client.xdel(stream, entry_id)
+                redis.xdel(stream, entry_id)
                 continue
 
             # Normalize keys + values (fakeredis uses bytes)
@@ -234,23 +239,23 @@ class RetrohuntService:
 
             hunt_id = fields.get("id")
             if not hunt_id:
-                redis.client.xdel(stream, entry_id)
+                redis.xdel(stream, entry_id)
                 continue
 
-            raw = redis.client.get(hunt_id) or redis.client.get(hunt_id.encode())
+            raw = redis.get(hunt_id) or redis.get(hunt_id.encode())
 
             if not raw:
-                redis.client.xdel(stream, entry_id)
+                redis.xdel(stream, entry_id)
                 continue
 
             try:
-                entity = json.loads(raw)
-                status = entity.get("status")
-                submitted = datetime.fromisoformat(entity.get("submitted_time"))
+                event = azm.RetrohuntEvent.model_validate_json(raw)
+                status = event.entity.status
+                submitted = event.entity.submitted_time
             except Exception:
-                redis.client.xdel(stream, entry_id)
+                redis.xdel(stream, entry_id)
                 continue
 
             if submitted < cutoff_3d and status != "completed":
-                redis.client.xdel(stream, entry_id)
+                redis.xdel(stream, entry_id)
                 continue

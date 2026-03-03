@@ -15,16 +15,7 @@ from unittest.mock import patch
 import fakeredis
 from azul_bedrock import dispatcher
 
-import os
-
-# stop pydantic flagging an issue when no env vars exist.
-os.environ["REDIS_HOST"] = "localhost"
-os.environ["REDIS_PORT"] = "6379"
-os.environ["REDIS_USERNAME"] = "testuser"
-os.environ["REDIS_PASSWORD"] = "testpass"
-os.environ["REDIS_DB"] = "0"
-os.environ["REDIS_CLEANUP_DELAY"] = "30"
-
+from azul_plugin_retrohunt import base  # noqa: F401
 from azul_plugin_retrohunt import server
 
 server.dp = dispatcher.DispatcherAPI(
@@ -48,24 +39,18 @@ class TestIndex(unittest.IsolatedAsyncioTestCase):
     """Submit a new retrohunt via the API and ensure we can pull the same hunt back."""
 
     async def asyncSetUp(self):
-        # Create a fake Redis instance for each test
         self.fake_redis = fakeredis.FakeRedis()
-        self.fake_redis.REDIS_EXPIRATION = 30
 
-        # Patch the module-level redis client in retrohunt.py
-        self.patcher = patch("azul_plugin_retrohunt.redis.get_redis", return_value=self.fake_redis)
-        self.patcher.start()
-
-    async def asyncTearDown(self):
-        self.patcher.stop()
-
-    async def test_submit(self):
+    @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
+    async def test_submit(self, mock_redis):
         request = server.RetrohuntSubmission(
             search_type="Yara",
             search="rule r {strings: $a= condition: $a}",
             submitter="tester",
             security="OFFICIAL",
         )
+
+        mock_redis.return_value = self.fake_redis
 
         # submit new hunt to redis
         result = server.submit_hunt_v1(request)

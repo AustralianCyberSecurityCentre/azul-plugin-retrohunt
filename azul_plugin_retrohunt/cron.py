@@ -4,7 +4,6 @@ It cleans up old Redis events.
 """
 
 import logging
-import sys
 
 from azul_plugin_retrohunt.retrohunt import RetrohuntService
 
@@ -26,16 +25,8 @@ def run_cron():
 
 
 def main():
-    """Dispatch based on CLI args."""
-    if len(sys.argv) < 2:
-        raise SystemExit("No command provided")
-
-    command = sys.argv[1]
-
-    if command == "cronjob":
-        run_cron()
-    else:
-        raise SystemExit(f"Unknown command: {command}")
+    """Cronjob main."""
+    run_cron()
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from unittest import mock
 import fakeredis
 import pytest
 
+
 ## Create a fake env module
 fake_env = mock.MagicMock()
 fake_env.find_executable.return_value = "/bin/true"
@@ -26,26 +27,19 @@ fake_env.find_executable.return_value = "/bin/true"
 fake_index = mock.MagicMock()
 fake_index.BigYaraIndexer = mock.MagicMock()
 fake_index.BigYaraIngestor = mock.MagicMock()
-
+from unittest.mock import patch
 
 import respx
 from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
-import os
-
-# stop pydantic flagging an issue when no env vars exist.
-os.environ["REDIS_HOST"] = "localhost"
-os.environ["REDIS_PORT"] = "6379"
-os.environ["REDIS_USERNAME"] = "testuser"
-os.environ["REDIS_PASSWORD"] = "testpass"
-os.environ["REDIS_DB"] = "0"
-os.environ["REDIS_CLEANUP_DELAY"] = "30"
 
 import azul_plugin_retrohunt
+from azul_plugin_retrohunt import base  # noqa: F401
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.ingestor import BigYaraIngestor
 from azul_plugin_retrohunt import worker as r_worker
 from azul_plugin_retrohunt.models import FileMetadata
+from unittest.mock import PropertyMock
 
 
 def str_to_datetime(datetime_string):
@@ -85,10 +79,11 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         resp = super().setUp()
 
         # Create fake redis
-        self.server = fakeredis.FakeServer()
-        self.fake_redis = fakeredis.FakeRedis(server=self.server, decode_responses=True)
-        self.fake_redis.REDIS_EXPIRATION = 30
-        self.fake_redis.flushall()
+        # self.server = fakeredis.FakeServer()
+        # self.fake_redis = fakeredis.FakeRedis(server=self.server, decode_responses=True)
+        # self.fake_redis.REDIS_EXPIRATION = 30
+        self.fake_redis = fakeredis.FakeRedis()
+        self.fake_redis.flushdb()
         # Set dispatcher instance on workers.
         r_worker.dp = dispatcher.DispatcherAPI(
             events_url=self.dispatcher_url,
@@ -101,20 +96,11 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         )
         return resp
 
-    @respx.mock
-    def test_worker_processes_one_job(self, respx_mock):
-        class RedisWrapper:
-            def __init__(self, redis):
-                self._redis = redis
-
-            def __getattr__(self, name):
-                return getattr(self._redis, name)
-
-            @property
-            def client(self):
-                return self._redis
-
-        wrapped_redis = RedisWrapper(self.fake_redis)
+    @patch("azul_plugin_retrohunt.retrohunt.RetrohuntService.redis", new_callable=PropertyMock)
+    def test_worker_processes_one_job(self, mock_redis):
+        """Test the worker processes one job in the redis jobs stream."""
+        mock_redis.return_value = self.fake_redis
+        self.fake_redis.flushdb()
 
         class StopTestException(Exception):
             pass
@@ -129,7 +115,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         # Add job marker
         msg_id = self.fake_redis.xadd(
             "retrohunt-jobs",
-            {"hunt_id": job_id, "action": "submitted"},
+            {b"hunt_id": job_id.encode(), b"action": b"submitted"},
         )
 
         # Fake stream behavior
@@ -142,7 +128,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                 return [
                     (
                         "retrohunt-jobs",
-                        [(msg_id, {"hunt_id": job_id, "action": "submitted"})],
+                        [(msg_id, {b"hunt_id": job_id.encode(), b"action": b"submitted"})],
                     )
                 ]
             raise StopTestException
@@ -164,16 +150,12 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             return None
 
         with (
-            mock.patch("azul_plugin_retrohunt.redis.get_redis", return_value=wrapped_redis),
-            mock.patch("fakeredis.FakeRedis.xreadgroup", side_effect=fake_xreadgroup),
-            mock.patch("fakeredis.FakeRedis.xautoclaim", side_effect=fake_xautoclaim),
-            mock.patch.object(self.fake_redis, "xack", wraps=self.fake_redis.xack) as xack_mock,
+            mock.patch.object(r_worker.rs.redis, "xreadgroup", side_effect=fake_xreadgroup),
+            mock.patch.object(r_worker.rs.redis, "xautoclaim", side_effect=fake_xautoclaim),
+            mock.patch.object(r_worker.rs.redis, "xack", wraps=r_worker.rs.redis.xack) as xack_mock,
         ):
             hunt_mock = mock.Mock(side_effect=hunt_side_effect)
 
-            r_worker.rs._redis = None
-
-            # Patch hunt inside main()
             with mock.patch.dict(r_worker.main.__globals__, {"hunt": hunt_mock}):
                 with pytest.raises(StopTestException):
                     r_worker.main()
@@ -187,11 +169,12 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         # Lock must be deleted after processing
         assert self.fake_redis.get(f"retrohunt:{job_id}:lock") is None
 
-    @respx.mock
-    def test_hunt_logs(self):
+    @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
+    def test_hunt_logs(self, mock_redis):
         """Test that when doing a hunt the logs never gets above the max allowed size to prevent large objects being
         sent to kafka.
         """
+        mock_redis.return_value = self.fake_redis
         content1 = (
             b"When installing a PowerShell Preview release for Linux via a Package Repository, the package name"
             b" changes from powershell to powershell-preview"
@@ -236,20 +219,21 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             self.assertEqual(first_section_val_after, result.entity.logs[:first_section_len])
             return result
 
-        with mock.patch("azul_plugin_retrohunt.redis.get_redis", return_value=self.fake_redis):
-            with mock.patch(
-                "azul_plugin_retrohunt.worker._update_progress",
-                wraps=update_progress_wrapper,
-            ) as progress_wrapped:
-                log_capture = r_worker.capture_logs(logging.INFO)
-                r_worker.hunt(self.base_temp_dir, copy.deepcopy(SUBMISSION), log_capture)
-                progress_wrapped.assert_called()
+        # with mock.patch("azul_plugin_retrohunt.redis.get_redis", return_value=self.fake_redis):
+        with mock.patch(
+            "azul_plugin_retrohunt.worker._update_progress",
+            wraps=update_progress_wrapper,
+        ) as progress_wrapped:
+            log_capture = r_worker.capture_logs(logging.INFO)
+            r_worker.hunt(self.base_temp_dir, copy.deepcopy(SUBMISSION), log_capture)
+            progress_wrapped.assert_called()
 
-    @respx.mock
-    def test_hunt(self):
+    @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
+    def test_hunt(self, mock_redis):
         """Submit a new retrohunt and ensure the worker writes progress/results
         into Redis.
         """
+        mock_redis.return_value = self.fake_redis
         # Test data
         content1 = (
             b"When installing a PowerShell Preview release for Linux via a Package Repository, the package name"
@@ -348,62 +332,62 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
 
         with mock.patch("azul_plugin_retrohunt.worker.dp.get_binary", side_effect=fake_get_binary):
             with mock.patch("azul_plugin_retrohunt.worker.search", side_effect=fake_search):
-                with mock.patch("azul_plugin_retrohunt.redis.get_redis", return_value=self.fake_redis):
-                    with mock.patch(
-                        "azul_plugin_retrohunt.worker._update_progress",
-                        wraps=r_worker._update_progress,
-                    ) as update_mock:
-                        job = copy.deepcopy(SUBMISSION)
-                        index_dirs = [self.ingestor.cache_directory]
+                # with mock.patch("azul_plugin_retrohunt.redis.Redis", return_value=self.fake_redis):
+                with mock.patch(
+                    "azul_plugin_retrohunt.worker._update_progress",
+                    wraps=r_worker._update_progress,
+                ) as update_mock:
+                    job = copy.deepcopy(SUBMISSION)
+                    index_dirs = [self.ingestor.cache_directory]
 
-                        # Run the hunt
-                        r_worker.hunt(index_dirs, job, None)
+                    # Run the hunt
+                    r_worker.hunt(index_dirs, job, None)
 
-                        update_mock.assert_called()
+                    update_mock.assert_called()
 
-                        redis_key = job.entity.id
-                        stored_raw = self.fake_redis.get(redis_key)
+                    redis_key = job.entity.id
+                    stored_raw = self.fake_redis.get(redis_key)
 
-                        self.assertIsNotNone(
-                            stored_raw,
-                            f"Expected job stored in redis under key {redis_key}",
-                        )
+                    self.assertIsNotNone(
+                        stored_raw,
+                        f"Expected job stored in redis under key {redis_key}",
+                    )
 
-                        # Validate final job state
-                        stored_job = azm.RetrohuntEvent.model_validate(json.loads(stored_raw))
-                        entity = stored_job.entity
+                    # Validate final job state
+                    stored_job = azm.RetrohuntEvent.model_validate(json.loads(stored_raw))
+                    entity = stored_job.entity
 
-                        # Validate final status
-                        self.assertEqual(entity.status, azm.HuntState.COMPLETED)
+                    # Validate final status
+                    self.assertEqual(entity.status, azm.HuntState.COMPLETED)
 
-                        # Validate results
-                        expected_results = {
-                            "r": [
-                                {
-                                    "stream_label": "content",
-                                    "stream_source": "samples",
-                                    "sample": sha1,
-                                },
-                                {
-                                    "stream_label": "content",
-                                    "stream_source": "samples",
-                                    "sample": sha3,
-                                },
-                            ]
-                        }
+                    # Validate results
+                    expected_results = {
+                        "r": [
+                            {
+                                "stream_label": "content",
+                                "stream_source": "samples",
+                                "sample": sha1,
+                            },
+                            {
+                                "stream_label": "content",
+                                "stream_source": "samples",
+                                "sample": sha3,
+                            },
+                        ]
+                    }
 
-                        self.assertEqual(entity.results, expected_results)
+                    self.assertEqual(entity.results, expected_results)
 
-                        # Validate counters
-                        self.assertEqual(entity.rules_parsed_total, 1)
-                        self.assertEqual(entity.rules_parsed_done, 1)
-                        self.assertEqual(entity.atom_count, 1)
-                        self.assertEqual(entity.index_searches_total, 1)
-                        self.assertEqual(entity.index_searches_done, 1)
-                        self.assertEqual(entity.index_match_count, 2)
-                        self.assertEqual(entity.tool_matches_total, 2)
-                        self.assertEqual(entity.tool_matches_done, 2)
-                        self.assertEqual(entity.tool_match_count, 2)
+                    # Validate counters
+                    self.assertEqual(entity.rules_parsed_total, 1)
+                    self.assertEqual(entity.rules_parsed_done, 1)
+                    self.assertEqual(entity.atom_count, 1)
+                    self.assertEqual(entity.index_searches_total, 1)
+                    self.assertEqual(entity.index_searches_done, 1)
+                    self.assertEqual(entity.index_match_count, 2)
+                    self.assertEqual(entity.tool_matches_total, 2)
+                    self.assertEqual(entity.tool_matches_done, 2)
+                    self.assertEqual(entity.tool_match_count, 2)
 
 
 EXPECTED_REQUESTS = [

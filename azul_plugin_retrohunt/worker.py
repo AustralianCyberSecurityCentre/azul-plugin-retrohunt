@@ -255,13 +255,13 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
     def beat():
         while not stop_event.is_set():
             # Check if we still own the lock
-            current_owner = rs.redis.client.get(lock_key)
+            current_owner = rs.redis.get(lock_key)
             if current_owner != worker_id:
                 # Lost the lock — stop heartbeating
                 return
 
             # Refresh TTL
-            rs.redis.client.expire(lock_key, ttl_seconds)
+            rs.redis.expire(lock_key, ttl_seconds)
 
             # Sleep until next refresh or until stop_event is set
             stop_event.wait(refresh_interval)
@@ -326,7 +326,7 @@ def main():
             msg_id, payload = msgs[0]
 
         # Load the full event from Redis
-        event_json = rs.redis.get(payload["hunt_id"])
+        event_json = rs.redis.get(payload[b"hunt_id"])
         if not event_json:
             raise RuntimeError(f"Missing event data for hunt_id={payload['hunt_id']}")
 
@@ -336,7 +336,7 @@ def main():
         if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
             continue
 
-        if not acquire_lock(rs.redis.client, job_id, worker_id, ttl_seconds=LOCK_TTL):
+        if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
             # Another worker is running this hunt
             continue
 
@@ -356,7 +356,7 @@ def main():
             rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
         finally:
             stop_event.set()
-            rs.redis.client.delete(f"retrohunt:{job_id}:lock")
+            rs.redis.delete(f"retrohunt:{job_id}:lock")
 
 
 if __name__ == "__main__":
