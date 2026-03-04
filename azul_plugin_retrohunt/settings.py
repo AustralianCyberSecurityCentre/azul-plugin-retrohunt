@@ -41,12 +41,22 @@ class RetrohuntSettings(BaseSettings):
 
         @model_validator(mode="before")
         def split_host_and_port(cls, values):
-            """Live uses endpoint:port. integration tests have host + port separated."""
-            endpoint = values.get("endpoint")
+            """Live uses endpoint:port. Integration tests have host + port separated."""
+            # Use the alias key, not the field name
+            endpoint_key = "REDIS_ENDPOINT"
+            port_key = "REDIS_PORT"
+
+            endpoint = values.get(endpoint_key)
             if endpoint and ":" in endpoint:
                 host, port_str = endpoint.split(":", 1)
-                values["endpoint"] = host
-                values["port"] = int(port_str)
+                values[endpoint_key] = host
+                values[port_key] = int(port_str)
+
+            # Force-cast env vars that should be ints (using aliases)
+            for key in ("REDIS_DB", "REDIS_CLEANUP_DELAY", port_key):
+                raw = values.get(key)
+                if raw is not None:
+                    values[key] = int(raw)
 
             return values
 
