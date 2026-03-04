@@ -32,6 +32,7 @@ class RetrohuntBaseTest:
         os.environ["REDIS_PASSWORD"] = "testpass"  # noqa: S105
         os.environ["REDIS_DB"] = "0"
         os.environ["REDIS_CLEANUP_DELAY"] = "30"
+        os.environ["REDIS_TTL"] = "21600000"
         self.indexer_cfg_name = "content"
         self.indexers_cfg = {
             self.indexer_cfg_name: RetrohuntSettings.Indexer(

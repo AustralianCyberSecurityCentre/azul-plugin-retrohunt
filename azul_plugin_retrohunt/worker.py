@@ -29,8 +29,6 @@ prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a w
 PLUGIN_NAME = "RetroHunter"
 PLUGIN_VERSION = "2026.02.26"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
-# hunt job lock is 6 hours
-LOCK_TTL = 21600000
 MATCH_LIMIT = 200
 
 dp: dispatcher.DispatcherAPI = None
@@ -277,6 +275,7 @@ def main():
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
+    LOCK_TTL = settings.RedisSettings().ttl
     start_http_server(settings.prometheus_port_worker)
     dp = dispatcher.DispatcherAPI(
         events_url=settings.events_url,
