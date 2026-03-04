@@ -26,6 +26,12 @@ class RetrohuntBaseTest:
         os.environ["plugin_root_path"] = self.base_temp_dir
         os.environ["plugin_events_url"] = self.dispatcher_url
         os.environ["plugin_data_url"] = self.dispatcher_url
+        os.environ["REDIS_HOST"] = "localhost"
+        os.environ["REDIS_PORT"] = "6379"
+        os.environ["REDIS_USERNAME"] = "testuser"
+        os.environ["REDIS_PASSWORD"] = "testpass"  # noqa: S105
+        os.environ["REDIS_DB"] = "0"
+        os.environ["REDIS_CLEANUP_DELAY"] = "30"
         self.indexer_cfg_name = "content"
         self.indexers_cfg = {
             self.indexer_cfg_name: RetrohuntSettings.Indexer(

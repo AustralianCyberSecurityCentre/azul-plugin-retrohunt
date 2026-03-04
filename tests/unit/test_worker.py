@@ -34,7 +34,6 @@ from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
 
 import azul_plugin_retrohunt
-from azul_plugin_retrohunt import base  # noqa: F401
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.ingestor import BigYaraIngestor
 from azul_plugin_retrohunt import worker as r_worker
@@ -327,7 +326,6 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
 
         with mock.patch("azul_plugin_retrohunt.worker.dp.get_binary", side_effect=fake_get_binary):
             with mock.patch("azul_plugin_retrohunt.worker.search", side_effect=fake_search):
-                # with mock.patch("azul_plugin_retrohunt.redis.Redis", return_value=self.fake_redis):
                 with mock.patch(
                     "azul_plugin_retrohunt.worker._update_progress",
                     wraps=r_worker._update_progress,

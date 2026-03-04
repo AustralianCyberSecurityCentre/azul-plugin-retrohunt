@@ -62,8 +62,6 @@ END_STATES: list[str] = [
     azm.HuntState.CANCELLED,
 ]
 
-settings = RetrohuntSettings()
-
 rs = RetrohuntService()
 
 
@@ -197,7 +195,7 @@ def main(host, port, workers, reload, events_url, data_url, links):
     :param links: A url to prefix any sample hashes to turn into hyperlinks.
     """
     click.echo(f"Starting server on: {host}:{port} with dispatcher events {events_url} and dispatcher data {data_url}")
-
+    settings = RetrohuntSettings()
     if links:
         os.environ["RETROHUNT_HASH_LINKS"] = links
 

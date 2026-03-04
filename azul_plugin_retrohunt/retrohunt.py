@@ -153,21 +153,20 @@ class RetrohuntService:
 
     def run_periodic_tasks(self):
         """Used in cronjob to remove redis jobs and entries older than cleanup_delay days."""
-        redis = self.redis
         now = datetime.now(timezone.utc)
         cutoff_long = RetrohuntSettings().RedisSettings().cleanup_delay
         cutoff_30d = now - timedelta(days=cutoff_long)
         cutoff_3d = now - timedelta(days=3)
 
-        self._cleanup_hunts(redis, cutoff_30d, cutoff_3d)
-        self._cleanup_stream(redis, cutoff_30d, cutoff_3d)
+        self._cleanup_hunts(cutoff_30d, cutoff_3d)
+        self._cleanup_stream(cutoff_30d, cutoff_3d)
 
-    def _cleanup_hunts(self, redis, cutoff_30d, cutoff_3d):
+    def _cleanup_hunts(self, cutoff_30d, cutoff_3d):
         """Remove RetrohuntEntity entries older than cleanup_delay days, or older than 3 days if not completed."""
         cursor = 0
         pattern = "retrohunt_*"
         while True:
-            cursor, keys = redis.scan(cursor=cursor, match=pattern, count=100)
+            cursor, keys = self.redis.scan(cursor=cursor, match=pattern, count=100)
 
             for key in keys:
                 # Normalize all key forms
@@ -175,12 +174,12 @@ class RetrohuntService:
                 key_bytes = key_str.encode()
 
                 # Try all forms when reading
-                raw = redis.get(key) or redis.get(key_str) or redis.get(key_bytes)
+                raw = self.redis.get(key) or self.redis.get(key_str) or self.redis.get(key_bytes)
 
                 if not raw:
-                    redis.delete(key)
-                    redis.delete(key_str)
-                    redis.delete(key_bytes)
+                    self.redis.delete(key)
+                    self.redis.delete(key_str)
+                    self.redis.delete(key_bytes)
                     continue
 
                 try:
@@ -188,37 +187,37 @@ class RetrohuntService:
                     ts_str = event.entity.submitted_time
                     status = event.entity.status
                     if not ts_str:
-                        redis.delete(key)
-                        redis.delete(key_str)
-                        redis.delete(key_bytes)
+                        self.redis.delete(key)
+                        self.redis.delete(key_str)
+                        self.redis.delete(key_bytes)
                         continue
                     submitted = ts_str
                 except Exception:
-                    redis.delete(key)
-                    redis.delete(key_str)
-                    redis.delete(key_bytes)
+                    self.redis.delete(key)
+                    self.redis.delete(key_str)
+                    self.redis.delete(key_bytes)
                     continue
 
                 if submitted < cutoff_30d:
-                    redis.delete(key)
-                    redis.delete(key_str)
-                    redis.delete(key_bytes)
+                    self.redis.delete(key)
+                    self.redis.delete(key_str)
+                    self.redis.delete(key_bytes)
                     continue
 
                 if submitted < cutoff_3d and status != "completed":
-                    redis.delete(key)
-                    redis.delete(key_str)
-                    redis.delete(key_bytes)
+                    self.redis.delete(key)
+                    self.redis.delete(key_str)
+                    self.redis.delete(key_bytes)
                     continue
 
             if cursor == 0:
                 break
 
-    def _cleanup_stream(self, redis, cutoff_30d, cutoff_3d):
+    def _cleanup_stream(self, cutoff_30d, cutoff_3d):
         """Remove stream entries older than cleanup_delay days or whose hunts are stale or missing."""
         stream = "retrohunt-jobs"
 
-        entries = redis.xrange(stream, min="-", max="+")
+        entries = self.redis.xrange(stream, min="-", max="+")
 
         for entry_id, fields in entries:
             entry_id = entry_id.decode()
@@ -228,7 +227,7 @@ class RetrohuntService:
             ts = datetime.fromtimestamp(int(ms_str) / 1000, tz=timezone.utc)
 
             if ts < cutoff_30d:
-                redis.xdel(stream, entry_id)
+                self.redis.xdel(stream, entry_id)
                 continue
 
             # Normalize keys + values (fakeredis uses bytes)
@@ -239,13 +238,13 @@ class RetrohuntService:
 
             hunt_id = fields.get("id")
             if not hunt_id:
-                redis.xdel(stream, entry_id)
+                self.redis.xdel(stream, entry_id)
                 continue
 
-            raw = redis.get(hunt_id) or redis.get(hunt_id.encode())
+            raw = self.redis.get(hunt_id) or self.redis.get(hunt_id.encode())
 
             if not raw:
-                redis.xdel(stream, entry_id)
+                self.redis.xdel(stream, entry_id)
                 continue
 
             try:
@@ -253,9 +252,9 @@ class RetrohuntService:
                 status = event.entity.status
                 submitted = event.entity.submitted_time
             except Exception:
-                redis.xdel(stream, entry_id)
+                self.redis.xdel(stream, entry_id)
                 continue
 
             if submitted < cutoff_3d and status != "completed":
-                redis.xdel(stream, entry_id)
+                self.redis.xdel(stream, entry_id)
                 continue

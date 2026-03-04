@@ -5,7 +5,7 @@ from azul_bedrock import models_network as azm
 import fakeredis
 import uuid
 
-from azul_plugin_retrohunt import base  # noqa: F401
+from azul_plugin_retrohunt.test_utils import BaseIngestorIndexerTest
 from azul_plugin_retrohunt.retrohunt import RetrohuntService
 from azul_plugin_retrohunt import server
 
@@ -15,7 +15,7 @@ class FakeRedisProvider:
         self.client = client
 
 
-class TestCronjobCleanup(unittest.TestCase):
+class TestCronjobCleanup(BaseIngestorIndexerTest):
     """Test cleanup of old Retrohunt entries and stream items."""
 
     def setUp(self):
@@ -28,6 +28,7 @@ class TestCronjobCleanup(unittest.TestCase):
         self.now = datetime.now(timezone.utc)
         self.old = self.now - timedelta(days=31)
         self.new = self.now - timedelta(days=5)
+        return super().setUp()
 
     @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
     def test_cleanup_old_hunts_and_stream(self, mock_redis):

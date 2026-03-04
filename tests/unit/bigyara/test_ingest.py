@@ -4,7 +4,6 @@ from unittest import mock
 
 import pendulum
 
-from azul_plugin_retrohunt import base  # noqa: F401
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.bigyara.base_processor import METADATA_SUFFIX
 from azul_plugin_retrohunt.bigyara.ingest import IngestFileSizeException

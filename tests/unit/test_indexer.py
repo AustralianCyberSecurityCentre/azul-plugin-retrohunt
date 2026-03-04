@@ -2,7 +2,6 @@ from unittest import mock
 
 import pendulum
 
-from azul_plugin_retrohunt import base  # noqa: F401
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.indexer import run_indexer
 from azul_plugin_retrohunt.settings import RetrohuntSettings

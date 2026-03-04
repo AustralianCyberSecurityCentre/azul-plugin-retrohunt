@@ -15,7 +15,7 @@ from unittest.mock import patch
 import fakeredis
 from azul_bedrock import dispatcher
 
-from azul_plugin_retrohunt import base  # noqa: F401
+from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt import server
 
 server.dp = dispatcher.DispatcherAPI(
@@ -35,7 +35,7 @@ def str_to_datetime(datetime_string):
     return date.replace(tzinfo=timezone.utc)
 
 
-class TestIndex(unittest.IsolatedAsyncioTestCase):
+class TestIndex(test_utils.BaseIngestorIndexerTest):
     """Submit a new retrohunt via the API and ensure we can pull the same hunt back."""
 
     async def asyncSetUp(self):

@@ -39,27 +39,28 @@ class RetrohuntSettings(BaseSettings):
         endpoint: str = Field(..., alias="REDIS_HOST")
         port: int = Field(..., alias="REDIS_PORT")
 
-        @model_validator(mode="after")
-        def split_host_and_port(self):
+        @model_validator(mode="before")
+        def split_host_and_port(cls, values):
             """Live uses endpoint:port. integration tests have host + port separated."""
-            if ":" in self.endpoint:
-                host, port_str = self.endpoint.split(":", 1)
-                self.endpoint = host
-                self.port = int(port_str)
+            endpoint = values.get("endpoint")
+            if endpoint and ":" in endpoint:
+                host, port_str = endpoint.split(":", 1)
+                values["endpoint"] = host
+                values["port"] = int(port_str)
 
-            return self
+            return values
 
         username: str = Field(..., alias="REDIS_USERNAME")
         password: str = Field(..., alias="REDIS_PASSWORD")
         db: int = Field(..., alias="REDIS_DB")
-        cleanup_delay: int = Field(..., alias="REDIS_CLEANUP_DELAY")
+        cleanup_delay: int = Field(30, alias="REDIS_CLEANUP_DELAY")
 
         model_config = SettingsConfigDict(
             extra="ignore",
             populate_by_name=True,
         )
 
-    redis: RedisSettings = RedisSettings()
+    redis: RedisSettings = Field(default_factory=lambda: RetrohuntSettings.RedisSettings())
     # should be common for all indexers/ingestors.
     root_path: str = tempfile.gettempdir()
     indexers: dict[str, Indexer] = dict()

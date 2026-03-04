@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from hashlib import sha256
 
-from azul_plugin_retrohunt import base  # noqa: F401
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
 from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
