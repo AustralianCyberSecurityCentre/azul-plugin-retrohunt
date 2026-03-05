@@ -275,12 +275,12 @@ def main():
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     logger.info(f"Allocating worker id: {worker_id}")
     logs: StringIO = capture_logs(logging.INFO)
-    logger.info(f"loading settings")
+    logger.info("loading settings")
     settings = RetrohuntSettings()
     LOCK_TTL = settings.RedisSettings().ttl
-    logger.info(f"Starting prometheus server")
+    logger.info("Starting prometheus server")
     start_http_server(settings.prometheus_port_worker)
-    logger.info(f"Initialising dispatcher")
+    logger.info("Initialising dispatcher")
     dp = dispatcher.DispatcherAPI(
         events_url=settings.events_url,
         data_url=settings.data_url,
