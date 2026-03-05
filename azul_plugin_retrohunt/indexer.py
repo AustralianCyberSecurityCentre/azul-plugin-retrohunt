@@ -7,6 +7,7 @@ import logging
 import sys
 import time
 import traceback
+from pathlib import Path
 
 import click
 from prometheus_client import Counter, Gauge, start_http_server
@@ -45,6 +46,15 @@ def run_indexer(
     # Future allow for multiple indexer types at once. - as long as the indexer isn't overworked this will save lots
     # of RAM/CPU allocations.
     indexer = BigYaraIndexer(index_root_path, indexerSettings.name, int(indexerSettings.max_bytes_before_indexing))
+
+    for d in [
+        indexer.bgi_directory,
+        indexer.indexing_directory,
+        indexer.failed_directory,
+        indexer.periodic_directory,
+    ]:
+        Path(d).mkdir(parents=True, exist_ok=True)
+
     prom_number_of_indexes_created.labels(indexer._processor_name, PERIODIC_INDEX_NAME)
     prom_number_of_indexes_created.labels(indexer._processor_name, SIZE_BASED_INDEX_NAME)
     prom_bgi_directory_bytes.labels(indexer._processor_name).set(indexer.count_bytes_for_dir(indexer.bgi_directory))
