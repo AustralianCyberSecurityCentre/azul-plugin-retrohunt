@@ -361,7 +361,8 @@ def main():
                 stop_event.set()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
     except Exception as e:
-        logger.exception("Fatal error: ", e)
+        logger.exception(f"Fatal error: {e}")
+        raise
 
 
 if __name__ == "__main__":
