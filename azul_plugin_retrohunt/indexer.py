@@ -49,9 +49,7 @@ def run_indexer(
 
     for d in [
         indexer.bgi_directory,
-        indexer.indexing_directory,
-        indexer.failed_directory,
-        indexer.periodic_directory,
+        indexer.state_directory,
     ]:
         Path(d).mkdir(parents=True, exist_ok=True)
 
