@@ -273,10 +273,14 @@ def main():
     """Start the retrohunt worker."""
     global dp
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
+    logger.info(f"Allocating worker id: {worker_id}")
     logs: StringIO = capture_logs(logging.INFO)
+    logger.info(f"loading settings")
     settings = RetrohuntSettings()
     LOCK_TTL = settings.RedisSettings().ttl
+    logger.info(f"Starting prometheus server")
     start_http_server(settings.prometheus_port_worker)
+    logger.info(f"Initialising dispatcher")
     dp = dispatcher.DispatcherAPI(
         events_url=settings.events_url,
         data_url=settings.data_url,
@@ -289,73 +293,75 @@ def main():
     prom_jobs_run.labels(azm.HuntState.COMPLETED.name)
     prom_jobs_run.labels(azm.HuntState.CANCELLED.name)
     prom_jobs_run.labels(azm.HuntState.FAILED.name)
-
-    # poll for retrohunt submissions to work on
-    while True:
-        # Claim any stale jobs first
-        stream, messages = rs.redis.xautoclaim(
-            "retrohunt-jobs",
-            "retrohunt-workers",
-            worker_id,
-            min_idle_time=LOCK_TTL * 1000,
-            start_id="0-0",
-            count=1,
-        )
-
-        if messages:
-            msg_id, payload = messages[0]
-        else:
-            # no stale jobs, read new ones
-            events = rs.redis.xreadgroup(
-                groupname="retrohunt-workers",
-                consumername=worker_id,
-                streams={"retrohunt-jobs": ">"},
+    try:
+        # poll for retrohunt submissions to work on
+        while True:
+            # Claim any stale jobs first
+            stream, messages = rs.redis.xautoclaim(
+                "retrohunt-jobs",
+                "retrohunt-workers",
+                worker_id,
+                min_idle_time=LOCK_TTL * 1000,
+                start_id="0-0",
                 count=1,
-                block=5000,
             )
 
-            if not events:
-                sleep(15)
-                logger.debug("No events waiting. Retrying...")
+            if messages:
+                msg_id, payload = messages[0]
+            else:
+                # no stale jobs, read new ones
+                events = rs.redis.xreadgroup(
+                    groupname="retrohunt-workers",
+                    consumername=worker_id,
+                    streams={"retrohunt-jobs": ">"},
+                    count=1,
+                    block=5000,
+                )
+
+                if not events:
+                    sleep(15)
+                    logger.debug("No events waiting. Retrying...")
+                    continue
+
+                # Redis Streams structure: [(stream_name, [(msg_id, payload_dict)])]
+
+                _, msgs = events[0]
+                msg_id, payload = msgs[0]
+
+            # Load the full event from Redis
+            event_json = rs.redis.get(payload[b"hunt_id"])
+            if not event_json:
+                raise RuntimeError(f"Missing event data for hunt_id={payload['hunt_id']}")
+
+            job = azm.RetrohuntEvent(**json.loads(event_json))
+
+            job_id = job.entity.id
+            if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
                 continue
 
-            # Redis Streams structure: [(stream_name, [(msg_id, payload_dict)])]
+            if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
+                # Another worker is running this hunt
+                continue
 
-            _, msgs = events[0]
-            msg_id, payload = msgs[0]
+            # Start heartbeat
+            stop_event = threading.Event()
+            start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL, stop_event=stop_event)
 
-        # Load the full event from Redis
-        event_json = rs.redis.get(payload[b"hunt_id"])
-        if not event_json:
-            raise RuntimeError(f"Missing event data for hunt_id={payload['hunt_id']}")
+            bgi_folders = []
+            for _name, indexer_cfg in settings.indexers.items():
+                path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
+                bgi_folders.append(path_to_bgi_folder)
 
-        job = azm.RetrohuntEvent(**json.loads(event_json))
-
-        job_id = job.entity.id
-        if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
-            continue
-
-        if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
-            # Another worker is running this hunt
-            continue
-
-        # Start heartbeat
-        stop_event = threading.Event()
-        start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL, stop_event=stop_event)
-
-        bgi_folders = []
-        for _name, indexer_cfg in settings.indexers.items():
-            path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
-            bgi_folders.append(path_to_bgi_folder)
-
-        try:
-            with prom_worker_runtime.time():
-                hunt(bgi_folders, job, logs)
-            # Acknowledge the message
-            rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
-        finally:
-            stop_event.set()
-            rs.redis.delete(f"retrohunt:{job_id}:lock")
+            try:
+                with prom_worker_runtime.time():
+                    hunt(bgi_folders, job, logs)
+                # Acknowledge the message
+                rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
+            finally:
+                stop_event.set()
+                rs.redis.delete(f"retrohunt:{job_id}:lock")
+    except Exception as e:
+        logger.exception("Fatal error: ", e)
 
 
 if __name__ == "__main__":

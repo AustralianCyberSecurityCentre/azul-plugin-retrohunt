@@ -38,12 +38,8 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
-
-static_dir = files(__name__).joinpath("static")
-templates_dir = files(__name__).joinpath("templates")
-
-app.mount("/static", StaticFiles(directory=str(static_dir)))
-templates = Jinja2Templates(directory=str(templates_dir))
+static_path = files(__package__).joinpath("static")
+app.mount("/static", StaticFiles(directory=str(static_path)))
 
 app.add_middleware(
     PrometheusMiddleware,
@@ -52,6 +48,9 @@ app.add_middleware(
     group_paths=True,
 )
 app.add_route("/metrics", handle_metrics)
+
+templates_path = files(__package__).joinpath("templates")
+templates = Jinja2Templates(directory=str(templates_path))
 
 hunts = OrderedDict[str, azm.RetrohuntEvent.RetrohuntEntity]()
 
