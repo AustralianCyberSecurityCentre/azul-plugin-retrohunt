@@ -7,7 +7,6 @@ import logging
 import sys
 import time
 import traceback
-from pathlib import Path
 
 import click
 from prometheus_client import Counter, Gauge, start_http_server
@@ -16,6 +15,7 @@ from pydantic.types import ByteSize
 from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
 from azul_plugin_retrohunt.settings import RetrohuntSettings
 
+print("INDEXER: module imported")
 logger = logging.getLogger("retrohunt.indexer")
 
 log_root = logging.getLogger()
@@ -45,14 +45,9 @@ def run_indexer(
     """Run an indexer of the provided type with the provided root_path."""
     # Future allow for multiple indexer types at once. - as long as the indexer isn't overworked this will save lots
     # of RAM/CPU allocations.
+    print("running indexer")
     indexer = BigYaraIndexer(index_root_path, indexerSettings.name, int(indexerSettings.max_bytes_before_indexing))
-
-    for d in [
-        indexer.bgi_directory,
-        indexer.state_directory,
-    ]:
-        Path(d).mkdir(parents=True, exist_ok=True)
-
+    print("initialise indexer")
     prom_number_of_indexes_created.labels(indexer._processor_name, PERIODIC_INDEX_NAME)
     prom_number_of_indexes_created.labels(indexer._processor_name, SIZE_BASED_INDEX_NAME)
     prom_bgi_directory_bytes.labels(indexer._processor_name).set(indexer.count_bytes_for_dir(indexer.bgi_directory))
@@ -60,6 +55,7 @@ def run_indexer(
         f"Starting to run the indexer with path '{indexer.base_directory}' and max indexing size of "
         f"{indexerSettings.max_bytes_before_indexing.human_readable()}"
     )
+    print("starting main loop")
     while True:
         index_occurred = False
         for path_to_index in indexer.get_folders_ready_for_indexing():
@@ -120,7 +116,9 @@ def run_indexer(
 @click.option("--indexer-name", help="Name of the indexer, which is used to find it's config.")
 def main(indexer_name: str):
     """Main method for starting run indexer to index all the files in an indexers cache."""
+    print("starting indexer")
     settings = RetrohuntSettings()
+    print("INDEXER: settings loaded")
     start_http_server(settings.prometheus_port_indexer)
     indexer_cfg = settings.indexers.get(indexer_name, None)
     if not indexer_cfg:
