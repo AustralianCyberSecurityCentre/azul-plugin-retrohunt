@@ -64,10 +64,8 @@ class RetrohuntService:
         """Get the latest list of retrohunts by submission time."""
         cursor = 0
         hunts: OrderedDict[str, azm.RetrohuntEvent.RetrohuntEntity] = OrderedDict()
-
         while True:
             cursor, keys = self.redis.scan(cursor=cursor, match="hunt_*", count=limit)
-
             for key in keys:
                 raw_data = self.redis.get(key)
                 if raw_data is None:
@@ -89,17 +87,13 @@ class RetrohuntService:
                 break
 
         if not hunts:
-            raise HTTPException(
-                status_code=404,
-                detail="No Retrohunts found.",
-            )
+            return {"data": []}
 
         sorted_hunts = sorted(
             hunts.values(),
             key=lambda x: (x.submitted_time is not None, x.submitted_time),
             reverse=True,
         )
-
         return {"data": sorted_hunts[:limit]}
 
     def submit_hunt(self, submission: RetrohuntSubmission):

@@ -38,6 +38,7 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+
 static_path = files(__package__).joinpath("static")
 app.mount("/static", StaticFiles(directory=str(static_path)))
 
