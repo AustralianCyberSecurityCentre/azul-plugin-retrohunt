@@ -294,6 +294,19 @@ def main():
     prom_jobs_run.labels(azm.HuntState.CANCELLED.name)
     prom_jobs_run.labels(azm.HuntState.FAILED.name)
 
+    try:
+        rs.redis.xgroup_create(
+            "retrohunt-jobs",
+            "retrohunt-workers",
+            id="$",
+            mkstream=True
+        )
+    except ResponseError as e:
+        if "BUSYGROUP" in str(e):
+            pass  # already exists
+        else:
+            raise
+
     # poll for retrohunt submissions to work on
     while True:
         try:
