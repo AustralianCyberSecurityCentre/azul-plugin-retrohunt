@@ -357,9 +357,13 @@ def main():
             if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
                 continue
 
+            logger.debug("Worker found job.")
+
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
                 continue
+
+            logger.debug("lock aquired")
 
             # Start heartbeat
             stop_event = threading.Event()
@@ -372,6 +376,7 @@ def main():
 
             try:
                 with prom_worker_runtime.time():
+                    logger.debug("Starting hunt")
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
                 rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
