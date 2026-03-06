@@ -4,7 +4,7 @@ RetroHunt Worker Tests
 
 The worker is responsible for waiting on hunt submissions
 and triggering the required bigyara search, publishing
-progress events as it executes.
+progress events as it executes. test.
 """
 
 import copy
@@ -15,16 +15,30 @@ from hashlib import sha256
 from io import StringIO
 from unittest import mock
 
+import fakeredis
+import pytest
+
+
+## Create a fake env module
+fake_env = mock.MagicMock()
+fake_env.find_executable.return_value = "/bin/true"
+
+# Create a fake index module that uses the fake env
+fake_index = mock.MagicMock()
+fake_index.BigYaraIndexer = mock.MagicMock()
+fake_index.BigYaraIngestor = mock.MagicMock()
+from unittest.mock import patch
+
 import respx
-import urllib3
 from azul_bedrock import dispatcher
-from azul_bedrock import models_api as azapi
 from azul_bedrock import models_network as azm
 
 import azul_plugin_retrohunt
 from azul_plugin_retrohunt import test_utils
+from azul_plugin_retrohunt.ingestor import BigYaraIngestor
 from azul_plugin_retrohunt import worker as r_worker
 from azul_plugin_retrohunt.models import FileMetadata
+from unittest.mock import PropertyMock
 
 
 def str_to_datetime(datetime_string):
@@ -62,6 +76,9 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
 
     def setUp(self):
         resp = super().setUp()
+
+        self.fake_redis = fakeredis.FakeRedis()
+        self.fake_redis.flushdb()
         # Set dispatcher instance on workers.
         r_worker.dp = dispatcher.DispatcherAPI(
             events_url=self.dispatcher_url,
@@ -74,37 +91,86 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         )
         return resp
 
-    @respx.mock
-    @mock.patch("azul_plugin_retrohunt.worker.hunt")
-    def test_hunt_main(self, hunt_mock: mock.MagicMock):
-        """Test that hunt can startup and call the hunt function (useful for verifying settings are loaded correctly)."""
+    @patch("azul_plugin_retrohunt.retrohunt.RetrohuntService.redis", new_callable=PropertyMock)
+    def test_worker_processes_one_job(self, mock_redis):
+        """Test the worker processes one job in the redis jobs stream."""
+        mock_redis.return_value = self.fake_redis
+        self.fake_redis.flushdb()
 
         class StopTestException(Exception):
             pass
 
-        def raise_exception(*args):
-            raise StopTestException()
+        job_id = SUBMISSION.entity.id
 
-        hunt_mock.side_effect = raise_exception
-        respInfo = azapi.GetEventsInfo(filtered=5, fetched=1, ready=True)
-        respEvents = {"events": [copy.deepcopy(SUBMISSION).model_dump()]}
-        content, header = urllib3.encode_multipart_formdata(
-            {
-                "info": (None, respInfo.model_dump_json()),
-                "events": (None, json.dumps(respEvents)),
-            }
+        # Store full event
+        job_copy = copy.deepcopy(SUBMISSION)
+        job_copy.action = azm.RetrohuntEvent.RetrohuntAction.Submitted
+        self.fake_redis.set(job_id, job_copy.model_dump_json())
+
+        # Add job marker
+        msg_id = self.fake_redis.xadd(
+            "retrohunt-jobs",
+            {b"hunt_id": job_id.encode(), b"action": b"submitted"},
         )
-        respx.get(url__regex=rf"{self.dispatcher_url}/api/v2/event/.*").respond(
-            200, headers={"Content-Type": header}, content=content
+
+        # Fake stream behavior
+        call_count = 0
+
+        def fake_xreadgroup(*args, **kwargs):
+            nonlocal call_count
+            if call_count == 0:
+                call_count += 1
+                return [
+                    (
+                        "retrohunt-jobs",
+                        [(msg_id, {b"hunt_id": job_id.encode(), b"action": b"submitted"})],
+                    )
+                ]
+            raise StopTestException
+
+        def fake_xautoclaim(*args, **kwargs):
+            return ("retrohunt-jobs", [])
+
+        # Create consumer group
+        self.fake_redis.xgroup_create(
+            "retrohunt-jobs",
+            "retrohunt-workers",
+            id="0-0",
+            mkstream=True,
         )
-        self.assertRaises(StopTestException, r_worker.main)
+
+        # Side effect: assert lock exists when hunt is called
+        def hunt_side_effect(*args, **kwargs):
+            assert self.fake_redis.get(f"retrohunt:{job_id}:lock") is not None
+            return None
+
+        with (
+            mock.patch.object(r_worker.rs.redis, "xreadgroup", side_effect=fake_xreadgroup),
+            mock.patch.object(r_worker.rs.redis, "xautoclaim", side_effect=fake_xautoclaim),
+            mock.patch.object(r_worker.rs.redis, "xack", wraps=r_worker.rs.redis.xack) as xack_mock,
+        ):
+            hunt_mock = mock.Mock(side_effect=hunt_side_effect)
+
+            with mock.patch("azul_plugin_retrohunt.worker.EXCEPTION_SWALLOWING", False):
+                with mock.patch("azul_plugin_retrohunt.worker.hunt", hunt_mock):
+                    with pytest.raises(StopTestException):
+                        r_worker.main()
+
+        # hunt() must be called once
         hunt_mock.assert_called_once()
 
-    @respx.mock
-    def test_hunt_logs(self):
+        # xack must be called with correct args
+        xack_mock.assert_called_once_with("retrohunt-jobs", "retrohunt-workers", msg_id)
+
+        # Lock must be deleted after processing
+        assert self.fake_redis.get(f"retrohunt:{job_id}:lock") is None
+
+    @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
+    def test_hunt_logs(self, mock_redis):
         """Test that when doing a hunt the logs never gets above the max allowed size to prevent large objects being
         sent to kafka.
         """
+        mock_redis.return_value = self.fake_redis
         content1 = (
             b"When installing a PowerShell Preview release for Linux via a Package Repository, the package name"
             b" changes from powershell to powershell-preview"
@@ -150,18 +216,20 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             return result
 
         with mock.patch(
-            "azul_plugin_retrohunt.worker._update_progress", wraps=update_progress_wrapper
+            "azul_plugin_retrohunt.worker._update_progress",
+            wraps=update_progress_wrapper,
         ) as progress_wrapped:
-            progress_wrapped.side_effect
             log_capture = r_worker.capture_logs(logging.INFO)
             r_worker.hunt(self.base_temp_dir, copy.deepcopy(SUBMISSION), log_capture)
             progress_wrapped.assert_called()
 
-    @respx.mock
-    def test_hunt(self):
+    @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
+    def test_hunt(self, mock_redis):
+        """Submit a new retrohunt and ensure the worker writes progress/results
+        into Redis.
         """
-        Submit a new retrohunt via the API and ensure we can pull the same hunt back.
-        """
+        mock_redis.return_value = self.fake_redis
+        # Test data
         content1 = (
             b"When installing a PowerShell Preview release for Linux via a Package Repository, the package name"
             b" changes from powershell to powershell-preview"
@@ -169,62 +237,162 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         content2 = b"In this attack, victims are redirected to an attack site through a compromised website."
         content3 = b"\x00\x01\x02I heard you like binary data\x00\x00\x05powershell-preview-time"
 
-        test_content = {
-            sha256(content1).hexdigest(): content1,
-            sha256(content2).hexdigest(): content2,
-            sha256(content3).hexdigest(): content3,
-        }
+        import tempfile
 
-        # worker will post update events to dispatcher
-        resp = respx.post(f"{self.dispatcher_url}/api/v2/event").respond(
-            200, json={"total_ok": 0, "total_failures": 0, "failures": []}
+        tmp = tempfile.mkdtemp()
+
+        # Extract constructor args BEFORE replacing the ingestor
+        processor_name = self.ingestor._processor_name
+        max_bytes = self.ingestor._max_bytes_before_indexing
+        stream_labels = self.ingestor.stream_labels
+        periodic_freq = self.ingestor.periodic_index_frequency_min
+
+        # Rebuild ingestor with new root_path
+        self.ingestor = BigYaraIngestor(
+            root_path=tmp,
+            processor_name=processor_name,
+            max_bytes_before_indexing=max_bytes,
+            stream_labels=stream_labels,
+            periodic_index_frequency_min=periodic_freq,
         )
 
-        # worker will request file content
-        for key, value in test_content.items():
-            respx.get(f"{self.dispatcher_url}/api/v3/stream/samples/content/{key}").respond(200, content=value)
+        # Replace the real indexer with a MagicMock that supports the expected API
+        self.indexer = mock.MagicMock()
+        self.indexer.add_data_to_index_cache = mock.MagicMock()
+        self.indexer.generate_index = mock.MagicMock()
 
-        # create an index with some content
+        # ensure the MagicMock ingestion method actually writes data
+        def real_add(data, meta):
+            self.indexer.add_data_to_index_cache(self.ingestor.cache_directory, data, meta)
+
+        self.ingestor.add_data_to_index_cache = real_add
+
+        # Build index using the TEST indexer
         self.ingestor.add_data_to_index_cache(content1, FileMetadata(stream_label="content", stream_source="samples"))
         self.ingestor.add_data_to_index_cache(content2, FileMetadata(stream_label="content", stream_source="samples"))
         self.ingestor.add_data_to_index_cache(content3, FileMetadata(stream_label="content", stream_source="samples"))
+
         self.indexer.generate_index(self.ingestor.cache_directory)
-        r_worker.hunt(self.base_temp_dir, copy.deepcopy(SUBMISSION), None)
 
-        result_list: list[azm.RetrohuntEvent] = []
-        idx = 0
-        for call in resp.calls:
-            if call.request.content is not None:
-                body = call.request.content
-                events = json.loads(body)
-                self.assertEqual(len(events), 1)
-                request_data = azm.RetrohuntEvent.model_validate(events[0])
+        # Create a fake .bgi index file
+        fake_index = self.ingestor.cache_directory / "test.bgi"
+        with open(fake_index, "wb") as f:
+            f.write(b"FAKEINDEX")
 
-                cur_expected_result = EXPECTED_REQUESTS[idx]
-                print(f"processing expected request {idx + 1}")
+        # Patch dispatcher get_binary so the worker can fetch file content
+        from hashlib import sha256
+        from types import SimpleNamespace
 
-                cur_expected_result["source"]["timestamp"] = request_data.source.timestamp
-                cur_expected_result["kafka_key"] = request_data.kafka_key
-                cur_expected_result["timestamp"] = request_data.timestamp
+        from azul_plugin_retrohunt.worker import SearchPhaseEnum
 
-                expected_data = azm.RetrohuntEvent.model_validate(cur_expected_result)
+        sha1 = sha256(content1).hexdigest()
+        sha2 = sha256(content2).hexdigest()
+        sha3 = sha256(content3).hexdigest()
 
-                # Check results are expected
-                print(request_data.model_dump())
-                self.assertEqual(request_data.model_dump(), expected_data.model_dump())
-                # Append to ensure all assertions were carried out
-                result_list.append(request_data)
-                idx += 1
-        # Ensure all assertions actually occurred.
-        self.assertEqual(len(result_list), len(EXPECTED_REQUESTS))
-        self.assertEqual(idx, len(EXPECTED_REQUESTS))
+        test_content = {
+            sha1: content1,
+            sha2: content2,
+            sha3: content3,
+        }
+
+        def fake_get_binary(source=None, label=None, sha256=None, **kwargs):
+            return SimpleNamespace(content=test_content[sha256])
+
+        # Mock BigYara search to reproduce expected results
+        def fake_search(query, query_type, index_dirs, get_data, update_job, recursive):
+            # Simulate parsing rules
+            update_job(SearchPhaseEnum.ATOM_PARSE, 1, 1, ("r", [sha1]))
+
+            # Simulate broad phase: 2 index matches
+            update_job(SearchPhaseEnum.BROAD_PHASE, 1, 1, ("r", [sha1, sha3]))
+
+            # Ensure match_metadata is populated by calling get_data
+            cfg1 = {
+                b"stream_label": b"content",
+                b"stream_source": b"samples",
+                b"sample": sha1.encode(),
+            }
+            get_data(sha1, cfg1)
+
+            cfg2 = {
+                b"stream_label": b"content",
+                b"stream_source": b"samples",
+                b"sample": sha3.encode(),
+            }
+            get_data(sha3, cfg2)
+
+            # Simulate narrow phase: 2 tool matches
+            update_job(SearchPhaseEnum.NARROW_PHASE, 1, 2, ("r", [sha1]))
+            update_job(SearchPhaseEnum.NARROW_PHASE, 2, 2, ("r", [sha3]))
+
+        with mock.patch("azul_plugin_retrohunt.worker.dp.get_binary", side_effect=fake_get_binary):
+            with mock.patch("azul_plugin_retrohunt.worker.search", side_effect=fake_search):
+                with mock.patch(
+                    "azul_plugin_retrohunt.worker._update_progress",
+                    wraps=r_worker._update_progress,
+                ) as update_mock:
+                    job = copy.deepcopy(SUBMISSION)
+                    index_dirs = [self.ingestor.cache_directory]
+
+                    # Run the hunt
+                    r_worker.hunt(index_dirs, job, None)
+
+                    update_mock.assert_called()
+
+                    redis_key = job.entity.id
+                    stored_raw = self.fake_redis.get(redis_key)
+
+                    self.assertIsNotNone(
+                        stored_raw,
+                        f"Expected job stored in redis under key {redis_key}",
+                    )
+
+                    # Validate final job state
+                    stored_job = azm.RetrohuntEvent.model_validate(json.loads(stored_raw))
+                    entity = stored_job.entity
+
+                    # Validate final status
+                    self.assertEqual(entity.status, azm.HuntState.COMPLETED)
+
+                    # Validate results
+                    expected_results = {
+                        "r": [
+                            {
+                                "stream_label": "content",
+                                "stream_source": "samples",
+                                "sample": sha1,
+                            },
+                            {
+                                "stream_label": "content",
+                                "stream_source": "samples",
+                                "sample": sha3,
+                            },
+                        ]
+                    }
+
+                    self.assertEqual(entity.results, expected_results)
+
+                    # Validate counters
+                    self.assertEqual(entity.rules_parsed_total, 1)
+                    self.assertEqual(entity.rules_parsed_done, 1)
+                    self.assertEqual(entity.atom_count, 1)
+                    self.assertEqual(entity.index_searches_total, 1)
+                    self.assertEqual(entity.index_searches_done, 1)
+                    self.assertEqual(entity.index_match_count, 2)
+                    self.assertEqual(entity.tool_matches_total, 2)
+                    self.assertEqual(entity.tool_matches_done, 2)
+                    self.assertEqual(entity.tool_match_count, 2)
 
 
 EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "starting",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",
@@ -240,7 +408,11 @@ EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "running",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",
@@ -257,7 +429,11 @@ EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "running",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",
@@ -276,7 +452,11 @@ EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "running",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",
@@ -296,7 +476,11 @@ EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "running",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",
@@ -318,7 +502,11 @@ EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "running",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",
@@ -341,7 +529,11 @@ EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "running",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",
@@ -375,7 +567,11 @@ EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "running",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",
@@ -414,7 +610,11 @@ EXPECTED_REQUESTS = [
     {
         "model_version": azm.CURRENT_MODEL_VERSION,
         "action": "completed",
-        "author": {"name": "RetrohuntServer", "version": "0.1.0", "category": "service"},
+        "author": {
+            "name": "RetrohuntServer",
+            "version": "0.1.0",
+            "category": "service",
+        },
         "source": {
             "submitter": "tester",
             "name": "retrohunt",

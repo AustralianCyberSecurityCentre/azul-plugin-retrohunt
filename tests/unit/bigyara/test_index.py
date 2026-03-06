@@ -7,10 +7,7 @@ from unittest import mock
 import pendulum
 
 from azul_plugin_retrohunt import test_utils
-from azul_plugin_retrohunt.bigyara.base_processor import (
-    METADATA_SUFFIX,
-    SPLIT_DIR_SUFFIX,
-)
+from azul_plugin_retrohunt.bigyara.base_processor import METADATA_SUFFIX, SPLIT_DIR_SUFFIX
 from azul_plugin_retrohunt.settings import BGI_DIR_NAME, STATE_DIR_NAME
 
 
@@ -19,7 +16,8 @@ from azul_plugin_retrohunt.settings import BGI_DIR_NAME, STATE_DIR_NAME
 class TestBigYaraIndexing(test_utils.BaseIngestorIndexerTest):
     def test_directories_are_correct(self):
         self.assertEqual(
-            str(self.indexer.base_directory), os.path.join(self.base_temp_dir, self.indexer._processor_name)
+            str(self.indexer.base_directory),
+            os.path.join(self.base_temp_dir, self.indexer._processor_name),
         )
         self.assertEqual(
             str(self.indexer.bgi_directory),
@@ -158,7 +156,10 @@ class TestBigYaraIndexing(test_utils.BaseIngestorIndexerTest):
         )
 
         # Verify BGI isn't empty
-        bgi_file = pathlib.Path(self.indexer.bgi_directory, self.retrohunt_settings.periodic_bgi_name + ".bgi")
+        bgi_file = pathlib.Path(
+            self.indexer.bgi_directory,
+            self.retrohunt_settings.periodic_bgi_name + ".bgi",
+        )
         self.assertGreater(bgi_file.stat().st_size, 5000)
 
     def test_save_and_load_a_directory_has_been_indexed(self):

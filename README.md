@@ -20,14 +20,14 @@ This leverages the capabilities of Cert's BigGrep indexing.
 
 #### azul-plugin-retroworker:
 
-- subscribes to dispatcher and accepts `retrohunt` events submitted to dispatcher.
+- subscribes to Redis and accepts `retrohunt` events submitted to Redis.
   Upon receiving an event it runs across all available big grep indexes with the provided yara/suricata rule.
-- Once an event's rules have been run it posts a result back to dispatcher.
+- Once an event's rules have been run it posts a result back to Redis.
 - Single threaded and will only run one job at a time, if you want more jobs running. Run more instances.
 
 #### azul-plugin-retroserver:
 
-- Accepts yara/suricata rules from users and submits `retrohunt` events to dispatcher for retroworker to accept.
+- Accepts yara/suricata rules from users and submits `retrohunt` events to Redis for retroworker to accept.
 - Displays the resulsts or retrohunt workers jobs.
 
 ## Installation
@@ -146,6 +146,7 @@ The indexers can only talk to their own date and bgi folders and not each others
 ```mermaid
 flowchart RL
     dispatcher
+    redis
     server
     worker
     indexerA
@@ -153,12 +154,12 @@ flowchart RL
     webui
     subgraph pod1
     server-- http ---> webui
-    server-- GET event=retrohunt (Loop) ---> dispatcher
-    server-- POST event=retrohunt (User Request) ---> dispatcher
+    server-- GET event=retrohunt (Loop) ---> redis
+    server-- POST event=retrohunt (User Request) ---> redis
     end
 
     subgraph pod2
-    worker-- POST/GET event=retrohunt ---> dispatcher
+    worker-- POST/GET event=retrohunt ---> redis
     worker-- GET Raw Binary ---> dispatcher
 
     ingestor-- GET binary events ---> dispatcher
@@ -271,23 +272,23 @@ indexer1-name --- 20240108
 
 ### Bigyara & worker
 
-The processing order of retrohunt-worker and how it communicates with BigYara and dispatcher.
+The processing order of retrohunt-worker and how it communicates with BigYara, Dispatcher and Redis.
 
 ```mermaid
 sequenceDiagram
-    participant Dispatcher
+    participant Redis
     participant Worker
     participant Bigyara
-    Worker-->>Dispatcher: Get Job (retrohunt event)
+    Worker-->>Redis: Get Job (retrohunt event)
     Worker-->>Bigyara: Parse atoms for yara/suricata START
-    Worker-->>Dispatcher: Update retrohunt event - ATOM parse END
+    Worker-->>Redis: Update retrohunt event - ATOM parse END
     Worker-->>Bigyara: Broad phase search START
-    Worker-->>Dispatcher: Update retrohunt event - BROAD END
+    Worker-->>Redis: Update retrohunt event - BROAD END
     Worker-->>Bigyara: Start Narrow phase search
     Worker-->>Dispatcher: Get raw file identified in broad search.
     Bigyara-->>Worker: PREMATURE EXIT if upper limit of files to be scanned is reached.
     Bigyara-->>Worker: Return files that match yara/suricata rule.
-    Worker-->>Dispatcher: Update retrohunt event - NARROW END
+    Worker-->>Redis: Update retrohunt event - NARROW END
 ```
 
 ## Indexing and cache.
@@ -389,6 +390,17 @@ tox
 tox -e style
 # Run tests only
 tox -e test
+```
+
+## Integration tests
+
+To run the integration tests locally:
+
+```bash
+# start the redis server
+docker compose up
+# run the tests
+./tests/integration/test_redis.py
 ```
 
 ## Dependency management

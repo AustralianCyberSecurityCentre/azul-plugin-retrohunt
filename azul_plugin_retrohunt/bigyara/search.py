@@ -95,7 +95,10 @@ def search(
 
     # pass-through inner functions to check that callbacks exist and don't throw exceptions
     def checked_progress_callback(
-        search_phase: int, jobs_done: int, total_jobs: int, completed_item: tuple[str, list[str | bytes]]
+        search_phase: int,
+        jobs_done: int,
+        total_jobs: int,
+        completed_item: tuple[str, list[str | bytes]],
     ):
         if progress_callback:
             try:
@@ -133,7 +136,12 @@ def search(
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
     rule_matches = _narrow_phase_search(
-        query_type, rule_matches, rule_content, file_config, checked_data_callback, checked_progress_callback
+        query_type,
+        rule_matches,
+        rule_content,
+        file_config,
+        checked_data_callback,
+        checked_progress_callback,
     )
 
     return rule_matches
@@ -186,7 +194,10 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
 def _broad_phase_search(
-    query_type: int, indices: list[str], rule_atoms: RuleAtoms, progress_callback: ProgressCallback
+    query_type: int,
+    indices: list[str],
+    rule_atoms: RuleAtoms,
+    progress_callback: ProgressCallback,
 ) -> tuple[RuleFileMatches, FileConfig]:
     """Broad phase search by passing atoms to bgparse to find matches."""
     # suricata can do the broad stage search in batches for each rule,
@@ -242,7 +253,10 @@ def _broad_phase_search(
 
                 # process the output into match files and their corresponding config
                 new_matches, file_config = _process_bgparse_output(
-                    process.stdout, rule_name, rule_matches.get(rule_name, []), file_config
+                    process.stdout,
+                    rule_name,
+                    rule_matches.get(rule_name, []),
+                    file_config,
                 )
                 if rule_name not in rule_matches:
                     rule_matches[rule_name] = []
@@ -251,7 +265,10 @@ def _broad_phase_search(
                 # if the search found something, pass it through to the progress callback
                 searches_complete += 1
                 progress_callback(
-                    SearchPhaseEnum.BROAD_PHASE, searches_complete, search_count, (rule_name, new_matches)
+                    SearchPhaseEnum.BROAD_PHASE,
+                    searches_complete,
+                    search_count,
+                    (rule_name, new_matches),
                 )
 
     if len(rule_matches) == 0:
@@ -365,9 +382,19 @@ def _narrow_phase_search(
                 # even though a narrow phase search is unnecessary for string searches,
                 # we still call the progress callback in case the user is trying to do
                 # something important in it.
-                progress_callback(SearchPhaseEnum.NARROW_PHASE, jobs_complete, total_jobs, (rule_name, [file_path]))
+                progress_callback(
+                    SearchPhaseEnum.NARROW_PHASE,
+                    jobs_complete,
+                    total_jobs,
+                    (rule_name, [file_path]),
+                )
             else:
-                progress_callback(SearchPhaseEnum.NARROW_PHASE, jobs_complete, total_jobs, (rule_name, []))
+                progress_callback(
+                    SearchPhaseEnum.NARROW_PHASE,
+                    jobs_complete,
+                    total_jobs,
+                    (rule_name, []),
+                )
 
                 rule_matches[rule_name].remove(file_path)
 

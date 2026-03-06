@@ -3,7 +3,7 @@
 import tempfile
 
 from annotated_types import Gt, Lt
-from pydantic import BaseModel, ByteSize
+from pydantic import BaseModel, ByteSize, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Annotated
 
@@ -33,6 +33,35 @@ class RetrohuntSettings(BaseSettings):
         seconds_between_gathering_cpu_and_ram_metrics: Annotated[float, Gt(0), Lt(30)] = 5
         run_once: bool = False
 
+    class RedisSettings(BaseSettings):
+        """Nested configuration for RedisProvider."""
+
+        endpoint: str = Field(..., alias="REDIS_HOST")
+        port: int = Field(..., alias="REDIS_PORT")
+        ttl: int = Field(21600000, alias="REDIS_TTL")
+
+        @model_validator(mode="before")
+        def split_host_and_port(cls, values):
+            """Live uses endpoint:port. Integration tests have host + port separated."""
+            endpoint = values.get("endpoint")
+            if endpoint and ":" in endpoint:
+                host, port_str = endpoint.split(":", 1)
+                values["endpoint"] = host
+                values["port"] = int(port_str)
+
+            return values
+
+        username: str = Field(..., alias="REDIS_USERNAME")
+        password: str = Field(..., alias="REDIS_PASSWORD")
+        db: int = Field(..., alias="REDIS_DB")
+        cleanup_delay: int = Field(30, alias="REDIS_CLEANUP_DELAY")
+
+        model_config = SettingsConfigDict(
+            extra="ignore",
+            populate_by_name=True,
+        )
+
+    redis: RedisSettings = Field(default_factory=lambda: RetrohuntSettings.RedisSettings())
     # should be common for all indexers/ingestors.
     root_path: str = tempfile.gettempdir()
     indexers: dict[str, Indexer] = dict()

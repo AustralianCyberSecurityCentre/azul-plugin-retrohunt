@@ -199,7 +199,11 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         """
 
         results: RuleFileMatches = search(
-            yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, fetch_from_dict, progress_callback
+            yara_rule,
+            QueryTypeEnum.YARA,
+            self.base_temp_dir,
+            fetch_from_dict,
+            progress_callback,
         )
 
         self.assertDictEqual(
@@ -272,7 +276,11 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         self.index_data(list(content_dict.values()))
 
         results: RuleFileMatches = search(
-            yara_rules, QueryTypeEnum.YARA, self.base_temp_dir, fetch_from_dict, callback_val
+            yara_rules,
+            QueryTypeEnum.YARA,
+            self.base_temp_dir,
+            fetch_from_dict,
+            callback_val,
         )
         self.assertDictEqual(
             results,
@@ -354,7 +362,11 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
             return fetch_from_dict(path, unused)
 
         results: RuleFileMatches = search(
-            yara_rules, QueryTypeEnum.YARA, self.base_temp_dir, proxy_fetch_from_dict, callback_val
+            yara_rules,
+            QueryTypeEnum.YARA,
+            self.base_temp_dir,
+            proxy_fetch_from_dict,
+            callback_val,
         )
         self.assertDictEqual(
             results,

@@ -1,8 +1,11 @@
 """A simple synchronous worker for running BigYara retrohunts."""
 
+import json
 import logging
 import os
+import socket
 import sys
+import threading
 from datetime import datetime
 from io import StringIO
 from time import sleep
@@ -11,17 +14,22 @@ import pendulum
 from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
 from prometheus_client import Counter, Summary, start_http_server
+from redis.exceptions import ResponseError
 
 from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
+from azul_plugin_retrohunt.retrohunt import RetrohuntService
 from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
 
-prom_jobs_run = Counter("retrohunt_worker_jobs_run", "Total jobs run by prometheus and their final status", ["status"])
+prom_jobs_run = Counter(
+    "retrohunt_worker_jobs_run",
+    "Total jobs run by prometheus and their final status",
+    ["status"],
+)
 prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a workers run.")
 
 PLUGIN_NAME = "RetroHunter"
-PLUGIN_VERSION = "2025.10.10"
+PLUGIN_VERSION = "2026.02.26"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
-
 MATCH_LIMIT = 200
 
 dp: dispatcher.DispatcherAPI = None
@@ -40,6 +48,10 @@ log_root_handler.setFormatter(
 log_root.addHandler(log_root_handler)
 
 MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max of 500kB of logs
+# this flag will be set to false during tests as 1 must throw an exception in main.
+EXCEPTION_SWALLOWING = True
+
+rs = RetrohuntService()
 
 
 def capture_logs(level: int = logging.INFO) -> StringIO:
@@ -58,7 +70,10 @@ def capture_logs(level: int = logging.INFO) -> StringIO:
     log_handler = logging.StreamHandler(logs)
     log_handler.setFormatter(logging.Formatter(log_format, log_date_format))
 
-    tracked_loggers: list[logging.Logger] = [logging.getLogger("retrohunt.worker"), logging.getLogger("bigyara")]
+    tracked_loggers: list[logging.Logger] = [
+        logging.getLogger("retrohunt.worker"),
+        logging.getLogger("bigyara"),
+    ]
 
     for logger in tracked_loggers:
         logger.setLevel(level)
@@ -85,7 +100,7 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             # Jump to end again
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
-    dp.submit_events(events=[job], model=azm.ModelType.Retrohunt)
+    rs.redis.set(job.entity.id, json.dumps(job.model_dump()))
     return job
 
 
@@ -193,7 +208,14 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         else:
             raise Exception("Unknown search type.")
 
-        search(search_query, search_enum_type, index_dirs, get_data_from_azul, update_job, recursive=True)
+        search(
+            search_query,
+            search_enum_type,
+            index_dirs,
+            get_data_from_azul,
+            update_job,
+            recursive=True,
+        )
 
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
@@ -217,12 +239,48 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job = _update_progress(job, logs)
 
 
+def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
+    """Helper to aquire lock on retrohunt job."""
+    lock_key = f"retrohunt:{job_id}:lock"
+    return redis_client.set(lock_key, worker_id, nx=True, ex=ttl_seconds)
+
+
+def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: threading.Event):
+    """Starts a background heartbeat thread that periodically refreshes the lock TTL.
+
+    The heartbeat stops when stop_event is set.
+    """
+    lock_key = f"retrohunt:{job_id}:lock"
+    refresh_interval = ttl_seconds // 3  # refresh every 1/3 of TTL
+
+    def beat():
+        while not stop_event.is_set():
+            # Check if we still own the lock
+            current_owner = rs.redis.get(lock_key)
+            if current_owner != worker_id:
+                # Lost the lock — stop heartbeating
+                return
+
+            # Refresh TTL
+            rs.redis.expire(lock_key, ttl_seconds)
+
+            # Sleep until next refresh or until stop_event is set
+            stop_event.wait(refresh_interval)
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    return thread
+
+
 def main():
     """Start the retrohunt worker."""
     global dp
+    worker_id = f"{socket.gethostname()}-{os.getpid()}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
+    LOCK_TTL = settings.RedisSettings().ttl
     start_http_server(settings.prometheus_port_worker)
+
     dp = dispatcher.DispatcherAPI(
         events_url=settings.events_url,
         data_url=settings.data_url,
@@ -236,29 +294,116 @@ def main():
     prom_jobs_run.labels(azm.HuntState.CANCELLED.name)
     prom_jobs_run.labels(azm.HuntState.FAILED.name)
 
+    try:
+        rs.redis.xgroup_create("retrohunt-jobs", "retrohunt-workers", id="$", mkstream=True)
+    except ResponseError as e:
+        if "BUSYGROUP" in str(e):
+            pass  # already exists
+        else:
+            raise
+
     # poll for retrohunt submissions to work on
     while True:
-        # this code doesn't handle events 'actively' so use passive mode
-        _, events = dp.get_generic_events(
-            model="retrohunt", is_task=False, count=1, require_live=True, deadline=DISPATCHER_EVENT_WAIT_TIME_SECONDS
-        )
+        try:
+            # Claim any stale jobs first
+            try:
+                result = rs.redis.xautoclaim(
+                    "retrohunt-jobs",
+                    "retrohunt-workers",
+                    worker_id,
+                    min_idle_time=LOCK_TTL * 1000,
+                    start_id="0-0",
+                    count=1,
+                )
 
-        if events:
-            job = azm.RetrohuntEvent(**events[0])
-            if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
-                # can't filter these actions on dispatcher so we do it here
-                # retrohunt is low-rate so this should be fine
+                # fakeredis returns 2 values, redis-py returns 3
+                if len(result) == 3:
+                    next_id, messages, deleted = result
+                else:
+                    # fakeredis doesn't support deleted entries
+                    next_id, messages = result
+
+            except ResponseError as e:
+                if "NOGROUP" in str(e):
+                    logger.info("Job stream or consumer group not created yet. Waiting...")
+                    sleep(5)
+                    continue
+                raise
+
+            if messages:
+                msg_id, payload = messages[0]
+            else:
+                # no stale jobs, read new ones
+                try:
+                    events = rs.redis.xreadgroup(
+                        groupname="retrohunt-workers",
+                        consumername=worker_id,
+                        streams={"retrohunt-jobs": ">"},
+                        count=1,
+                        block=5000,
+                    )
+                except ResponseError as e:
+                    if "NOGROUP" in str(e):
+                        logger.info("Job stream or consumer group not created yet. Waiting...")
+                        sleep(5)
+                        continue
+                    raise
+
+                if not events:
+                    sleep(15)
+                    logger.debug("No events waiting. Retrying...")
+                    continue
+
+                # Redis Streams structure: [(stream_name, [(msg_id, payload_dict)])]
+
+                _, msgs = events[0]
+                msg_id, payload = msgs[0]
+
+            # Load the full event from Redis
+            event_json = rs.redis.get(payload[b"hunt_id"])
+            if not event_json:
+                logger.error(f"Missing or corrupted event data for hunt_id={payload[b'hunt_id']}. Skipping.")
+                rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
                 continue
+
+            job = azm.RetrohuntEvent(**json.loads(event_json))
+
+            job_id = job.entity.id
+            if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
+                continue
+
+            logger.debug("Worker found job.")
+
+            if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
+                # Another worker is running this hunt
+                continue
+
+            logger.debug("lock aquired")
+
+            # Start heartbeat
+            stop_event = threading.Event()
+            start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL, stop_event=stop_event)
+
             bgi_folders = []
             for _name, indexer_cfg in settings.indexers.items():
                 path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
                 bgi_folders.append(path_to_bgi_folder)
 
-            with prom_worker_runtime.time():
-                hunt(bgi_folders, job, logs)
-        else:
-            sleep(15)
-            logger.debug("No events waiting. Retrying...")
+            try:
+                with prom_worker_runtime.time():
+                    logger.debug("Starting hunt")
+                    hunt(bgi_folders, job, logs)
+                # Acknowledge the message
+                rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
+            finally:
+                stop_event.set()
+                rs.redis.delete(f"retrohunt:{job_id}:lock")
+        except Exception as e:
+            if not EXCEPTION_SWALLOWING:
+                raise
+            logger.exception(f"Worker error, continuing loop: {e}")
+            sleep(5)
+            continue
 
 
 if __name__ == "__main__":
