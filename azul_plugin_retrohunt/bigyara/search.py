@@ -1,12 +1,14 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
+import hashlib
 import logging
 import os
 import subprocess  # noqa: S404  # nosec: B404
 from collections import defaultdict
 
 import yara
+from prometheus_client import Histogram
 
 from . import (
     SEARCH_ATOM_SIZE_MIN,
@@ -29,6 +31,17 @@ from .yara_parse import parse_yara_rules
 #         in batches according to available core count.
 
 logger = logging.getLogger("bigyara.search")
+
+prom_broad_phase_duration = Histogram(
+    "retrohunt_broad_phase_duration_seconds",
+    "Time spent in the broad phase search",
+    ["query_hash"],
+)
+prom_narrow_phase_duration = Histogram(
+    "retrohunt_narrow_phase_duration_seconds",
+    "Time spent in the narrow phase search",
+    ["query_hash"],
+)
 
 
 class BiggrepException(Exception):
@@ -121,9 +134,12 @@ def search(
         if data_callback:
             logger.debug("Data callback is not used for string searches.")
 
+    query_hash = hashlib.sha256(query.encode()).hexdigest()
+
     rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search")
-    rule_matches, file_config = _broad_phase_search(query_type, indices, rule_atoms, checked_progress_callback)
+    with prom_broad_phase_duration.labels(query_hash=query_hash).time():
+        rule_matches, file_config = _broad_phase_search(query_type, indices, rule_atoms, checked_progress_callback)
 
     for rule_name in rule_atoms:
         if len(rule_matches[rule_name]) > 0:
@@ -132,9 +148,10 @@ def search(
             del rule_matches[rule_name]
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
-    rule_matches = _narrow_phase_search(
-        query_type, rule_matches, rule_content, file_config, checked_data_callback, checked_progress_callback
-    )
+    with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
+        rule_matches = _narrow_phase_search(
+            query_type, rule_matches, rule_content, file_config, checked_data_callback, checked_progress_callback
+        )
 
     return rule_matches
 
