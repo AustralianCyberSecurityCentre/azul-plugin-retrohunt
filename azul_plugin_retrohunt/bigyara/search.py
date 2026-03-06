@@ -34,12 +34,12 @@ logger = logging.getLogger("bigyara.search")
 
 prom_broad_phase_duration = Histogram(
     "retrohunt_broad_phase_duration_seconds",
-    "Time spent in the broad phase search",
+    "Time spent in broad phase search",
     ["query_hash"],
 )
 prom_narrow_phase_duration = Histogram(
     "retrohunt_narrow_phase_duration_seconds",
-    "Time spent in the narrow phase search",
+    "Time spent in narrow phase search",
     ["query_hash"],
 )
 
