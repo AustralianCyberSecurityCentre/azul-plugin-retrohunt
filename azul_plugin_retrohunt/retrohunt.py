@@ -133,16 +133,19 @@ class RetrohuntService:
             ),
         )
 
-        event_dict = event.model_dump()
-
-        self.redis.set(retrohunt_id, json.dumps(event_dict))
-        self.redis.xadd("retrohunt-jobs", {"hunt_id": retrohunt_id, "action": "Submitted"})
-
         if retrohunt_id is None:
             raise HTTPException(
                 status_code=404,
                 detail="There was an issue submitting the hunt.",
             )
+
+        event_dict = event.model_dump()
+        logger.debug(f"Submitting hunt {event_dict}")
+        self.redis.set(retrohunt_id, json.dumps(event_dict))
+        logger.debug(f"hunt submitted with id: {retrohunt_id}")
+        logger.debug("submitting job")
+        self.redis.xadd("retrohunt-jobs", {"hunt_id": retrohunt_id, "action": "Submitted"})
+
         return retrohunt_id
 
     def run_periodic_tasks(self):
