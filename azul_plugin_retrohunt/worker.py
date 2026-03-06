@@ -307,7 +307,7 @@ def main():
         try:
             # Claim any stale jobs first
             try:
-                stream, messages = rs.redis.xautoclaim(
+                result = rs.redis.xautoclaim(
                     "retrohunt-jobs",
                     "retrohunt-workers",
                     worker_id,
@@ -315,6 +315,14 @@ def main():
                     start_id="0-0",
                     count=1,
                 )
+
+                # fakeredis returns 2 values, redis-py returns 3
+                if len(result) == 3:
+                    next_id, messages, deleted = result
+                else:
+                    # fakeredis doesn't support deleted entries
+                    next_id, messages = result
+
             except ResponseError as e:
                 if "NOGROUP" in str(e):
                     logger.info("Job stream or consumer group not created yet. Waiting...")
@@ -356,7 +364,6 @@ def main():
             if not event_json:
                 logger.error(f"Missing or corrupted event data for hunt_id={payload[b'hunt_id']}. Skipping.")
                 rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
-                rs.redis.delete(f"retrohunt:{payload[b'hunt_id'].decode()}:lock")
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
