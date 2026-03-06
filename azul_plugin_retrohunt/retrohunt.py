@@ -50,7 +50,6 @@ class RetrohuntService:
             event = azm.RetrohuntEvent.model_validate_json(raw_event)
         except ValidationError as err:
             logger.exception("Corrupted retrohunt data for id %s", hunt_id)
-            print("Raw data for %s: %.300r", hunt_id, raw_event)
             raise HTTPException(
                 status_code=500,
                 detail="Stored retrohunt data is invalid",
@@ -75,7 +74,6 @@ class RetrohuntService:
                 except ValidationError:
                     # corrupted data
                     logger.exception("Corrupted retrohunt data for id %s", key)
-                    print("Raw data for %s: %.300r", key, raw_data)
                     continue
 
                 hunts[key] = event.entity
@@ -140,10 +138,7 @@ class RetrohuntService:
             )
 
         event_dict = event.model_dump()
-        print(f"Submitting hunt {event_dict}")
         self.redis.set(retrohunt_id, json.dumps(event_dict))
-        print(f"hunt submitted with id: {retrohunt_id}")
-        print("submitting job")
         self.redis.xadd("retrohunt-jobs", {"hunt_id": retrohunt_id, "action": "Submitted"})
 
         return retrohunt_id

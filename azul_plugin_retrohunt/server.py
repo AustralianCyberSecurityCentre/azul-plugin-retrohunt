@@ -120,14 +120,16 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 @app.get("/hunts", include_in_schema=False)
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     """List the latest retrohunts by submission time."""
-    ordered_hunts = rs.list_hunts(limit)
+    result = rs.list_hunts(limit)
+    ordered_hunts = result["data"]
     return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
 async def hunt_results(request: Request) -> HTMLResponse:
     """Get the details/results of the specified retrohunt."""
-    hunt = rs.get_hunts(request.path_params["id"])
+    result = rs.get_hunts(request.path_params["id"])
+    hunt = result["data"]
     if hunt is None:
         raise HTTPException(status_code=404, detail="Hunt not found")
     # return 404 if not available.
