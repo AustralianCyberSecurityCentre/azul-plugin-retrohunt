@@ -38,7 +38,7 @@ def test_submit_hunt_creates_event_and_stream_entry(service):
         search_type="wide",
         search="foo",
         submitter="tester",
-        security="security",
+        security=None,
     )
 
     hunt_id = rs.submit_hunt(submission)
