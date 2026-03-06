@@ -151,9 +151,10 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         ):
             hunt_mock = mock.Mock(side_effect=hunt_side_effect)
 
-            with mock.patch.dict(r_worker.main.__globals__, {"hunt": hunt_mock}):
-                with pytest.raises(StopTestException):
-                    r_worker.main()
+            with mock.patch("azul_plugin_retrohunt.worker.EXCEPTION_SWALLOWING", False):
+                with mock.patch("azul_plugin_retrohunt.worker.hunt", hunt_mock):
+                    with pytest.raises(StopTestException):
+                        r_worker.main()
 
         # hunt() must be called once
         hunt_mock.assert_called_once()

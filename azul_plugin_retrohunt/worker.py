@@ -14,6 +14,7 @@ import pendulum
 from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
 from prometheus_client import Counter, Summary, start_http_server
+from redis.exceptions import ResponseError
 
 from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
 from azul_plugin_retrohunt.retrohunt import RetrohuntService
@@ -47,6 +48,8 @@ log_root_handler.setFormatter(
 log_root.addHandler(log_root_handler)
 
 MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max of 500kB of logs
+# this flag will be set to false during tests as 1 must throw an exception in main.
+EXCEPTION_SWALLOWING = True
 
 rs = RetrohuntService()
 
@@ -273,14 +276,11 @@ def main():
     """Start the retrohunt worker."""
     global dp
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
-    logger.info(f"Allocating worker id: {worker_id}")
     logs: StringIO = capture_logs(logging.INFO)
-    logger.info("loading settings")
     settings = RetrohuntSettings()
     LOCK_TTL = settings.RedisSettings().ttl
-    logger.info("Starting prometheus server")
     start_http_server(settings.prometheus_port_worker)
-    logger.info("Initialising dispatcher")
+
     dp = dispatcher.DispatcherAPI(
         events_url=settings.events_url,
         data_url=settings.data_url,
@@ -293,30 +293,45 @@ def main():
     prom_jobs_run.labels(azm.HuntState.COMPLETED.name)
     prom_jobs_run.labels(azm.HuntState.CANCELLED.name)
     prom_jobs_run.labels(azm.HuntState.FAILED.name)
-    try:
-        # poll for retrohunt submissions to work on
-        while True:
+
+    # poll for retrohunt submissions to work on
+    while True:
+        try:
             # Claim any stale jobs first
-            stream, messages = rs.redis.xautoclaim(
-                "retrohunt-jobs",
-                "retrohunt-workers",
-                worker_id,
-                min_idle_time=LOCK_TTL * 1000,
-                start_id="0-0",
-                count=1,
-            )
+            try:
+                stream, messages = rs.redis.xautoclaim(
+                    "retrohunt-jobs",
+                    "retrohunt-workers",
+                    worker_id,
+                    min_idle_time=LOCK_TTL * 1000,
+                    start_id="0-0",
+                    count=1,
+                )
+            except ResponseError as e:
+                if "NOGROUP" in str(e):
+                    logger.info("Job stream or consumer group not created yet. Waiting...")
+                    sleep(5)
+                    continue
+                raise
 
             if messages:
                 msg_id, payload = messages[0]
             else:
                 # no stale jobs, read new ones
-                events = rs.redis.xreadgroup(
-                    groupname="retrohunt-workers",
-                    consumername=worker_id,
-                    streams={"retrohunt-jobs": ">"},
-                    count=1,
-                    block=5000,
-                )
+                try:
+                    events = rs.redis.xreadgroup(
+                        groupname="retrohunt-workers",
+                        consumername=worker_id,
+                        streams={"retrohunt-jobs": ">"},
+                        count=1,
+                        block=5000,
+                    )
+                except ResponseError as e:
+                    if "NOGROUP" in str(e):
+                        logger.info("Job stream or consumer group not created yet. Waiting...")
+                        sleep(5)
+                        continue
+                    raise
 
                 if not events:
                     sleep(15)
@@ -331,7 +346,10 @@ def main():
             # Load the full event from Redis
             event_json = rs.redis.get(payload[b"hunt_id"])
             if not event_json:
-                raise RuntimeError(f"Missing event data for hunt_id={payload['hunt_id']}")
+                logger.error(f"Missing or corrupted event data for hunt_id={payload[b'hunt_id']}. Skipping.")
+                rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
+                rs.redis.delete(f"retrohunt:{payload[b'hunt_id'].decode()}:lock")
+                continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
 
@@ -360,18 +378,13 @@ def main():
             finally:
                 stop_event.set()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
-    except Exception as e:
-        logger.exception(f"Fatal error: {e}")
-        raise
+        except Exception as e:
+            if not EXCEPTION_SWALLOWING:
+                raise
+            logger.exception(f"Worker error, continuing loop: {e}")
+            sleep(5)
+            continue
 
 
 if __name__ == "__main__":
-    import traceback
-
-    try:
-        main()
-    except Exception:
-        traceback.print_exc()
-        import time
-
-        time.sleep(600)
+    main()
