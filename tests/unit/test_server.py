@@ -47,7 +47,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             search_type="Yara",
             search="rule r {strings: $a= condition: $a}",
             submitter="tester",
-            security="OFFICIAL",
+            security="",
         )
 
         mock_redis.return_value = self.fake_redis
