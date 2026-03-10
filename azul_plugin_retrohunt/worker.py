@@ -84,8 +84,14 @@ def capture_logs(level: int = logging.INFO) -> StringIO:
 def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEvent:
     """Update with latest job status and publish."""
     job.timestamp = pendulum.now()
+    
+    if job.action == azm.RetrohuntEvent.RetrohuntAction.Running:
+        if not job.entity.processing_start:
+            job.entity.processing_start = job.timestamp
+
     if job.entity.processing_start:
         job.entity.duration = (job.timestamp - job.entity.processing_start).total_seconds()
+        
     if logs:
         logs.seek(0, os.SEEK_END)
         log_total_chars = logs.tell()
