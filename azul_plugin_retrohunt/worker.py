@@ -100,7 +100,7 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             # Jump to end again
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
-    print("updating redis job: ", job)
+
     rs.redis.set(job.entity.id, json.dumps(job.model_dump()))
     return job
 
@@ -117,10 +117,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
     def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job
-        print("Updating job ", job)
-        print("phase ", phase)
-        print("done ", done)
-        print("new_match: ", new_match)
+   
         if phase == SearchPhaseEnum.ATOM_PARSE:
             job.entity.status = azm.HuntState.PARSING_RULES
             job.entity.rules_parsed_total = total
@@ -211,7 +208,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             # index_dirs = os.path.join(index_dirs, "pcap")
         else:
             raise Exception("Unknown search type.")
-        print("Starting search ", search_query, search_enum_type, index_dirs)
+
         search(
             search_query,
             search_enum_type,
@@ -222,7 +219,6 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         )
 
         logger.info("Successfully completed job.")
-        print("job complete")
         job.entity.status = azm.HuntState.COMPLETED
         prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
         logger.debug(job.entity)
@@ -396,7 +392,6 @@ def main():
 
             try:
                 with prom_worker_runtime.time():
-                    print("Starting hunt: ", bgi_folders, job, logs)
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
                 rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)

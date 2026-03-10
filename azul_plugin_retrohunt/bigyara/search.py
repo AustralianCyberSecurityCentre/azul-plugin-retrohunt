@@ -135,7 +135,7 @@ def search(
             del rule_matches[rule_name]
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
-    print("Starting narrow search ", query_type, rule_matches, rule_content, file_config)
+
     rule_matches = _narrow_phase_search(
         query_type,
         rule_matches,
