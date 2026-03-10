@@ -85,7 +85,7 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
     """Update with latest job status and publish."""
     job.timestamp = pendulum.now()
     if job.entity.processing_start:
-            job.entity.duration = (job.timestamp - job.entity.processing_start).total_seconds()
+        job.entity.duration = (job.timestamp - job.entity.processing_start).total_seconds()
     if logs:
         logs.seek(0, os.SEEK_END)
         log_total_chars = logs.tell()
@@ -119,7 +119,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
     def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job
-   
+
         if phase == SearchPhaseEnum.ATOM_PARSE:
             job.entity.status = azm.HuntState.PARSING_RULES
             job.entity.rules_parsed_total = total
