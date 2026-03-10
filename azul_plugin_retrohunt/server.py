@@ -53,6 +53,25 @@ app.add_route("/metrics", handle_metrics)
 templates_path = files(__package__).joinpath("templates")
 templates = Jinja2Templates(directory=str(templates_path))
 
+
+def format_duration(secs):
+    """Make time durations more human readable."""
+    days = 60 * 60 * 24
+    hours = 60 * 60
+    minutes = 60
+    if secs is None:
+        return "unknown"
+    if secs / days > 1:
+        return "%02.1f days" % (secs / days)
+    if secs / hours > 1:
+        return "%02.1f hours" % (secs / hours)
+    if secs / minutes > 1:
+        return "%02.1f mins" % (secs / minutes)
+    return "%i secs" % secs
+
+
+templates.env.filters["duration"] = format_duration
+
 hunts = OrderedDict[str, azm.RetrohuntEvent.RetrohuntEntity]()
 
 START_STATES: list[str] = [azm.HuntState.SUBMITTED]
