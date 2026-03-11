@@ -128,7 +128,7 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
         search_type=search_type,
         search=search,
         submitter=SERVICE_NAME,
-        security="",
+        security=None,
     )
     huntid = rs.submit_hunt(submission)
 
