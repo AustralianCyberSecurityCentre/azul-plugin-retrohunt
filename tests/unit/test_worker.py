@@ -34,6 +34,7 @@ from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
 
 import azul_plugin_retrohunt
+from azul_plugin_retrohunt.retrohunt import FatalException
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.ingestor import BigYaraIngestor
 from azul_plugin_retrohunt import worker as r_worker
@@ -97,9 +98,6 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         mock_redis.return_value = self.fake_redis
         self.fake_redis.flushdb()
 
-        class StopTestException(Exception):
-            pass
-
         job_id = SUBMISSION.entity.id
 
         # Store full event
@@ -126,7 +124,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                         [(msg_id, {b"hunt_id": job_id.encode(), b"action": b"submitted"})],
                     )
                 ]
-            raise StopTestException
+            raise FatalException
 
         def fake_xautoclaim(*args, **kwargs):
             return ("retrohunt-jobs", [])
@@ -153,7 +151,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
 
             with mock.patch("azul_plugin_retrohunt.worker.EXCEPTION_SWALLOWING", False):
                 with mock.patch("azul_plugin_retrohunt.worker.hunt", hunt_mock):
-                    with pytest.raises(StopTestException):
+                    with pytest.raises(FatalException):
                         r_worker.main()
 
         # hunt() must be called once

@@ -18,6 +18,12 @@ from azul_plugin_retrohunt.settings import RetrohuntSettings
 logger = logging.getLogger("retrohunt.service")
 
 
+class FatalException(Exception):
+    """Custom exception used by tests."""
+
+    pass
+
+
 class RetrohuntService:
     """Service to manage hunt getters and setters."""
 

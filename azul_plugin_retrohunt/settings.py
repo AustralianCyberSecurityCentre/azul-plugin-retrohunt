@@ -39,6 +39,7 @@ class RetrohuntSettings(BaseSettings):
         endpoint: str = Field(..., alias="REDIS_HOST")
         port: int = Field(..., alias="REDIS_PORT")
         ttl: int = Field(21600000, alias="REDIS_TTL")
+        exception_wait: int = Field(60, alias="REDIS_EXCEPTION_WAIT")
 
         @model_validator(mode="before")
         def split_host_and_port(cls, values):

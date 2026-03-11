@@ -17,7 +17,7 @@ from prometheus_client import Counter, Summary, start_http_server
 from redis.exceptions import ResponseError
 
 from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
-from azul_plugin_retrohunt.retrohunt import RetrohuntService
+from azul_plugin_retrohunt.retrohunt import FatalException, RetrohuntService
 from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
 
 prom_jobs_run = Counter(
@@ -48,8 +48,6 @@ log_root_handler.setFormatter(
 log_root.addHandler(log_root_handler)
 
 MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max of 500kB of logs
-# this flag will be set to false during tests as 1 must throw an exception in main.
-EXCEPTION_SWALLOWING = True
 
 rs = RetrohuntService()
 
@@ -406,12 +404,12 @@ def main():
             finally:
                 stop_event.set()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
+        # used by tests
+        except FatalException:
+            raise
         except Exception as e:
-            # Swallow exceptions for tests only.
-            if not EXCEPTION_SWALLOWING:
-                raise
             logger.exception(f"Worker error, continuing loop: {e}")
-            sleep(5)
+            sleep(settings.RedisSettings.exception_wait)
             continue
 
 
