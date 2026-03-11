@@ -7,11 +7,7 @@ import shutil
 
 import pendulum
 
-from azul_plugin_retrohunt.bigyara.base_processor import (
-    FOLDER_DATE_FORMAT,
-    METADATA_SUFFIX,
-    BaseYaraProcessor,
-)
+from azul_plugin_retrohunt.bigyara.base_processor import FOLDER_DATE_FORMAT, METADATA_SUFFIX, BaseYaraProcessor
 from azul_plugin_retrohunt.models import FileMetadata
 from azul_plugin_retrohunt.settings import CACHE_DIR_NAME, STATE_DIR_NAME
 
@@ -169,7 +165,8 @@ class BigYaraIngestor(BaseYaraProcessor):
         # If there is exactly one file add a dummy file so that indexing can still occur.
         elif source_files == 1:
             successful = self.add_data_to_index_cache(
-                b"dummy-file", FileMetadata(stream_label="content", stream_source="testing")
+                b"dummy-file",
+                FileMetadata(stream_label="content", stream_source="testing"),
             )
             if not successful:
                 logger.info(

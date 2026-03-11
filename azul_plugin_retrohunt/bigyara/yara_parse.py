@@ -123,7 +123,10 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
                 if yara_atom not in new_atoms:
                     new_atoms.append(yara_atom)
         progress_callback(
-            SearchPhaseEnum.ATOM_PARSE, rule_index + 1, len(yara_rules), (yara_rules[rule_index].name, new_atoms)
+            SearchPhaseEnum.ATOM_PARSE,
+            rule_index + 1,
+            len(yara_rules),
+            (yara_rules[rule_index].name, new_atoms),
         )
         rule_atoms[yara_rules[rule_index].name] = new_atoms
 
@@ -184,7 +187,8 @@ def _parse_yara_with_exe(yara_exe: str, rule_file: str) -> list[YaraRule]:
     process: subprocess.CompletedProcess[bytes]
     with tempfile.NamedTemporaryFile() as dummy_data_file:
         process = subprocess.run(  # noqa: S603  # nosec: B603
-            (yara_exe, "--no-warnings", rule_file, dummy_data_file.name), capture_output=True
+            (yara_exe, "--no-warnings", rule_file, dummy_data_file.name),
+            capture_output=True,
         )  # noqa: S403  # nosec: B403
     if process.returncode != 0:
         raise Exception(f"Error running {yara_exe}, exit code {process.returncode}: {process.stderr.decode()}")

@@ -16,10 +16,7 @@ from azul_bedrock.models_network import BinaryAction
 from azul_runner import BinaryPlugin, Job, State, add_settings, cmdline_run, settings
 from prometheus_client import Counter, Gauge, start_http_server
 
-from azul_plugin_retrohunt.bigyara.ingest import (
-    BigYaraIngestor,
-    IngestFileSizeException,
-)
+from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor, IngestFileSizeException
 from azul_plugin_retrohunt.models import FileMetadata
 from azul_plugin_retrohunt.settings import RetrohuntSettings
 
@@ -46,7 +43,10 @@ class RetrohuntIngestor(BinaryPlugin):
     NAME = "RetrohuntIngestor"
     SETTINGS = add_settings(
         require_historic=False,
-        filter_allow_event_types=[BinaryAction.Sourced.value, BinaryAction.Extracted.value],
+        filter_allow_event_types=[
+            BinaryAction.Sourced.value,
+            BinaryAction.Extracted.value,
+        ],
         filter_data_types={"content": []},  # Take everything and filter it at the index level.
         hash_cache_size=(int, 16_000),  # Number of hashes to store for de-duping.
     )
@@ -106,7 +106,8 @@ class RetrohuntIngestor(BinaryPlugin):
                     continue
 
             metadata: FileMetadata = FileMetadata(
-                stream_label=data.file_info.label or "content", stream_source=job.event.source.name
+                stream_label=data.file_info.label or "content",
+                stream_source=job.event.source.name,
             )
             # Skip a file is it has no stream label or stream source as it's invalid.
             if not metadata.stream_label or not metadata.stream_source:

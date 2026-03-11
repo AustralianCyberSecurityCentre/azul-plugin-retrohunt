@@ -27,7 +27,7 @@ class RetrohuntSubmission(BaseModel):
     search_type: str
     search: str
     submitter: str = SERVICE_NAME
-    security: str = ""
+    security: dict | None = None
 
 
 class FileMetadata(BaseModel):
