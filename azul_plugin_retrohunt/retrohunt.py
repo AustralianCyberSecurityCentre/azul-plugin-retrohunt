@@ -11,6 +11,7 @@ import redis
 from azul_bedrock import models_network as azm
 from fastapi import HTTPException
 from pydantic_core import ValidationError
+from redis.exceptions import ResponseError
 
 from azul_plugin_retrohunt.models import SERVICE_NAME, SERVICE_VERSION, RetrohuntSubmission
 from azul_plugin_retrohunt.settings import RetrohuntSettings
@@ -143,6 +144,14 @@ class RetrohuntService:
                 detail="There was an issue submitting the hunt.",
             )
 
+        try:
+            self.redis.xgroup_create("retrohunt-jobs", "retrohunt-workers", id="$", mkstream=True)
+        except ResponseError as e:
+            if "BUSYGROUP" in str(e):
+                pass  # already exists
+            else:
+                raise
+
         event_dict = event.model_dump()
         self.redis.set(retrohunt_id, json.dumps(event_dict))
         self.redis.xadd("retrohunt-jobs", {"hunt_id": retrohunt_id, "action": "Submitted"})
@@ -158,54 +167,53 @@ class RetrohuntService:
 
         self._cleanup_hunts(cutoff_30d, cutoff_3d)
         self._cleanup_stream(cutoff_30d, cutoff_3d)
+        self._cleanup_locks()
+
+    from datetime import datetime
 
     def _cleanup_hunts(self, cutoff_30d, cutoff_3d):
         """Remove RetrohuntEntity entries older than cleanup_delay days, or older than 3 days if not completed."""
+        # Only match hunt keys, not streams or other retrohunt_* keys
+        pattern = "hunt_*"
         cursor = 0
-        pattern = "retrohunt_*"
+        print("Cleaning")
         while True:
             cursor, keys = self.redis.scan(cursor=cursor, match=pattern, count=100)
 
             for key in keys:
-                # Normalize all key forms
-                key_str = key.decode() if isinstance(key, bytes) else key
-                key_bytes = key_str.encode()
+                print("key ", key)
+                # Redis always returns bytes for keys
+                key_str = key.decode()
 
-                # Try all forms when reading
-                raw = self.redis.get(key) or self.redis.get(key_str) or self.redis.get(key_bytes)
-
+                raw = self.redis.get(key_str)
                 if not raw:
-                    self.redis.delete(key)
                     self.redis.delete(key_str)
-                    self.redis.delete(key_bytes)
                     continue
 
                 try:
                     event = azm.RetrohuntEvent.model_validate_json(raw)
                     ts_str = event.entity.submitted_time
                     status = event.entity.status
+
                     if not ts_str:
-                        self.redis.delete(key)
                         self.redis.delete(key_str)
-                        self.redis.delete(key_bytes)
                         continue
-                    submitted = ts_str
+
+                    submitted = datetime.fromisoformat(ts_str)
+
                 except Exception:
-                    self.redis.delete(key)
+                    # Invalid JSON or invalid event → delete it
                     self.redis.delete(key_str)
-                    self.redis.delete(key_bytes)
                     continue
-
+                print("This is submitted ", submitted)
+                # Delete if older than 30 days
                 if submitted < cutoff_30d:
-                    self.redis.delete(key)
                     self.redis.delete(key_str)
-                    self.redis.delete(key_bytes)
                     continue
 
-                if submitted < cutoff_3d and status != "completed":
-                    self.redis.delete(key)
+                # Delete if older than 3 days AND not completed
+                if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
                     self.redis.delete(key_str)
-                    self.redis.delete(key_bytes)
                     continue
 
             if cursor == 0:
@@ -215,32 +223,31 @@ class RetrohuntService:
         """Remove stream entries older than cleanup_delay days or whose hunts are stale or missing."""
         stream = "retrohunt-jobs"
 
+        # xrange returns a list of (entry_id, {field: value})
         entries = self.redis.xrange(stream, min="-", max="+")
 
         for entry_id, fields in entries:
-            entry_id = entry_id.decode()
+            # entry_id is already a string in real Redis
+            entry_id = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
 
-            # Parse timestamp from stream ID "<ms>-<seq>"
             ms_str, _ = entry_id.split("-")
             ts = datetime.fromtimestamp(int(ms_str) / 1000, tz=timezone.utc)
 
+            # Drop entries older than 30 days
             if ts < cutoff_30d:
                 self.redis.xdel(stream, entry_id)
                 continue
 
-            # Normalize keys + values (fakeredis uses bytes)
-            fields = {
-                (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
-                for k, v in fields.items()
-            }
+            # Decode fields once (real Redis returns bytes)
+            decoded = {k.decode(): v.decode() for k, v in fields.items()}
 
-            hunt_id = fields.get("id")
+            hunt_id = decoded.get("id")
             if not hunt_id:
                 self.redis.xdel(stream, entry_id)
                 continue
 
-            raw = self.redis.get(hunt_id) or self.redis.get(hunt_id.encode())
-
+            # Get the hunt record
+            raw = self.redis.get(hunt_id)
             if not raw:
                 self.redis.xdel(stream, entry_id)
                 continue
@@ -253,6 +260,35 @@ class RetrohuntService:
                 self.redis.xdel(stream, entry_id)
                 continue
 
-            if submitted < cutoff_3d and status != "completed":
+            # Drop stale or incomplete hunts older than 3 days
+            if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
                 self.redis.xdel(stream, entry_id)
                 continue
+
+    def _cleanup_locks(self):
+        """Remove retrohunt job locks that are invalid."""
+        cursor = 0
+        pattern = "retrohunt:hunt_*:lock"
+
+        while True:
+            cursor, keys = self.redis.scan(cursor=cursor, match=pattern, count=100)
+
+            for key in keys:
+                # Normalize key
+                key_str = key.decode() if isinstance(key, bytes) else key
+
+                # Check TTL
+                ttl = self.redis.ttl(key_str)
+
+                # lock has no expiration (broken)
+                if ttl == -1:
+                    self.redis.delete(key_str)
+                    continue
+
+                # key does not exist (cleanup)
+                if ttl == -2:
+                    self.redis.delete(key_str)
+                    continue
+            # healthy lock
+            if cursor == 0:
+                break

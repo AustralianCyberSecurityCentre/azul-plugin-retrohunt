@@ -264,7 +264,7 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
         while not stop_event.is_set():
             # Check if we still own the lock
             current_owner = rs.redis.get(lock_key)
-            if current_owner != worker_id:
+            if current_owner.decode() != worker_id:
                 # Lost the lock — stop heartbeating
                 return
 
@@ -376,7 +376,8 @@ def main():
             job = azm.RetrohuntEvent(**json.loads(event_json))
 
             job_id = job.entity.id
-            if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
+            # these will be cleaned up by the cronjob later
+            if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 continue
 
             logger.debug("Worker found job.")
