@@ -180,7 +180,6 @@ class RetrohuntService:
             cursor, keys = self.redis.scan(cursor=cursor, match=pattern, count=100)
 
             for key in keys:
-                print("key ", key)
                 # Redis always returns bytes for keys
                 key_str = key.decode()
 
@@ -204,7 +203,6 @@ class RetrohuntService:
                     # Invalid JSON or invalid event → delete it
                     self.redis.delete(key_str)
                     continue
-                print("This is submitted ", submitted)
                 # Delete if older than 30 days
                 if submitted < cutoff_30d:
                     self.redis.delete(key_str)
