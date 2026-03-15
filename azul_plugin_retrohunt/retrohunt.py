@@ -162,8 +162,9 @@ class RetrohuntService:
         """Used in cronjob to remove redis jobs and entries older than cleanup_delay days."""
         now = datetime.now(timezone.utc)
         cutoff_long = RetrohuntSettings().RedisSettings().cleanup_delay
+        cutoff_short = RetrohuntSettings().RedisSettings().cleanup_running_delay
         cutoff_30d = now - timedelta(days=cutoff_long)
-        cutoff_3d = now - timedelta(days=3)
+        cutoff_3d = now - timedelta(days=cutoff_short)
 
         self._cleanup_hunts(cutoff_30d, cutoff_3d)
         self._cleanup_stream(cutoff_30d, cutoff_3d)

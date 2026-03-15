@@ -56,6 +56,7 @@ class RetrohuntSettings(BaseSettings):
         password: str = Field(..., alias="REDIS_PASSWORD")
         db: int = Field(..., alias="REDIS_DB")
         cleanup_delay: int = Field(30, alias="REDIS_CLEANUP_DELAY")
+        cleanup_running_delay: int = Field(7, alias="REDIS_CLEANUP_RUNNING_DELAY")
 
         model_config = SettingsConfigDict(
             extra="ignore",
