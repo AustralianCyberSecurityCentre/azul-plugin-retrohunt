@@ -176,7 +176,6 @@ class RetrohuntService:
         # Only match hunt keys, not streams or other retrohunt_* keys
         pattern = "hunt_*"
         cursor = 0
-        print("Cleaning")
         while True:
             cursor, keys = self.redis.scan(cursor=cursor, match=pattern, count=100)
 
