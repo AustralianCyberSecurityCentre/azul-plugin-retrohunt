@@ -246,6 +246,30 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job = _update_progress(job, logs)
 
 
+def check_lock_active(redis_client, job_id: str, worker_id: str):
+    """Check for a valid lock. If not we should acquire a new one."""
+    lock_key = f"retrohunt:{job_id}:lock"
+    owner = redis_client.get(lock_key)
+    ttl = redis_client.ttl(lock_key)
+
+    if owner is None or ttl == -2:
+        return False
+
+    if ttl == -1:
+        return False
+
+    if ttl <= 0:
+        return False
+
+    owner = owner.decode()
+
+    # Lock belongs to another worker
+    if owner != worker_id:
+        return True
+
+    return False
+
+
 def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
     """Helper to aquire lock on retrohunt job."""
     lock_key = f"retrohunt:{job_id}:lock"
@@ -320,9 +344,9 @@ def main():
                     worker_id,
                     min_idle_time=LOCK_TTL * 1000,
                     start_id="0-0",
-                    count=1,
+                    count=2,
                 )
-
+                print("Found stale jobs: ", result)
                 # fakeredis returns 2 values, redis-py returns 3
                 if len(result) == 3:
                     next_id, messages, deleted = result
@@ -374,7 +398,7 @@ def main():
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
-
+            print("job: ", job)
             job_id = job.entity.id
             # these will be cleaned up by the cronjob later
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
@@ -382,8 +406,14 @@ def main():
 
             logger.debug("Worker found job.")
 
-            if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
+            if check_lock_active(job_id, worker_id):
                 # Another worker is running this hunt
+                print("Failed to acquire lock.")
+                continue
+
+            if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
+                # another worker got it
+                print("another worker got it")
                 continue
 
             logger.debug("lock aquired")
