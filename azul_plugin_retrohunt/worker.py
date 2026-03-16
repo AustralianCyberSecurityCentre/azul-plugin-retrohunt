@@ -406,7 +406,7 @@ def main():
 
             logger.debug("Worker found job.")
 
-            if check_lock_active(job_id, worker_id):
+            if check_lock_active(rs.redis, job_id, worker_id):
                 # Another worker is running this hunt
                 print("Failed to acquire lock.")
                 continue
