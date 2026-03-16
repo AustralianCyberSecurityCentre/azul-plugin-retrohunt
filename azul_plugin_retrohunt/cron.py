@@ -13,7 +13,6 @@ log = logging.getLogger("retrohunt.cron")
 def run_cron():
     """Entry point for the Kubernetes CronJob."""
     log.info("Starting Retrohunt cronjob task")
-
     service = RetrohuntService()
 
     try:
