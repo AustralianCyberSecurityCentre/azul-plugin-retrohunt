@@ -347,12 +347,8 @@ def main():
                     STREAM,
                     GROUP,
                 )
-                if isinstance(pending, dict):
-                    pending_entries = []
-                else:
-                    pending_entries = pending
                 print(pending)
-                for entry in pending_entries:
+                for entry in pending:
                     msg_id = entry[0]
                     idle_ms = entry[2]
                     print("Entry: ", entry)
