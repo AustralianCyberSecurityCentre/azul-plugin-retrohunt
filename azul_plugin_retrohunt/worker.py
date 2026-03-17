@@ -264,8 +264,8 @@ def check_lock_active(redis_client, job_id: str, worker_id: str):
 
     owner = owner.decode()
 
-    # Lock belongs to another worker
-    if owner != worker_id:
+    # Lock belongs to another worker with valid lock
+    if owner != worker_id and ttl > 0:
         return True
 
     return False
