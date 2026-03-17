@@ -351,7 +351,7 @@ def main():
                     pending_entries = []
                 else:
                     pending_entries = pending
-
+                print(pending)
                 for entry in pending_entries:
                     msg_id = entry[0]
                     idle_ms = entry[2]
