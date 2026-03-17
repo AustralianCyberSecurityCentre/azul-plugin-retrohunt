@@ -130,7 +130,7 @@ def test_cronjob_cleanup_runs_and_cleans(service):
     assert result.returncode == 0, f"Cronjob failed: {result.stderr}"
 
     # Hunt should be deleted
-    assert rs.redis.get("retrohunt:hunt_stale") is None
+    assert rs.redis.get("hunt_stale") is None
 
     # Stream entry should be deleted
     entries = rs.redis.xrange("retrohunt-jobs", "-", "+")

@@ -239,7 +239,7 @@ class RetrohuntService:
             # Decode fields once (real Redis returns bytes)
             decoded = {k.decode(): v.decode() for k, v in fields.items()}
 
-            hunt_id = decoded.get("id")
+            hunt_id = decoded.get("hunt_id")
             if not hunt_id:
                 self.redis.xdel(stream, entry_id)
                 continue

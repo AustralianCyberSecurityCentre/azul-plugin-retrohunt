@@ -343,7 +343,13 @@ def main():
             # Claim any stale jobs first
             try:
                 # XPENDING <stream> <group> - + COUNT
-                pending = rs.redis.xpending(STREAM, GROUP, "-", "+", 1000)
+                pending = rs.redis.xpending(
+                    STREAM,
+                    GROUP,
+                    min="-",
+                    max="+",
+                    count=1000,
+                )
 
                 for entry in pending:
                     msg_id, consumer, idle_ms, deliveries = entry
