@@ -353,7 +353,7 @@ def main():
                     "100",  # count
                 )
 
-                print(entries)
+                print("this is entries: ", entries)
 
                 for entry in entries:
                     msg_id = entry[0].decode()
