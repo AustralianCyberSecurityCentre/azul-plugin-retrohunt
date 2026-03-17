@@ -346,9 +346,6 @@ def main():
                 pending = rs.redis.xpending(
                     STREAM,
                     GROUP,
-                    min="-",
-                    max="+",
-                    count=1000,
                 )
 
                 for entry in pending:
