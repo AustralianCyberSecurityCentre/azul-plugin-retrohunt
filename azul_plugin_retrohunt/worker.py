@@ -349,8 +349,9 @@ def main():
                 )
 
                 for entry in pending:
-                    msg_id, consumer, idle_ms, deliveries = entry
-
+                    msg_id = entry[0]
+                    idle_ms = entry[2]
+                    print("Entry: ", entry)
                     if idle_ms > ttl:
                         # XCLAIM <stream> <group> <consumer> <min-idle> <id> ...
                         result = rs.redis.xclaim(
