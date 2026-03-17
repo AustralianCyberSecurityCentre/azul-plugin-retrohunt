@@ -126,9 +126,6 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                 ]
             raise FatalException
 
-        def fake_xautoclaim(*args, **kwargs):
-            return ("retrohunt-jobs", [])
-
         # Create consumer group
         self.fake_redis.xgroup_create(
             "retrohunt-jobs",
@@ -144,7 +141,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
 
         with (
             mock.patch.object(r_worker.rs.redis, "xreadgroup", side_effect=fake_xreadgroup),
-            mock.patch.object(r_worker.rs.redis, "xautoclaim", side_effect=fake_xautoclaim),
+            mock.patch.object(r_worker.rs.redis, "xpending", return_value=[]),  # <-- FIX
             mock.patch.object(r_worker.rs.redis, "xack", wraps=r_worker.rs.redis.xack) as xack_mock,
         ):
             hunt_mock = mock.Mock(side_effect=hunt_side_effect)

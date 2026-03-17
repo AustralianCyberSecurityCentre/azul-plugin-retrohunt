@@ -333,27 +333,37 @@ def main():
             pass  # already exists
         else:
             raise
-
+    STREAM = "retrohunt-jobs"
+    GROUP = "retrohunt-workers"
+    ttl = LOCK_TTL * 1000
     # poll for retrohunt submissions to work on
     while True:
+        messages = None
         try:
             # Claim any stale jobs first
             try:
-                result = rs.redis.xautoclaim(
-                    "retrohunt-jobs",
-                    "retrohunt-workers",
-                    worker_id,
-                    min_idle_time=LOCK_TTL * 1000,
-                    start_id="0-0",
-                    count=2,
-                )
-                print("Found stale jobs: ", result)
-                # fakeredis returns 2 values, redis-py returns 3
-                if len(result) == 3:
-                    next_id, messages, deleted = result
-                else:
-                    # fakeredis doesn't support deleted entries
-                    next_id, messages = result
+                # XPENDING <stream> <group> - + COUNT
+                pending = rs.redis.xpending(STREAM, GROUP, "-", "+", 1000)
+
+                for entry in pending:
+                    msg_id, consumer, idle_ms, deliveries = entry
+
+                    if idle_ms > ttl:
+                        # XCLAIM <stream> <group> <consumer> <min-idle> <id> ...
+                        result = rs.redis.xclaim(
+                            STREAM, GROUP, worker_id, min_idle_time=ttl, message_ids=[msg_id], justid=False
+                        )
+                        if result:
+                            print("Found stale jobs: ", result)
+                            messages = result
+                            # fakeredis returns 2 values, redis-py returns 3
+                            # if len(result) == 3:
+                            #    next_id, messages, deleted = result
+                            #    break
+                            # else:
+                            # fakeredis doesn't support deleted entries
+                            #    next_id, messages = result
+                            #    break
 
             except ResponseError as e:
                 if "NOGROUP" in str(e):
@@ -441,7 +451,7 @@ def main():
             raise
         except Exception as e:
             logger.exception(f"Worker error, continuing loop: {e}")
-            sleep(settings.RedisSettings.exception_wait)
+            sleep(settings.RedisSettings().exception_wait)
             continue
 
 
