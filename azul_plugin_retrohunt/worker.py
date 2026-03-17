@@ -343,23 +343,34 @@ def main():
             # Claim any stale jobs first
             try:
                 # XPENDING <stream> <group> - + COUNT
-                pending = rs.redis.xpending(
+                # Get detailed PEL entries using raw XPENDING
+                entries = rs.redis.execute_command(
+                    "XPENDING",
                     STREAM,
                     GROUP,
+                    "-",  # min ID
+                    "+",  # max ID
+                    "100",  # count
                 )
-                print(pending)
-                for entry in pending:
-                    msg_id = entry[0]
+
+                print(entries)
+
+                for entry in entries:
+                    msg_id = entry[0].decode()
                     idle_ms = entry[2]
-                    print("Entry: ", entry)
+
+                    print("Entry:", entry)
+
                     if idle_ms > ttl:
-                        # XCLAIM <stream> <group> <consumer> <min-idle> <id> ...
+                        # Claim the stale message
                         result = rs.redis.xclaim(
                             STREAM, GROUP, worker_id, min_idle_time=ttl, message_ids=[msg_id], justid=False
                         )
+
                         if result:
-                            print("Found stale jobs: ", result)
+                            print("Found stale jobs:", result)
                             messages = result
+                            break
 
             except ResponseError as e:
                 if "NOGROUP" in str(e):
