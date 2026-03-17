@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import threading
+import uuid
 from datetime import datetime
 from io import StringIO
 from time import sleep
@@ -306,7 +307,7 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 def main():
     """Start the retrohunt worker."""
     global dp
-    worker_id = f"{socket.gethostname()}-{os.getpid()}"
+    worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
     LOCK_TTL = settings.RedisSettings().ttl
