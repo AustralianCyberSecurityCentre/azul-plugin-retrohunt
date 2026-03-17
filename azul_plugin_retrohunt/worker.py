@@ -359,14 +359,6 @@ def main():
                         if result:
                             print("Found stale jobs: ", result)
                             messages = result
-                            # fakeredis returns 2 values, redis-py returns 3
-                            # if len(result) == 3:
-                            #    next_id, messages, deleted = result
-                            #    break
-                            # else:
-                            # fakeredis doesn't support deleted entries
-                            #    next_id, messages = result
-                            #    break
 
             except ResponseError as e:
                 if "NOGROUP" in str(e):
