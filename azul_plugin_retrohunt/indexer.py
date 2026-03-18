@@ -52,6 +52,7 @@ def run_indexer(
         f"Starting to run the indexer with path '{indexer.base_directory}' and max indexing size of "
         f"{indexerSettings.max_bytes_before_indexing.human_readable()}"
     )
+
     while True:
         index_occurred = False
         for path_to_index in indexer.get_folders_ready_for_indexing():

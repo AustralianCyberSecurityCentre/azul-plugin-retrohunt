@@ -24,7 +24,6 @@ class TestSettingsNoEnv:
         """Just don't want to see an exception for either of these cases."""
         os.environ["plugin_root_path"] = "dummy"
         settings_work = RetrohuntSettings()
-        print(settings_work)
 
         # default indexer settings.
         indexers_cfg = {
@@ -38,7 +37,6 @@ class TestSettingsNoEnv:
             dict_indexer_config[x] = indexers_cfg[x].model_dump()
         os.environ["plugin_indexers"] = json.dumps(dict_indexer_config)
         settings_work = RetrohuntSettings()
-        print(settings_work)
 
 
 @mock.patch("pendulum.now", lambda: pendulum.parse("2002-01-08T10:10:10Z"))

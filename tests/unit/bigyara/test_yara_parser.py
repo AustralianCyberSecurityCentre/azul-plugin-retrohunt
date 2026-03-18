@@ -1,14 +1,9 @@
 import os
 import tempfile
-import unittest
 
 from azul_plugin_retrohunt.bigyara.env import executables
-from azul_plugin_retrohunt.bigyara.yara_parse import (
-    YaraRule,
-    YaraString,
-    _get_atoms_from_regex,
-    _parse_yara_with_exe,
-)
+from azul_plugin_retrohunt import test_utils
+from azul_plugin_retrohunt.bigyara.yara_parse import YaraRule, YaraString, _get_atoms_from_regex, _parse_yara_with_exe
 
 TEST_RULE_1 = """
 rule weak_test {
@@ -98,7 +93,7 @@ def parse_yara(rule_text: str) -> list[YaraRule]:
     return yara_rules
 
 
-class TestYaraParser(unittest.TestCase):
+class TestYaraParser(test_utils.BaseIngestorIndexerTest):
     def test_yara_parse1(self):
         """Basic rule parsing."""
 
