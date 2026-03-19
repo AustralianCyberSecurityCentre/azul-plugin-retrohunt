@@ -344,14 +344,7 @@ def main():
             try:
                 # XPENDING <stream> <group> - + COUNT
                 # Get detailed PEL entries using raw XPENDING
-                entries = rs.redis.execute_command(
-                    "XPENDING",
-                    STREAM,
-                    GROUP,
-                    "-",  # min ID
-                    "+",  # max ID
-                    "100",  # count
-                )
+                entries = rs.redis.xpending(STREAM, GROUP)
 
                 print("this is entries: ", entries)
 
