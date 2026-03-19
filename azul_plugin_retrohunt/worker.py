@@ -314,6 +314,10 @@ def main():
         try:
             # Claim any stale jobs first
             try:
+                logger.info("Checking for stale jobs")
+                entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-worders")
+                logger.info("Entries: ", entries)
+
                 result = rs.redis.xautoclaim(
                     "retrohunt-jobs",
                     "retrohunt-workers",
