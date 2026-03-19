@@ -342,17 +342,16 @@ def main():
         try:
             # Claim any stale jobs first
             try:
-                # XPENDING <stream> <group> - + COUNT
-                # Get detailed PEL entries using raw XPENDING
+                # Get PEL entries using XPENDING
                 entries = rs.redis.xpending(STREAM, GROUP)
 
-                print("this is entries: ", entries)
+                logger.info("this is entries: ", entries)
 
                 for entry in entries:
                     msg_id = entry[0].decode()
                     idle_ms = entry[2]
 
-                    print("Entry:", entry)
+                    logger.info("Entry:", entry)
 
                     if idle_ms > ttl:
                         # Claim the stale message
@@ -361,12 +360,13 @@ def main():
                         )
 
                         if result:
-                            print("Found stale jobs:", result)
+                            logger.info("Found stale jobs:", result)
                             messages = result
                             break
 
             except ResponseError as e:
                 if "NOGROUP" in str(e):
+                    logger.info("Exception ", e)
                     logger.info("Job stream or consumer group not created yet. Waiting...")
                     sleep(5)
                     continue
@@ -376,6 +376,7 @@ def main():
                 msg_id, payload = messages[0]
             else:
                 # no stale jobs, read new ones
+                logger.info("No stale jobs looking for fresh")
                 try:
                     events = rs.redis.xreadgroup(
                         groupname="retrohunt-workers",
@@ -409,7 +410,7 @@ def main():
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
-            print("job: ", job)
+            logger.info("job: ", job)
             job_id = job.entity.id
             # these will be cleaned up by the cronjob later
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
@@ -419,12 +420,12 @@ def main():
 
             if check_lock_active(rs.redis, job_id, worker_id):
                 # Another worker is running this hunt
-                print("Failed to acquire lock.")
+                logger.info("Failed to acquire lock.")
                 continue
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # another worker got it
-                print("another worker got it")
+                logger.info("another worker got it")
                 continue
 
             logger.debug("lock aquired")
