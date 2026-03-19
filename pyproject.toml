@@ -56,6 +56,10 @@ azul-plugin-retrocron = "azul_plugin_retrohunt.cron:main"
 [project.entry-points."azul_restapi.plugin"]
 retrohunt = "azul_plugin_retrohunt.api:router"
 
+[[tool.uv.index]]
+url = "https://devpi.acsc.internal/azul/stable/+simple"
+default = true
+
 [project.urls]
 Documentation = "https://australiancybersecuritycentre.github.io/azul/"
 Repository = "https://github.com/AustralianCyberSecurityCentre/azul-plugin-retrohunt"
