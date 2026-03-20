@@ -277,5 +277,4 @@ BigGrep-*
 yara-*
 
 .ruff_cache
-# FUTURE UV IS USEFUL
-uv.lock
+
