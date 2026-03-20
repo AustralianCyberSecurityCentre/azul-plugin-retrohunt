@@ -317,24 +317,42 @@ def main():
                 print("Checking for stale jobs")
                 logger.info("Checking for stale jobs")
                 entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-workers")
+                msg_id = entries["min"].decode()
+                consumers = entries["consumers"]
+                entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-workers")
+
                 if entries is not None:
-                    print("Entries: ", entries)
-                    logger.info("Entries: ", entries)
+                    print("Entries:", entries)
+                    logger.info("Entries: %s", entries)
 
-                for entry in entries:
-                    msg_id = entry["min"].decode()
-                    consumer = entry["consumers"][0]["name"].decode()
-                    print("This is consumer: ", consumer)
-                    # Query XRANGE for that exact message
-                    stuff = rs.redis.xrange("retrohunt-jobs", msg_id, msg_id)
+                    # Extract and decode min ID
+                    msg_id = entries.get("min")
+                    if isinstance(msg_id, bytes):
+                        msg_id = msg_id.decode()
 
-                    if not stuff:
-                        print("Message is stale: it no longer exists in the stream.")
-                    else:
-                        print("Message exists:")
-                        print(stuff)
-                    consumers = rs.redis.xinfo_consumers("retrohunt-jobs", "retrohunt-workers")
-                    print("Consumers: ", consumers)
+                    consumers = entries.get("consumers", [])
+
+                    for consumer in consumers:
+                        print("This is consumer:", consumer)
+
+                        consumer_name = consumer.get("name")
+                        if isinstance(consumer_name, bytes):
+                            consumer_name = consumer_name.decode()
+
+                        print("This is consumer name:", consumer_name)
+
+                        # Query XRANGE for that exact message
+                        if msg_id:
+                            stuff = rs.redis.xrange("retrohunt-jobs", msg_id, msg_id)
+
+                            if not stuff:
+                                print("Message is stale: it no longer exists in the stream.")
+                            else:
+                                print("Message exists:")
+                                print(stuff)
+
+                    consumer_info = rs.redis.xinfo_consumers("retrohunt-jobs", "retrohunt-workers")
+                    print("Consumers:", consumer_info)
 
                 result = rs.redis.xautoclaim(
                     "retrohunt-jobs",
