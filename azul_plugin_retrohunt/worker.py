@@ -339,6 +339,7 @@ def main():
 
             except ResponseError as e:
                 if "NOGROUP" in str(e):
+                    print(e)
                     logger.info("Job stream or consumer group not created yet. Waiting...")
                     sleep(5)
                     continue
