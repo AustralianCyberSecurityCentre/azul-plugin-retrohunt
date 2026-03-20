@@ -365,7 +365,7 @@ def main():
                     "retrohunt-jobs",
                     "retrohunt-workers",
                     worker_id,
-                    min_idle_time=LOCK_TTL * 1000,
+                    min_idle_time=LOCK_TTL,
                     start_id="0-0",
                     count=1,
                 )
@@ -386,6 +386,7 @@ def main():
                 raise
 
             if messages:
+                print("picked up a stale job: ", print payload)
                 msg_id, payload = messages[0]
             else:
                 # no stale jobs, read new ones
