@@ -321,16 +321,20 @@ def main():
                     print("Entries: ", entries)
                     logger.info("Entries: ", entries)
 
-                msg_id = entries["min"].decode()
+                for entry in entries:
+                    msg_id = entry["min"].decode()
+                    consumer = entry["consumers"][0]["name"].decode()
+                    print("This is consumer: ", consumer)
+                    # Query XRANGE for that exact message
+                    stuff = rs.redis.xrange("retrohunt-jobs", msg_id, msg_id)
 
-                # Query XRANGE for that exact message
-                stuff = rs.redis.xrange("retrohunt-jobs", msg_id, msg_id)
-
-                if not stuff:
-                    print("Message is stale: it no longer exists in the stream.")
-                else:
-                    print("Message exists:")
-                    print(stuff)
+                    if not stuff:
+                        print("Message is stale: it no longer exists in the stream.")
+                    else:
+                        print("Message exists:")
+                        print(stuff)
+                    consumers = rs.redis.xinfo_consumers("retrohunt-jobs", "retrohunt-workers")
+                    print("Consumers: ", consumers)
 
                 result = rs.redis.xautoclaim(
                     "retrohunt-jobs",
