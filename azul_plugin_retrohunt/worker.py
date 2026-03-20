@@ -356,6 +356,8 @@ def main():
                             print("this is name: ", c["name"])
                             if c["name"].decode() in consumer_name:
                                 print("Found it ", c)
+                                if c["idle"] > LOCK_TTL * 1000:
+                                    print("yes it's time to consume this again")
 
                 result = rs.redis.xautoclaim(
                     "retrohunt-jobs",
