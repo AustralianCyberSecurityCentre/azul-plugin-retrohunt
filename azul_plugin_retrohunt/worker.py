@@ -316,7 +316,9 @@ def main():
             try:
                 logger.info("Checking for stale jobs")
                 entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-worders")
-                logger.info("Entries: ", entries)
+                if entries is not None:
+                    print("Entries: ", entries)
+                    logger.info("Entries: ", entries)
 
                 result = rs.redis.xautoclaim(
                     "retrohunt-jobs",
@@ -414,7 +416,7 @@ def main():
             raise
         except Exception as e:
             logger.exception(f"Worker error, continuing loop: {e}")
-            sleep(settings.RedisSettings.exception_wait)
+            sleep(settings.RedisSettings().exception_wait)
             continue
 
 
