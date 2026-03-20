@@ -314,6 +314,7 @@ def main():
         try:
             # Claim any stale jobs first
             try:
+                print("Checking for stale jobs")
                 logger.info("Checking for stale jobs")
                 entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-worders")
                 if entries is not None:
