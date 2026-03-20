@@ -325,7 +325,7 @@ def main():
 
                 # Query XRANGE for that exact message
                 stuff = rs.redis.xrange("retrohunt-jobs", msg_id, msg_id)
-                
+
                 if not stuff:
                     print("Message is stale: it no longer exists in the stream.")
                 else:
