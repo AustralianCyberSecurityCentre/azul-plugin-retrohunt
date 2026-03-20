@@ -351,8 +351,11 @@ def main():
                                 print("Message exists:")
                                 print(stuff)
 
-                    consumer_info = rs.redis.xinfo_consumers("retrohunt-jobs", "retrohunt-workers")
-                    print("Consumers:", consumer_info)
+                        consumer_info = rs.redis.xinfo_consumers("retrohunt-jobs", "retrohunt-workers")
+                        for c in consumer_info:
+                            print("this is name: ", c["name"])
+                            if c["name"] in consumer_name:
+                                print("Found it ", c)
 
                 result = rs.redis.xautoclaim(
                     "retrohunt-jobs",
