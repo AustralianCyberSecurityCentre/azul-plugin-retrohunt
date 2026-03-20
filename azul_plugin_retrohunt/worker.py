@@ -316,7 +316,7 @@ def main():
             try:
                 print("Checking for stale jobs")
                 logger.info("Checking for stale jobs")
-                entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-worders")
+                entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-workers")
                 if entries is not None:
                     print("Entries: ", entries)
                     logger.info("Entries: ", entries)
