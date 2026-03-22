@@ -314,53 +314,6 @@ def main():
         try:
             # Claim any stale jobs first
             try:
-                print("Checking for stale jobs")
-                logger.info("Checking for stale jobs")
-                entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-workers")
-                msg_id = entries["min"].decode()
-                consumers = entries["consumers"]
-                entries = rs.redis.xpending("retrohunt-jobs", "retrohunt-workers")
-
-                if entries is not None:
-                    print("Entries:", entries)
-                    logger.info("Entries: %s", entries)
-
-                    # Extract and decode min ID
-                    msg_id = entries.get("min")
-                    if isinstance(msg_id, bytes):
-                        msg_id = msg_id.decode()
-
-                    consumers = entries.get("consumers", [])
-
-                    for consumer in consumers:
-                        print("This is consumer:", consumer)
-
-                        consumer_name = consumer.get("name")
-                        if isinstance(consumer_name, bytes):
-                            consumer_name = consumer_name.decode()
-
-                        print("This is consumer name:", consumer_name)
-
-                        # Query XRANGE for that exact message
-                        if msg_id:
-                            stuff = rs.redis.xrange("retrohunt-jobs", msg_id, msg_id)
-
-                            if not stuff:
-                                print("Message is stale: it no longer exists in the stream.")
-                            else:
-                                print("Message exists:")
-                                print(stuff)
-
-                        consumer_info = rs.redis.xinfo_consumers("retrohunt-jobs", "retrohunt-workers")
-                        for c in consumer_info:
-                            print("this is name: ", c["name"])
-                            if c["name"].decode() in consumer_name:
-                                print("Found it ", c)
-                                print("idle time: ", c["idle"])
-                                print(LOCK_TTL * 1000)
-                                if c["idle"] > (LOCK_TTL * 1000):
-                                    print("yes it's time to consume this again")
-
                 result = rs.redis.xautoclaim(
                     "retrohunt-jobs",
                     "retrohunt-workers",
@@ -387,7 +340,6 @@ def main():
 
             if messages:
                 msg_id, payload = messages[0]
-                print("picked up a stale job: ", payload)
             else:
                 # no stale jobs, read new ones
                 try:
