@@ -386,8 +386,8 @@ def main():
                 raise
 
             if messages:
-                print("picked up a stale job: ", print payload)
                 msg_id, payload = messages[0]
+                print("picked up a stale job: ", payload)
             else:
                 # no stale jobs, read new ones
                 try:
