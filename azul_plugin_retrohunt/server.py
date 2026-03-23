@@ -140,6 +140,7 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     """List the latest retrohunts by submission time."""
     result = rs.list_hunts(limit)
+    print("This is result: ", result)
     ordered_hunts = result["data"]
 
     return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
