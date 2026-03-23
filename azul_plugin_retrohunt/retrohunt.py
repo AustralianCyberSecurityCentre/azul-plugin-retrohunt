@@ -88,17 +88,9 @@ class RetrohuntService:
                     # corrupted data
                     logger.exception("Corrupted retrohunt data for id %s", key)
                     continue
-                
-                issues = self.validate_hunt(key, event)
-
-                if issues:
-                    print(f"=== Problem in {key} ===")
-                    for issue in issues:
-                        print(" -", issue)
-                    print()
+                print("RAW DATA: ", raw_data)
 
                 hunts[key] = event.entity
-                print("ENTITY DICT:", event.entity.model_dump())
 
                 if len(hunts) >= limit:
                     break
