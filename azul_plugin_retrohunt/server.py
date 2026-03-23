@@ -138,12 +138,25 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 @app.get("/", include_in_schema=False)
 @app.get("/hunts", include_in_schema=False)
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
-    """List the latest retrohunts by submission time."""
+    """This is a test."""
     result = rs.list_hunts(limit)
-    print("This is result: ", result)
     ordered_hunts = result["data"]
 
-    return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
+    try:
+        return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
+    except Exception as e:
+        print("\n--- TEMPLATE ERROR ---")
+        print("Exception:", e)
+        print("Type:", type(e))
+
+        print("\n--- HUNT DATA DUMP ---")
+        for i, h in enumerate(ordered_hunts):
+            print(f"\nHUNT #{i}:")
+            for k, v in h.items():
+                print(f"  {k}: {v} ({type(v)})")
+
+        print("\n----------------------\n")
+        raise
 
 
 @app.get("/hunts/{id}", include_in_schema=False)

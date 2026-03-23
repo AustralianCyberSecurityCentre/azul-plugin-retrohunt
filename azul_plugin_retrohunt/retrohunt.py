@@ -88,7 +88,6 @@ class RetrohuntService:
                     # corrupted data
                     logger.exception("Corrupted retrohunt data for id %s", key)
                     continue
-                print("RAW DATA: ", raw_data)
 
                 hunts[key] = event.entity
 
