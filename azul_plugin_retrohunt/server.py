@@ -141,7 +141,7 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     """List the latest retrohunts by submission time."""
     result = rs.list_hunts(limit)
     ordered_hunts = result["data"]
-    print("Ordered hunts: ", ordered_hunts)
+
     return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
 
 
