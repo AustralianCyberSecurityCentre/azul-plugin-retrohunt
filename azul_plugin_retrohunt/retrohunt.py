@@ -79,6 +79,14 @@ class RetrohuntService:
                 if isinstance(key, bytes):
                     key = key.decode()
                 raw_data = self.redis.get(key)
+                issues = self.validate_hunt(key, raw_data)
+
+                if issues:
+                    print(f"=== Problem in {key} ===")
+                    for issue in issues:
+                        print(" -", issue)
+                    print()
+
                 if raw_data is None:
                     continue
                 try:
@@ -268,6 +276,38 @@ class RetrohuntService:
             if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
                 self.redis.xdel(stream, entry_id)
                 continue
+
+    def validate_hunt(key, value):
+        """Return a list of issues found in this hunt entry."""
+        issues = []
+
+        # 1. Missing value
+        if value is None:
+            issues.append("Value is NIL (key exists but has no data)")
+            return issues
+
+        # 2. JSON parse check
+        try:
+            data = json.loads(value)
+        except Exception as e:
+            issues.append(f"Invalid JSON: {e}")
+            return issues
+
+        # 3. Required fields check
+        required_fields = ["id", "submitted_time", "search", "status"]
+
+        for field in required_fields:
+            if field not in data:
+                issues.append(f"Missing required field: {field}")
+
+        # 4. Type checks
+        if "submitted_time" in data and isinstance(data["submitted_time"], dict):
+            issues.append("submitted_time is a dict, expected string")
+
+        if "status" in data and isinstance(data["status"], dict):
+            issues.append("status is a dict, expected string")
+
+        return issues
 
     def _cleanup_locks(self):
         """Remove retrohunt job locks that are invalid."""
