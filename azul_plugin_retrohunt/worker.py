@@ -302,7 +302,7 @@ def main():
     prom_jobs_run.labels(azm.HuntState.FAILED.name)
 
     try:
-        rs.redis.xgroup_create("retrohunt-jobs", "retrohunt-workers", id="$", mkstream=True)
+        rs.redis.xgroup_create(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, id="$", mkstream=True)
     except ResponseError as e:
         if "BUSYGROUP" in str(e):
             pass  # already exists
@@ -315,8 +315,8 @@ def main():
             # Claim any stale jobs first
             try:
                 result = rs.redis.xautoclaim(
-                    "retrohunt-jobs",
-                    "retrohunt-workers",
+                    rs.RETROHUNT_JOB,
+                    rs.RETROHUNT_GROUP,
                     worker_id,
                     min_idle_time=LOCK_TTL,
                     start_id="0-0",
@@ -344,9 +344,9 @@ def main():
                 # no stale jobs, read new ones
                 try:
                     events = rs.redis.xreadgroup(
-                        groupname="retrohunt-workers",
+                        groupname=rs.RETROHUNT_GROUP,
                         consumername=worker_id,
-                        streams={"retrohunt-jobs": ">"},
+                        streams={rs.RETROHUNT_JOB: ">"},
                         count=1,
                         block=5000,
                     )
@@ -371,7 +371,7 @@ def main():
             event_json = rs.redis.get(payload[b"hunt_id"])
             if not event_json:
                 logger.error(f"Missing or corrupted event data for hunt_id={payload[b'hunt_id']}. Skipping.")
-                rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
+                rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
@@ -402,7 +402,7 @@ def main():
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
-                rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
+                rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
             finally:
                 stop_event.set()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")

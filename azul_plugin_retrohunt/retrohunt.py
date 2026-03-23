@@ -28,6 +28,9 @@ class FatalException(Exception):
 class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
+    RETROHUNT_JOB = "retrohunt-jobs"
+    RETROHUNT_GROUP = "retrohunt-groups"
+
     def __init__(self, redis_client=None):
         self._redis_client = redis_client
 
@@ -86,6 +89,7 @@ class RetrohuntService:
                     continue
 
                 hunts[key] = event.entity
+                print("ENTITY DICT:", event.entity.model_dump())
 
                 if len(hunts) >= limit:
                     break
@@ -147,7 +151,7 @@ class RetrohuntService:
             )
 
         try:
-            self.redis.xgroup_create("retrohunt-jobs", "retrohunt-workers", id="$", mkstream=True)
+            self.redis.xgroup_create(self.RETROHUNT_JOB, self.RETROHUNT_GROUP, id="$", mkstream=True)
         except ResponseError as e:
             if "BUSYGROUP" in str(e):
                 pass  # already exists
@@ -156,7 +160,7 @@ class RetrohuntService:
 
         event_dict = event.model_dump()
         self.redis.set(retrohunt_id, json.dumps(event_dict))
-        self.redis.xadd("retrohunt-jobs", {"hunt_id": retrohunt_id, "action": "Submitted"})
+        self.redis.xadd(self.RETROHUNT_JOB, {"hunt_id": retrohunt_id, "action": "Submitted"})
 
         return retrohunt_id
 
