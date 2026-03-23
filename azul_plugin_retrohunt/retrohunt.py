@@ -79,13 +79,6 @@ class RetrohuntService:
                 if isinstance(key, bytes):
                     key = key.decode()
                 raw_data = self.redis.get(key)
-                issues = self.validate_hunt(key, raw_data)
-
-                if issues:
-                    print(f"=== Problem in {key} ===")
-                    for issue in issues:
-                        print(" -", issue)
-                    print()
 
                 if raw_data is None:
                     continue
@@ -95,6 +88,14 @@ class RetrohuntService:
                     # corrupted data
                     logger.exception("Corrupted retrohunt data for id %s", key)
                     continue
+                
+                issues = self.validate_hunt(key, event)
+
+                if issues:
+                    print(f"=== Problem in {key} ===")
+                    for issue in issues:
+                        print(" -", issue)
+                    print()
 
                 hunts[key] = event.entity
                 print("ENTITY DICT:", event.entity.model_dump())
