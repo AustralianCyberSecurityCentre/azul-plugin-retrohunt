@@ -73,6 +73,7 @@ class RetrohuntService:
         while True:
             cursor, keys = self.redis.scan(cursor=cursor, match="hunt_*", count=limit)
             for key in keys:
+                print("KEY TYPE:", type(key), key)
                 raw_data = self.redis.get(key)
                 if raw_data is None:
                     continue
