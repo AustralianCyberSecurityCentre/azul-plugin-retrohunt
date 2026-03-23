@@ -277,7 +277,7 @@ class RetrohuntService:
                 self.redis.xdel(stream, entry_id)
                 continue
 
-    def validate_hunt(key, value):
+    def validate_hunt(self, key, value):
         """Return a list of issues found in this hunt entry."""
         issues = []
 
