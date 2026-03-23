@@ -142,26 +142,9 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     result = rs.list_hunts(limit)
     ordered_hunts = result["data"]
 
-    try:
-        return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
-    except Exception as e:
-        print("\n--- TEMPLATE ERROR ---")
-        print("Exception:", e)
-        print("Type:", type(e))
+    find_bad_hunt(ordered_hunts, templates)
 
-        print("\n--- HUNT DATA DUMP ---")
-        for i, h in enumerate(ordered_hunts):
-            print(f"\nHUNT #{i}:")
-            try:
-                data = h.model_dump()  # Pydantic v2
-            except Exception:
-                data = h.dict()  # Pydantic v1 fallback
-
-            for k, v in data.items():
-                print(f"  {k}: {v!r} ({type(v)})")
-
-        print("\n----------------------\n")
-        raise
+    return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
@@ -206,6 +189,51 @@ async def redoc_html(req: Request) -> HTMLResponse:
         redoc_favicon_url="/static/favicon-32x32.png",
         with_google_fonts=False,
     )
+
+
+def find_bad_hunt(hunts, templates):
+    """Identify which hunt object breaks Jinja template rendering."""
+    # Minimal template that touches all fields used in hunts.html
+    test_template = templates.env.from_string("""
+        {{ hunt.submitted_time }}
+        {{ hunt.id }}
+        {{ hunt.search_type }}
+        {{ hunt.search }}
+        {{ hunt.status }}
+        {{ hunt.duration }}
+        {{ hunt.tool_matches_done }}
+        {{ hunt.tool_matches_total }}
+        {{ hunt.tool_match_count }}
+    """)
+
+    print("\n--- Running hunt isolation test ---")
+
+    for i, hunt in enumerate(hunts):
+        print(f"\nTesting hunt #{i}...")
+
+        try:
+            test_template.render(hunt=hunt)
+            print(f"Hunt #{i} OK")
+        except Exception as e:
+            print(f"\n🔥 BAD HUNT FOUND at index {i}")
+            print("Exception:", e)
+            print("Type:", type(e))
+
+            # Dump the hunt fields
+            try:
+                data = hunt.model_dump()  # Pydantic v2
+            except Exception:
+                data = hunt.dict()  # Pydantic v1
+
+            print("\n--- BAD HUNT DATA ---")
+            for k, v in data.items():
+                print(f"  {k}: {v!r} ({type(v)})")
+
+            print("\n----------------------\n")
+            return i  # Return index of bad hunt
+
+    print("\nNo bad hunts found.")
+    return None
 
 
 @click.command()
