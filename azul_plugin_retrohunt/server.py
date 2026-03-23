@@ -152,8 +152,13 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
         print("\n--- HUNT DATA DUMP ---")
         for i, h in enumerate(ordered_hunts):
             print(f"\nHUNT #{i}:")
-            for k, v in h.items():
-                print(f"  {k}: {v} ({type(v)})")
+            try:
+                data = h.model_dump()  # Pydantic v2
+            except Exception:
+                data = h.dict()  # Pydantic v1 fallback
+
+            for k, v in data.items():
+                print(f"  {k}: {v!r} ({type(v)})")
 
         print("\n----------------------\n")
         raise
