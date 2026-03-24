@@ -194,44 +194,46 @@ async def redoc_html(req: Request) -> HTMLResponse:
 
 def find_bad_hunt(hunts, templates):
     """Identify which hunt object breaks Jinja template rendering."""
-    # Minimal template that touches all fields used in hunts.html
-    test_template = templates.env.from_string("""
-        {{ hunt.submitted_time }}
-        {{ hunt.id }}
-        {{ hunt.search_type }}
-        {{ hunt.search }}
-        {{ hunt.status }}
-        {{ hunt.duration }}
-        {{ hunt.tool_matches_done }}
-        {{ hunt.tool_matches_total }}
-        {{ hunt.tool_match_count }}
-    """)
+    fields = [
+        "submitted_time",
+        "id",
+        "search_type",
+        "search",
+        "status",
+        "duration",
+        "tool_matches_done",
+        "tool_matches_total",
+        "tool_match_count",
+    ]
 
     print("\n--- Running hunt isolation test ---")
 
     for i, hunt in enumerate(hunts):
         print(f"\nTesting hunt #{i}...")
 
-        try:
-            test_template.render(hunt=hunt)
-            print(f"Hunt #{i} OK")
-        except Exception as e:
-            print(f"\n🔥 BAD HUNT FOUND at index {i}")
-            print("Exception:", e)
-            print("Type:", type(e))
-
-            # Dump the hunt fields
+        for field in fields:
             try:
-                data = hunt.model_dump()  # Pydantic v2
-            except Exception:
-                data = hunt.dict()  # Pydantic v1
+                tmpl = templates.env.from_string(f"{{{{ hunt.{field} }}}}")
+                tmpl.render(hunt=hunt)
+            except Exception as e:
+                print(f"\n🔥 BAD FIELD in hunt #{i}: '{field}'")
+                print("Exception:", e)
+                print("Type:", type(e))
 
-            print("\n--- BAD HUNT DATA ---")
-            for k, v in data.items():
-                print(f"  {k}: {v!r} ({type(v)})")
+                # Dump hunt data
+                try:
+                    data = hunt.model_dump()
+                except Exception:
+                    data = hunt.dict()
 
-            print("\n----------------------\n")
-            return i  # Return index of bad hunt
+                print("\n--- BAD HUNT DATA ---")
+                for k, v in data.items():
+                    print(f"  {k}: {v!r} ({type(v)})")
+                print("\n----------------------\n")
+
+                return i, field
+
+        print(f"Hunt #{i} OK")
 
     print("\nNo bad hunts found.")
     return None
