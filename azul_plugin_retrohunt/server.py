@@ -4,6 +4,7 @@ import logging
 import os
 from collections import OrderedDict
 from importlib.resources import files
+import traceback
 
 import click
 import semantic_version
@@ -140,12 +141,17 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     """This is a test."""
     result = rs.list_hunts(limit)
-    print("Getting hunts")
     ordered_hunts = result["data"]
-    print("Calling function to find bad hunt")
-    find_bad_hunt(ordered_hunts, templates)
-    templates.env.get_template("hunts.html").render(hunts=[])
-    # return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
+    # find_bad_hunt(ordered_hunts, templates)
+    # templates.env.get_template("hunts.html").render(hunts=[])
+    try:
+        response = templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
+    except Exception as e:
+        logging.warning("ordered_hunts", ordered_hunts)
+        logging.warning("requst", req)
+        traceback.print_exc()
+        raise
+    return response
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
