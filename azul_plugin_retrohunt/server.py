@@ -147,7 +147,7 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     try:
         response = templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
     except Exception:
-        logging.warning("ordered_hunts", ordered_hunts)
+        logging.warning("ordered_hunts: %s", ordered_hunts)
         logging.warning("requst", req)
         traceback.print_exc()
         raise
