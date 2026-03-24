@@ -1,6 +1,6 @@
 version: "3.9"
 services:
   redis:
-    image: redis:7
+    image: redis:8@sha256:315270d166080f537bbdf1b489b603aaaa213cb55a544acfa51feb7481abb1c0
     ports:
       - "6379:6379"
