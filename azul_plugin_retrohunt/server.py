@@ -140,8 +140,9 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     """This is a test."""
     result = rs.list_hunts(limit)
+    print("Getting hunts")
     ordered_hunts = result["data"]
-
+    print("Calling function to find bad hunt")
     find_bad_hunt(ordered_hunts, templates)
 
     return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
