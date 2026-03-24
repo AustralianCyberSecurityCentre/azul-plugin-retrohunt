@@ -28,6 +28,9 @@ class FatalException(Exception):
 class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
+    RETROHUNT_JOB = "retrohunt-jobs"
+    RETROHUNT_GROUP = "retrohunt-groups"
+
     def __init__(self, redis_client=None):
         self._redis_client = redis_client
 
@@ -73,7 +76,10 @@ class RetrohuntService:
         while True:
             cursor, keys = self.redis.scan(cursor=cursor, match="hunt_*", count=limit)
             for key in keys:
+                if isinstance(key, bytes):
+                    key = key.decode()
                 raw_data = self.redis.get(key)
+
                 if raw_data is None:
                     continue
                 try:
@@ -145,7 +151,7 @@ class RetrohuntService:
             )
 
         try:
-            self.redis.xgroup_create("retrohunt-jobs", "retrohunt-workers", id="$", mkstream=True)
+            self.redis.xgroup_create(self.RETROHUNT_JOB, self.RETROHUNT_GROUP, id="$", mkstream=True)
         except ResponseError as e:
             if "BUSYGROUP" in str(e):
                 pass  # already exists
@@ -154,7 +160,7 @@ class RetrohuntService:
 
         event_dict = event.model_dump()
         self.redis.set(retrohunt_id, json.dumps(event_dict))
-        self.redis.xadd("retrohunt-jobs", {"hunt_id": retrohunt_id, "action": "Submitted"})
+        self.redis.xadd(self.RETROHUNT_JOB, {"hunt_id": retrohunt_id, "action": "Submitted"})
 
         return retrohunt_id
 
@@ -262,6 +268,38 @@ class RetrohuntService:
             if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
                 self.redis.xdel(stream, entry_id)
                 continue
+
+    def validate_hunt(self, key, value):
+        """Return a list of issues found in this hunt entry."""
+        issues = []
+
+        # 1. Missing value
+        if value is None:
+            issues.append("Value is NIL (key exists but has no data)")
+            return issues
+
+        # 2. JSON parse check
+        try:
+            data = json.loads(value)
+        except Exception as e:
+            issues.append(f"Invalid JSON: {e}")
+            return issues
+
+        # 3. Required fields check
+        required_fields = ["id", "submitted_time", "search", "status"]
+
+        for field in required_fields:
+            if field not in data:
+                issues.append(f"Missing required field: {field}")
+
+        # 4. Type checks
+        if "submitted_time" in data and isinstance(data["submitted_time"], dict):
+            issues.append("submitted_time is a dict, expected string")
+
+        if "status" in data and isinstance(data["status"], dict):
+            issues.append("status is a dict, expected string")
+
+        return issues
 
     def _cleanup_locks(self):
         """Remove retrohunt job locks that are invalid."""
