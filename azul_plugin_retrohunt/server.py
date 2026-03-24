@@ -144,8 +144,8 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     ordered_hunts = result["data"]
     print("Calling function to find bad hunt")
     find_bad_hunt(ordered_hunts, templates)
-
-    return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
+    templates.env.get_template("hunts.html").render(hunts=[])
+    #return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
