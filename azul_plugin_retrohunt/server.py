@@ -2,9 +2,9 @@
 
 import logging
 import os
+import traceback
 from collections import OrderedDict
 from importlib.resources import files
-import traceback
 
 import click
 import semantic_version
@@ -146,7 +146,7 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     # templates.env.get_template("hunts.html").render(hunts=[])
     try:
         response = templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
-    except Exception as e:
+    except Exception:
         logging.warning("ordered_hunts", ordered_hunts)
         logging.warning("requst", req)
         traceback.print_exc()
