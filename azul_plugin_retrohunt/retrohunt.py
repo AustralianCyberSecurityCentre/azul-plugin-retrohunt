@@ -181,6 +181,7 @@ class RetrohuntService:
     def _cleanup_hunts(self, cutoff_30d, cutoff_3d):
         """Remove RetrohuntEntity entries older than cleanup_delay days, or older than 3 days if not completed."""
         # Only match hunt keys, not streams or other retrohunt_* keys
+        logger.info("Cleaning hunts...")
         pattern = "hunt_*"
         cursor = 0
         while True:
@@ -227,6 +228,7 @@ class RetrohuntService:
 
     def _cleanup_stream(self, cutoff_30d, cutoff_3d):
         """Remove stream entries older than cleanup_delay days or whose hunts are stale or missing."""
+        logger.info("Cleaning streams...")
         stream = "retrohunt-jobs"
 
         # xrange returns a list of (entry_id, {field: value})
@@ -275,6 +277,7 @@ class RetrohuntService:
 
     def _cleanup_locks(self):
         """Remove retrohunt job locks that are invalid."""
+        logger.info("Cleaning locks...")
         cursor = 0
         pattern = "retrohunt:hunt_*:lock"
 
