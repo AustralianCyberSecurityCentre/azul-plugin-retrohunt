@@ -54,7 +54,7 @@ RUN apt-get update && \
 ARG UID=21000
 ARG GID=21000
 RUN groupadd -g $GID azul && useradd --create-home --shell /bin/bash -u $UID -g $GID azul
-USER 21000
+USER azul
 COPY --from=builder /usr/local /usr/local
 
 # run tests during build to verify dockerfile has all requirements
