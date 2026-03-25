@@ -212,12 +212,14 @@ class RetrohuntService:
                     self.redis.delete(key_str)
                     continue
                 # Delete if older than 30 days
+                print("submitted:", submitted, "cutoff_30d:", cutoff_30d)
                 if submitted < cutoff_30d:
                     logger.info(f"Ageing off {key_str}")
                     self.redis.delete(key_str)
                     continue
 
                 # Delete if older than 3 days AND not completed
+                print("submitted:", submitted, "cutoff_3d:", cutoff_3d)
                 if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
                     logger.info(f"Ageing off incomplete entry {key_str}")
                     self.redis.delete(key_str)
