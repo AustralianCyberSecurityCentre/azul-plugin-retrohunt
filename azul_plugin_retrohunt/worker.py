@@ -29,7 +29,7 @@ prom_jobs_run = Counter(
 prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a workers run.")
 
 PLUGIN_NAME = "RetroHunter"
-PLUGIN_VERSION = "2026.02.26"
+PLUGIN_VERSION = "2026.03.25"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
 
@@ -333,40 +333,30 @@ def main():
             pass  # already exists
         else:
             raise
-    STREAM = "retrohunt-jobs"
-    GROUP = "retrohunt-workers"
-    ttl = LOCK_TTL * 1000
+
     # poll for retrohunt submissions to work on
     while True:
-        messages = None
         try:
             # Claim any stale jobs first
             try:
-                # Get PEL entries using XPENDING
-                entries = rs.redis.xpending(STREAM, GROUP)
+                result = rs.redis.xautoclaim(
+                    rs.RETROHUNT_JOB,
+                    rs.RETROHUNT_GROUP,
+                    worker_id,
+                    min_idle_time=LOCK_TTL,
+                    start_id="0-0",
+                    count=1,
+                )
 
-                logger.info("this is entries: ", entries)
-
-                for entry in entries:
-                    msg_id = entry[0].decode()
-                    idle_ms = entry[2]
-
-                    logger.info("Entry:", entry)
-
-                    if idle_ms > ttl:
-                        # Claim the stale message
-                        result = rs.redis.xclaim(
-                            STREAM, GROUP, worker_id, min_idle_time=ttl, message_ids=[msg_id], justid=False
-                        )
-
-                        if result:
-                            logger.info("Found stale jobs:", result)
-                            messages = result
-                            break
+                # fakeredis returns 2 values, redis-py returns 3
+                if len(result) == 3:
+                    next_id, messages, deleted = result
+                else:
+                    # fakeredis doesn't support deleted entries
+                    next_id, messages = result
 
             except ResponseError as e:
                 if "NOGROUP" in str(e):
-                    logger.info("Exception ", e)
                     logger.info("Job stream or consumer group not created yet. Waiting...")
                     sleep(5)
                     continue
@@ -376,7 +366,6 @@ def main():
                 msg_id, payload = messages[0]
             else:
                 # no stale jobs, read new ones
-                logger.info("No stale jobs looking for fresh")
                 try:
                     events = rs.redis.xreadgroup(
                         groupname=rs.RETROHUNT_GROUP,
@@ -410,7 +399,7 @@ def main():
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
-            logger.info("job: ", job)
+
             job_id = job.entity.id
             # these will be cleaned up by the cronjob later
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
@@ -418,14 +407,8 @@ def main():
 
             logger.debug("Worker found job.")
 
-            if check_lock_active(rs.redis, job_id, worker_id):
-                # Another worker is running this hunt
-                logger.info("Failed to acquire lock.")
-                continue
-
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
-                # another worker got it
-                logger.info("another worker got it")
+                # Another worker is running this hunt
                 continue
 
             logger.debug("lock aquired")
@@ -452,8 +435,7 @@ def main():
             raise
         except Exception as e:
             logger.exception(f"Worker error, continuing loop: {e}")
-            sleep(settings.RedisSettings().exception_wait)
-            sleep(settings.RedisSettings().exception_wait)
+            sleep(settings.RedisSettings.exception_wait)
             continue
 
 

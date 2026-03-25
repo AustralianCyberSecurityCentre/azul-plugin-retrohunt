@@ -29,7 +29,7 @@ class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
     RETROHUNT_JOB = "retrohunt-jobs"
-    RETROHUNT_GROUP = "retrohunt-groups"
+    RETROHUNT_GROUP = "retrohunt-workers"
 
     def __init__(self, redis_client=None):
         self._redis_client = redis_client
