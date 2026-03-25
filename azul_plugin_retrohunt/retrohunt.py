@@ -212,11 +212,13 @@ class RetrohuntService:
                     continue
                 # Delete if older than 30 days
                 if submitted < cutoff_30d:
+                    logger.info(f"Ageing off {key_str}")
                     self.redis.delete(key_str)
                     continue
 
                 # Delete if older than 3 days AND not completed
                 if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
+                    logger.info(f"Ageing off incomplete entry {key_str}")
                     self.redis.delete(key_str)
                     continue
 
@@ -239,6 +241,7 @@ class RetrohuntService:
 
             # Drop entries older than 30 days
             if ts < cutoff_30d:
+                logger.info(f"Ageing off stream {entry_id}")
                 self.redis.xdel(stream, entry_id)
                 continue
 
@@ -266,40 +269,9 @@ class RetrohuntService:
 
             # Drop stale or incomplete hunts older than 3 days
             if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
+                logger.info(f"Ageing off incomplete stream {entry_id}")
                 self.redis.xdel(stream, entry_id)
                 continue
-
-    def validate_hunt(self, key, value):
-        """Return a list of issues found in this hunt entry."""
-        issues = []
-
-        # 1. Missing value
-        if value is None:
-            issues.append("Value is NIL (key exists but has no data)")
-            return issues
-
-        # 2. JSON parse check
-        try:
-            data = json.loads(value)
-        except Exception as e:
-            issues.append(f"Invalid JSON: {e}")
-            return issues
-
-        # 3. Required fields check
-        required_fields = ["id", "submitted_time", "search", "status"]
-
-        for field in required_fields:
-            if field not in data:
-                issues.append(f"Missing required field: {field}")
-
-        # 4. Type checks
-        if "submitted_time" in data and isinstance(data["submitted_time"], dict):
-            issues.append("submitted_time is a dict, expected string")
-
-        if "status" in data and isinstance(data["status"], dict):
-            issues.append("status is a dict, expected string")
-
-        return issues
 
     def _cleanup_locks(self):
         """Remove retrohunt job locks that are invalid."""
@@ -318,11 +290,13 @@ class RetrohuntService:
 
                 # lock has no expiration (broken)
                 if ttl == -1:
+                    logger.info(f"Removing broken lock {key} no expiration")
                     self.redis.delete(key_str)
                     continue
 
                 # key does not exist (cleanup)
                 if ttl == -2:
+                    logger.info(f"Removing broken lock {key} Key does not exist.")
                     self.redis.delete(key_str)
                     continue
             # healthy lock

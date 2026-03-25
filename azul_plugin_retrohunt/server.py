@@ -2,7 +2,6 @@
 
 import logging
 import os
-import traceback
 from collections import OrderedDict
 from importlib.resources import files
 
@@ -30,7 +29,6 @@ from azul_plugin_retrohunt.retrohunt import RetrohuntService
 from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
-
 
 app = FastAPI(
     title="Retrohunt Server",
@@ -139,19 +137,10 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 @app.get("/", include_in_schema=False)
 @app.get("/hunts", include_in_schema=False)
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
-    """This is a test."""
+    """List the latest retrohunts by submission time."""
     result = rs.list_hunts(limit)
     ordered_hunts = result["data"]
-    # find_bad_hunt(ordered_hunts, templates)
-    # templates.env.get_template("hunts.html").render(hunts=[])
-    try:
-        response = templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
-    except Exception:
-        logging.warning("ordered_hunts: %s", ordered_hunts)
-        logging.warning("requst", req)
-        traceback.print_exc()
-        raise
-    return response
+    return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
@@ -196,53 +185,6 @@ async def redoc_html(req: Request) -> HTMLResponse:
         redoc_favicon_url="/static/favicon-32x32.png",
         with_google_fonts=False,
     )
-
-
-def find_bad_hunt(hunts, templates):
-    """Identify which hunt object breaks Jinja template rendering."""
-    fields = [
-        "submitted_time",
-        "id",
-        "search_type",
-        "search",
-        "status",
-        "duration",
-        "tool_matches_done",
-        "tool_matches_total",
-        "tool_match_count",
-    ]
-
-    print("\n--- Running hunt isolation test ---")
-
-    for i, hunt in enumerate(hunts):
-        print(f"\nTesting hunt #{i}...")
-
-        for field in fields:
-            try:
-                tmpl = templates.env.from_string(f"{{{{ hunt.{field} }}}}")
-                tmpl.render(hunt=hunt)
-            except Exception as e:
-                print(f"\n🔥 BAD FIELD in hunt #{i}: '{field}'")
-                print("Exception:", e)
-                print("Type:", type(e))
-
-                # Dump hunt data
-                try:
-                    data = hunt.model_dump()
-                except Exception:
-                    data = hunt.dict()
-
-                print("\n--- BAD HUNT DATA ---")
-                for k, v in data.items():
-                    print(f"  {k}: {v!r} ({type(v)})")
-                print("\n----------------------\n")
-
-                return i, field
-
-        print(f"Hunt #{i} OK")
-
-    print("\nNo bad hunts found.")
-    return None
 
 
 @click.command()
