@@ -53,6 +53,7 @@ app.add_route("/metrics", handle_metrics)
 templates_path = files(__package__).joinpath("templates")
 templates = Jinja2Templates(directory=str(templates_path))
 templates.env.undefined = jinja2.StrictUndefined
+templates.env.globals.pop("request", None)
 
 
 def format_duration(secs):
@@ -143,6 +144,7 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     result = rs.list_hunts(limit)
     ordered_hunts = result["data"]
     print("Hunts ", ordered_hunts)
+    print("Jinja globals:", templates.env.globals)
     return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
 
 
