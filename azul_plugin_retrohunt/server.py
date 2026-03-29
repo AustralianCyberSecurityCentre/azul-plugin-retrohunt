@@ -154,7 +154,10 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     print("ACTUAL TEMPLATE NAME:", repr("hunts.html"))
     name = "hunts.html"
     print("NAME TYPE:", type(name), "VALUE:", name)
-    return templates.TemplateResponse("hunts.html", {"hunts": ordered_hunts}, request=req)
+    context = {"hunts": ordered_hunts}
+    print("CONTEXT KEYS:", context.keys())
+    print("CONTEXT FULL:", context)
+    return templates.TemplateResponse("hunts.html", context, request=req)
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
