@@ -6,6 +6,7 @@ from collections import OrderedDict
 from importlib.resources import files
 
 import click
+import jinja2
 import semantic_version
 import uvicorn
 from azul_bedrock import models_network as azm
@@ -51,6 +52,7 @@ app.add_route("/metrics", handle_metrics)
 
 templates_path = files(__package__).joinpath("templates")
 templates = Jinja2Templates(directory=str(templates_path))
+templates.env.undefined = jinja2.StrictUndefined
 
 
 def format_duration(secs):
