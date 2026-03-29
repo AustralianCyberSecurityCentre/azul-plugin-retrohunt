@@ -123,7 +123,7 @@ def submit_hunt_v1(
 @app.get("/submit", include_in_schema=False)
 async def form(request: Request) -> HTMLResponse:
     """Get a retrohunt submission form."""
-    return templates.TemplateResponse("submit.html", {"request": request})
+    return templates.TemplateResponse("submit.html", {}, request=request)
 
 
 @app.post("/submit", include_in_schema=False)
@@ -168,10 +168,10 @@ async def hunt_results(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         "results.html",
         {
-            "request": request,
             "hunt": hunt,
             "links": os.environ.get("RETROHUNT_HASH_LINKS"),
         },
+        request=request,
     )
 
 
