@@ -51,13 +51,13 @@ app.add_middleware(
 )
 app.add_route("/metrics", handle_metrics)
 
-# templates_path = files(__package__).joinpath("templates")
-# templates = Jinja2Templates(directory=str(templates_path))
-BASE_DIR = Path(__file__).resolve().parent
-print("BASE DIR ", BASE_DIR)
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-templates.env.undefined = jinja2.StrictUndefined
-templates.env.globals.pop("request", None)
+templates_path = files(__package__).joinpath("templates")
+templates = Jinja2Templates(directory=str(templates_path))
+#BASE_DIR = Path(__file__).resolve().parent
+#print("BASE DIR ", BASE_DIR)
+#templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+#templates.env.undefined = jinja2.StrictUndefined
+#templates.env.globals.pop("request", None)
 
 
 def format_duration(secs):
@@ -147,15 +147,6 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     """List the latest retrohunts by submission time."""
     result = rs.list_hunts(limit)
     ordered_hunts = result["data"]
-    print("Hunts ", ordered_hunts)
-    print("Jinja globals:", templates.env.globals)
-    print((BASE_DIR / "templates" / "hunts.html").exists())
-    print("TEMPLATE NAME TYPE:", type("hunts.html"))
-    print("ACTUAL TEMPLATE NAME:", repr("hunts.html"))
-    name = "hunts.html"
-    print("NAME TYPE:", type(name), "VALUE:", name)
-    ctx = {"hunts": ordered_hunts}
-    print("CTX:", ctx)
     return templates.TemplateResponse(name="hunts.html", context={"hunts": ordered_hunts}, request=req)
 
 
