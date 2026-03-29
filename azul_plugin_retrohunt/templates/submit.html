@@ -4,7 +4,7 @@
         <h3>Submit Retrohunt</h3>
     </div>
     <div class="submit">
-        <form method="post" action="{{ request.app.url_path_for('submit') }}" class="form-horizontal" enctype="application/x-www-form-urlencoded">
+        <form method="post" action="{{ request.scope['app'].url_path_for('submit') }}" class="form-horizontal" enctype="application/x-www-form-urlencoded">
             <div class="control-group">
                 <label class="control-label" for="type"><h4>Hunt Type</h4></label><br/><br/>
                 <input type="radio" class="form-control" name="search_type" value="Yara" checked="checked"> Yara </input>

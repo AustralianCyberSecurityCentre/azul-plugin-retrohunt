@@ -20,12 +20,12 @@
                         <span class="icon-bar" />
                         <span class="icon-bar" />
                     </a>
-                    <a class="brand" href="{{ request.app.url_path_for('list_hunts') }}">Retrohunt</a>
+                    <a class="brand" href="{{ request.scope['app'].url_path_for('list_hunts') }}">Retrohunt</a>
                     <div class="nav-collapse">
                         <ul class="nav">
-                            <li><a href="{{ request.app.url_path_for('submit') }}">Submit</a></li>
-                            <li><a href="{{ request.app.url_path_for('list_hunts') }}">Results</a></li>
-                            <li><a href="{{ request.app.url_path_for('swagger_doc_html') }}">API Docs</a></li>
+                            <li><a href="{{ request.scope['app'].url_path_for('submit') }}">Submit</a></li>
+                            <li><a href="{{ request.scope['app'].url_path_for('list_hunts') }}">Results</a></li>
+                            <li><a href="{{ request.scope['app'].url_path_for('swagger_doc_html') }}">API Docs</a></li>
                         </ul>
                     </div>
                 </div>
