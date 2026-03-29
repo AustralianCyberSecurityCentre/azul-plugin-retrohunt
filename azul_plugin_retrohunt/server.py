@@ -123,7 +123,7 @@ def submit_hunt_v1(
 @app.get("/submit", include_in_schema=False)
 async def form(request: Request) -> HTMLResponse:
     """Get a retrohunt submission form."""
-    return templates.TemplateResponse("submit.html", {}, request)
+    return templates.TemplateResponse(name="submit.html", context={}, request=request)
 
 
 @app.post("/submit", include_in_schema=False)
@@ -156,7 +156,12 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     print("NAME TYPE:", type(name), "VALUE:", name)
     ctx = {"hunts": ordered_hunts}
     print("CTX:", ctx)
-    return templates.TemplateResponse("hunts.html", ctx, request=req)
+    return templates.TemplateResponse(
+        name="hunts.html",
+        context={"hunts": ordered_hunts},
+        request=req
+    )
+
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
@@ -168,12 +173,12 @@ async def hunt_results(request: Request) -> HTMLResponse:
         raise HTTPException(status_code=404, detail="Hunt not found")
     # return 404 if not available.
     return templates.TemplateResponse(
-        "results.html",
-        {
+        name="results.html",
+        context={
             "hunt": hunt,
             "links": os.environ.get("RETROHUNT_HASH_LINKS"),
         },
-        request,
+        request=request,
     )
 
 
