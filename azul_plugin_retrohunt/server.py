@@ -123,7 +123,7 @@ def submit_hunt_v1(
 @app.get("/submit", include_in_schema=False)
 async def form(request: Request) -> HTMLResponse:
     """Get a retrohunt submission form."""
-    return templates.TemplateResponse("submit.html", {}, request=request)
+    return templates.TemplateResponse("submit.html", {}, request)
 
 
 @app.post("/submit", include_in_schema=False)
@@ -157,7 +157,7 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     context = {"hunts": ordered_hunts}
     print("CONTEXT KEYS:", context.keys())
     print("CONTEXT FULL:", context)
-    return templates.TemplateResponse("hunts.html", context, request=req)
+    return templates.TemplateResponse("hunts.html", context, req)
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
@@ -174,7 +174,7 @@ async def hunt_results(request: Request) -> HTMLResponse:
             "hunt": hunt,
             "links": os.environ.get("RETROHUNT_HASH_LINKS"),
         },
-        request=request,
+        request,
     )
 
 
