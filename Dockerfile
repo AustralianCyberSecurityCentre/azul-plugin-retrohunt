@@ -54,7 +54,8 @@ RUN apt-get update && \
 ARG UID=21000
 ARG GID=21000
 RUN groupadd -g $GID azul && useradd --create-home --shell /bin/bash -u $UID -g $GID azul
-USER azul
+# Changed user from azul to 21000 to get cronjob to run
+USER 21000
 COPY --from=builder /usr/local /usr/local
 
 # run tests during build to verify dockerfile has all requirements

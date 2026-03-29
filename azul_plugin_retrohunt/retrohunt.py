@@ -244,6 +244,7 @@ class RetrohuntService:
             ts = datetime.fromtimestamp(int(ms_str) / 1000, tz=timezone.utc)
 
             # Drop entries older than 30 days
+            print("ts and cutoff: ", ts, cutoff_30d)
             if ts < cutoff_30d:
                 logger.info(f"Ageing off stream {entry_id}")
                 self.redis.xdel(stream, entry_id)
@@ -272,6 +273,7 @@ class RetrohuntService:
                 continue
 
             # Drop stale or incomplete hunts older than 3 days
+            print("submit time and cutoff: ", submitted, cutoff_3d)
             if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
                 logger.info(f"Ageing off incomplete stream {entry_id}")
                 self.redis.xdel(stream, entry_id)

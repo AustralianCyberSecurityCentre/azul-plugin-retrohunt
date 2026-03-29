@@ -107,7 +107,7 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             # Jump to end again
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
-
+    print("Updating redis with job data ", json.dumps(job.model_dump()))
     rs.redis.set(job.entity.id, json.dumps(job.model_dump()))
     return job
 
@@ -364,6 +364,7 @@ def main():
 
             if messages:
                 msg_id, payload = messages[0]
+                print("Picked up a stale job: ", payload)
             else:
                 # no stale jobs, read new ones
                 try:
