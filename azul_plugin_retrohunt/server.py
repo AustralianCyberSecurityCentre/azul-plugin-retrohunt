@@ -157,7 +157,8 @@ async def hunt_results(request: Request) -> HTMLResponse:
         context={
             "hunt": hunt,
             "links": os.environ.get("RETROHUNT_HASH_LINKS"),
-        }, request=request
+        },
+        request=request,
     )
 
 
