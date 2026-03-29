@@ -4,10 +4,8 @@ import logging
 import os
 from collections import OrderedDict
 from importlib.resources import files
-from pathlib import Path
 
 import click
-import jinja2
 import semantic_version
 import uvicorn
 from azul_bedrock import models_network as azm
@@ -53,11 +51,11 @@ app.add_route("/metrics", handle_metrics)
 
 templates_path = files(__package__).joinpath("templates")
 templates = Jinja2Templates(directory=str(templates_path))
-#BASE_DIR = Path(__file__).resolve().parent
-#print("BASE DIR ", BASE_DIR)
-#templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-#templates.env.undefined = jinja2.StrictUndefined
-#templates.env.globals.pop("request", None)
+# BASE_DIR = Path(__file__).resolve().parent
+# print("BASE DIR ", BASE_DIR)
+# templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+# templates.env.undefined = jinja2.StrictUndefined
+# templates.env.globals.pop("request", None)
 
 
 def format_duration(secs):
