@@ -149,7 +149,12 @@ async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
     ordered_hunts = result["data"]
     print("Hunts ", ordered_hunts)
     print("Jinja globals:", templates.env.globals)
-    return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
+    print((BASE_DIR / "templates" / "hunts.html").exists())
+    print("TEMPLATE NAME TYPE:", type("hunts.html"))
+    print("ACTUAL TEMPLATE NAME:", repr("hunts.html"))
+    name = "hunts.html"
+    print("NAME TYPE:", type(name), "VALUE:", name)
+    return templates.TemplateResponse(name, {"request": req, "hunts": ordered_hunts})
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
