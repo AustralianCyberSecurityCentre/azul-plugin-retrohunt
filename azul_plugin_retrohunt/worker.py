@@ -248,6 +248,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
 
 def check_lock_active(redis_client, job_id: str):
+    """Remove stale locks before trying to acquire a new one."""
     lock_key = f"retrohunt:{job_id}:lock"
     owner = redis_client.get(lock_key)
     ttl = redis_client.ttl(lock_key)
@@ -338,7 +339,6 @@ def main():
     # poll for retrohunt submissions to work on
     while True:
         try:
-
             # Claim any stale jobs first
             try:
                 result = rs.redis.xautoclaim(
