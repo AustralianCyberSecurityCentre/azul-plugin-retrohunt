@@ -406,13 +406,13 @@ def main():
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 continue
 
-            logger.debug("Worker found job.")
+            print("Worker found job.")
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
                 continue
 
-            logger.debug("lock aquired")
+            print("lock aquired")
 
             # Start heartbeat
             stop_event = threading.Event()
