@@ -247,28 +247,29 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job = _update_progress(job, logs)
 
 
-def check_lock_active(redis_client, job_id: str, worker_id: str):
-    """Check for a valid lock. If not we should acquire a new one."""
+def check_lock_active(redis_client, job_id: str):
     lock_key = f"retrohunt:{job_id}:lock"
     owner = redis_client.get(lock_key)
     ttl = redis_client.ttl(lock_key)
 
+    # No lock or key missing
     if owner is None or ttl == -2:
         return False
 
+    # Lock exists but has no TTL → stale
     if ttl == -1:
+        print("Deleting lock")
+        redis_client.delete(lock_key)
         return False
 
+    # TTL expired or invalid
     if ttl <= 0:
+        print("Deleting lock")
+        redis_client.delete(lock_key)
         return False
 
-    owner = owner.decode()
-
-    # Lock belongs to another worker with valid lock
-    if owner != worker_id and ttl > 0:
-        return True
-
-    return False
+    # Lock is valid (belongs to someone)
+    return True
 
 
 def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
@@ -337,6 +338,7 @@ def main():
     # poll for retrohunt submissions to work on
     while True:
         try:
+
             # Claim any stale jobs first
             try:
                 result = rs.redis.xautoclaim(
@@ -407,9 +409,14 @@ def main():
                 continue
 
             print("Worker found job.")
+            print("Removing stale lock")
+            if not check_lock_active(rs.redis, job_id):
+                print("Lock for job is not stale")
+                continue
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
+                print("Could not acquire a lock for some reason")
                 continue
 
             print("lock aquired")
