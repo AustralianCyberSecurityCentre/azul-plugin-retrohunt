@@ -250,27 +250,17 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 def check_lock_active(redis_client, job_id: str):
     """Remove stale locks before trying to acquire a new one."""
     lock_key = f"retrohunt:{job_id}:lock"
-    owner = redis_client.get(lock_key)
     ttl = redis_client.ttl(lock_key)
-
-    # No lock or key missing
-    if owner is None or ttl == -2:
-        return False
 
     # Lock exists but has no TTL → stale
     if ttl == -1:
-        print("Deleting lock")
+        print("Deleting lock ttl ", ttl)
         redis_client.delete(lock_key)
-        return False
 
     # TTL expired or invalid
     if ttl <= 0:
-        print("Deleting lock")
+        print("Deleting lock ttl: ", ttl)
         redis_client.delete(lock_key)
-        return False
-
-    # Lock is valid (belongs to someone)
-    return True
 
 
 def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
@@ -410,9 +400,7 @@ def main():
 
             print("Worker found job.")
             print("Removing stale lock")
-            if not check_lock_active(rs.redis, job_id):
-                print("Lock for job is not stale")
-                continue
+            check_lock_active(rs.redis, job_id)
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
