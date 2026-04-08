@@ -257,6 +257,7 @@ def check_lock_active(redis_client, job_id: str):
         print("Deleting lock ttl ", ttl)
         redis_client.delete(lock_key)
 
+
     # TTL expired or invalid
     if ttl <= 0:
         print("Deleting lock ttl: ", ttl)
