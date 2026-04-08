@@ -421,6 +421,7 @@ def main():
 
             try:
                 with prom_worker_runtime.time():
+                    print("starting hunt.")
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
