@@ -257,7 +257,6 @@ def check_lock_active(redis_client, job_id: str):
         print("Deleting lock ttl ", ttl)
         redis_client.delete(lock_key)
 
-
     # TTL expired or invalid
     if ttl <= 0:
         print("Deleting lock ttl: ", ttl)
@@ -402,7 +401,7 @@ def main():
             print("Worker found job.")
             print("Removing stale lock")
             check_lock_active(rs.redis, job_id)
-              
+
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
                 print("Could not acquire a lock for some reason")
