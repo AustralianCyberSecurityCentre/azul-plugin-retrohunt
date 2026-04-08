@@ -402,7 +402,7 @@ def main():
             print("Worker found job.")
             print("Removing stale lock")
             check_lock_active(rs.redis, job_id)
-
+              
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
                 print("Could not acquire a lock for some reason")
