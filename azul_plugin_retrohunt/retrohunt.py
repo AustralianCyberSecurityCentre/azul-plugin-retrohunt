@@ -39,6 +39,12 @@ class RetrohuntService:
         """Start redis client if not in memory. Returns client."""
         if self._redis_client is None:
             settings = RetrohuntSettings().RedisSettings()
+            print("Starting redis")
+            print("host: settings.endpoint")
+            print("port: ", settings.port)
+            print("username: ", settings.username)
+            print("password: ", settings.password)
+            print("db ", settings.db)
             self._redis_client = redis.Redis(
                 host=settings.endpoint,
                 port=settings.port,
