@@ -32,7 +32,7 @@ from .yara_parse import parse_yara_rules
 
 logger = logging.getLogger("bigyara.search")
 
-_DURATION_BUCKETS = [10, 30, 60, 120, 300, 600, 1200, 1800, 3600]
+_DURATION_BUCKETS = [0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
     "retrohunt_broad_phase_duration_seconds",
