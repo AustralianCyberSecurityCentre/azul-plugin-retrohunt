@@ -117,7 +117,7 @@ def submit_hunt_v1(
 @app.get("/submit", include_in_schema=False)
 async def form(request: Request) -> HTMLResponse:
     """Get a retrohunt submission form."""
-    return templates.TemplateResponse("submit.html", {"request": request})
+    return templates.TemplateResponse(name="submit.html", context={}, request=request)
 
 
 @app.post("/submit", include_in_schema=False)
@@ -138,12 +138,9 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 @app.get("/", include_in_schema=False)
 @app.get("/hunts", include_in_schema=False)
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
-    """This is a test."""
+    """List all hunts."""
     result = rs.list_hunts(limit)
     ordered_hunts = result["data"]
-
-    find_bad_hunt(ordered_hunts, templates)
-
     return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
 
 
@@ -156,12 +153,12 @@ async def hunt_results(request: Request) -> HTMLResponse:
         raise HTTPException(status_code=404, detail="Hunt not found")
     # return 404 if not available.
     return templates.TemplateResponse(
-        "results.html",
-        {
-            "request": request,
+        name="results.html",
+        context={
             "hunt": hunt,
             "links": os.environ.get("RETROHUNT_HASH_LINKS"),
         },
+        request=request,
     )
 
 
@@ -189,51 +186,6 @@ async def redoc_html(req: Request) -> HTMLResponse:
         redoc_favicon_url="/static/favicon-32x32.png",
         with_google_fonts=False,
     )
-
-
-def find_bad_hunt(hunts, templates):
-    """Identify which hunt object breaks Jinja template rendering."""
-    # Minimal template that touches all fields used in hunts.html
-    test_template = templates.env.from_string("""
-        {{ hunt.submitted_time }}
-        {{ hunt.id }}
-        {{ hunt.search_type }}
-        {{ hunt.search }}
-        {{ hunt.status }}
-        {{ hunt.duration }}
-        {{ hunt.tool_matches_done }}
-        {{ hunt.tool_matches_total }}
-        {{ hunt.tool_match_count }}
-    """)
-
-    print("\n--- Running hunt isolation test ---")
-
-    for i, hunt in enumerate(hunts):
-        print(f"\nTesting hunt #{i}...")
-
-        try:
-            test_template.render(hunt=hunt)
-            print(f"Hunt #{i} OK")
-        except Exception as e:
-            print(f"\n🔥 BAD HUNT FOUND at index {i}")
-            print("Exception:", e)
-            print("Type:", type(e))
-
-            # Dump the hunt fields
-            try:
-                data = hunt.model_dump()  # Pydantic v2
-            except Exception:
-                data = hunt.dict()  # Pydantic v1
-
-            print("\n--- BAD HUNT DATA ---")
-            for k, v in data.items():
-                print(f"  {k}: {v!r} ({type(v)})")
-
-            print("\n----------------------\n")
-            return i  # Return index of bad hunt
-
-    print("\nNo bad hunts found.")
-    return None
 
 
 @click.command()
