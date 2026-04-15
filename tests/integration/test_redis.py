@@ -78,6 +78,17 @@ def test_cronjob_cleanup_runs_and_cleans(service):
 
     # Build a realistic RetrohuntEvent JSON
     event = {
+        "model_version": "1",
+        "kafka_key": "hunt_stale",
+        "timestamp": stale_iso,
+
+        "author": {
+            "name": "tester",
+            "category": "user",
+            "version": "1.0",
+            "security": None,
+        },
+
         "entity": {
             "id": "hunt_stale",
             "search_type": "wide",
@@ -103,8 +114,14 @@ def test_cronjob_cleanup_runs_and_cleans(service):
             "results": {},
             "error": "",
         },
+
         "action": "submitted",
-        "source": {"submitter": "tester", "security": None, "timestamp": stale_iso},
+
+        "source": {
+            "submitter": "tester",
+            "security": None,
+            "timestamp": stale_iso,
+        },
     }
 
     # Store the hunt in Redis
@@ -121,12 +138,14 @@ def test_cronjob_cleanup_runs_and_cleans(service):
         tmp_path = tmp.name
 
     result = subprocess.run(
-        [sys.executable, tmp_path],
+        [sys.executable, "-m", "azul_plugin_retrohunt.cron"],
         capture_output=True,
         text=True,
         timeout=10,
+        env=os.environ.copy(),
     )
 
+    print(result)
     assert result.returncode == 0, f"Cronjob failed: {result.stderr}"
 
     # Hunt should be deleted
@@ -161,10 +180,11 @@ def test_cleanup_locks_removes_invalid(service):
         tmp_path = tmp.name
 
     result = subprocess.run(
-        [sys.executable, tmp_path],
+        [sys.executable, "-m", "azul_plugin_retrohunt.cron"],
         capture_output=True,
         text=True,
         timeout=10,
+        env=os.environ.copy(),
     )
 
     # Reload keys after cleanup

@@ -171,7 +171,6 @@ class RetrohuntService:
         cutoff_short = RetrohuntSettings().RedisSettings().cleanup_running_delay
         cutoff_30d = now - timedelta(days=cutoff_long)
         cutoff_3d = now - timedelta(days=cutoff_short)
-
         self._cleanup_hunts(cutoff_30d, cutoff_3d)
         self._cleanup_stream(cutoff_30d, cutoff_3d)
         self._cleanup_locks()
@@ -205,7 +204,7 @@ class RetrohuntService:
                         self.redis.delete(key_str)
                         continue
 
-                    submitted = datetime.fromisoformat(ts_str)
+                    submitted = event.entity.submitted_time
                     if submitted.tzinfo is None:
                         submitted = submitted.replace(tzinfo=timezone.utc)
 
@@ -268,7 +267,7 @@ class RetrohuntService:
             try:
                 event = azm.RetrohuntEvent.model_validate_json(raw)
                 status = event.entity.status
-                submitted = datetime.fromisoformat(event.entity.submitted_time)
+                submitted = event.entity.submitted_time
                 if submitted.tzinfo is None:
                     submitted = submitted.replace(tzinfo=timezone.utc)
             except Exception as e:
