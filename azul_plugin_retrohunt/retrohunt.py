@@ -37,13 +37,6 @@ class RetrohuntService:
     @property
     def redis(self):
         """Start redis client if not in memory. Returns client."""
-        settings = RetrohuntSettings().RedisSettings()
-        print("Starting redis")
-        print("host: settings.endpoint")
-        print("port: ", settings.port)
-        print("username: ", settings.username)
-        print("password: ", settings.password)
-        print("db ", settings.db)
         if self._redis_client is None:
             settings = RetrohuntSettings().RedisSettings()
             self._redis_client = redis.Redis(
@@ -213,10 +206,11 @@ class RetrohuntService:
                         continue
 
                     submitted = datetime.fromisoformat(ts_str)
+                    if submitted.tzinfo is None:
+                        submitted = submitted.replace(tzinfo=timezone.utc)
 
-                except Exception:
-                    # Invalid JSON or invalid event → delete it
-                    self.redis.delete(key_str)
+                except Exception as e:
+                    logger.error(f"Error parsing hunt {e}")
                     continue
                 # Delete if older than 30 days
                 print("submitted:", submitted, "cutoff_30d:", cutoff_30d)
@@ -274,9 +268,11 @@ class RetrohuntService:
             try:
                 event = azm.RetrohuntEvent.model_validate_json(raw)
                 status = event.entity.status
-                submitted = event.entity.submitted_time
-            except Exception:
-                self.redis.xdel(stream, entry_id)
+                submitted = datetime.fromisoformat(event.entity.submitted_time)
+                if submitted.tzinfo is None:
+                    submitted = submitted.replace(tzinfo=timezone.utc)
+            except Exception as e:
+                logger.error(f"Error parsing hunt {hunt_id}: {e}")
                 continue
 
             # Drop stale or incomplete hunts older than 3 days

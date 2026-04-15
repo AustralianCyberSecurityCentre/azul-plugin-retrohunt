@@ -107,7 +107,6 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             # Jump to end again
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
-    print("Updating redis with job data ", json.dumps(job.model_dump()))
     rs.redis.set(job.entity.id, json.dumps(job.model_dump()))
     return job
 
@@ -254,12 +253,10 @@ def check_lock_active(redis_client, job_id: str):
 
     # Lock exists but has no TTL → stale
     if ttl == -1:
-        print("Deleting lock ttl ", ttl)
         redis_client.delete(lock_key)
 
     # TTL expired or invalid
     if ttl <= 0:
-        print("Deleting lock ttl: ", ttl)
         redis_client.delete(lock_key)
 
 
@@ -356,7 +353,6 @@ def main():
 
             if messages:
                 msg_id, payload = messages[0]
-                print("Picked up a stale job: ", payload)
             else:
                 # no stale jobs, read new ones
                 try:
@@ -398,16 +394,11 @@ def main():
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 continue
 
-            print("Worker found job.")
-            print("Removing stale lock")
             check_lock_active(rs.redis, job_id)
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
-                print("Could not acquire a lock for some reason")
                 continue
-
-            print("lock aquired")
 
             # Start heartbeat
             stop_event = threading.Event()
@@ -420,7 +411,6 @@ def main():
 
             try:
                 with prom_worker_runtime.time():
-                    print("starting hunt.")
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
