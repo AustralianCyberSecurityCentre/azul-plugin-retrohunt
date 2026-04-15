@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-04-02T00:44:56.762513074Z"
+exclude-newer = "2026-04-08T04:31:10.933009478Z"
 exclude-newer-span = "P1W"
 
 [options.exclude-newer-package]
@@ -131,6 +131,8 @@ dev = [
     { name = "pytest" },
     { name = "respx" },
     { name = "ruff" },
+    { name = "semantic-version" },
+    { name = "starlette-exporter" },
     { name = "tox" },
     { name = "ty" },
     { name = "urllib3" },
@@ -169,6 +171,8 @@ dev = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "respx", specifier = ">=0.22.0" },
     { name = "ruff", specifier = ">=0.15.8" },
+    { name = "semantic-version", specifier = ">=2.10.0" },
+    { name = "starlette-exporter", specifier = ">=0.23.0" },
     { name = "tox", specifier = ">=4.34.1" },
     { name = "ty", specifier = ">=0.0.27" },
     { name = "urllib3", specifier = ">=2.6.3" },

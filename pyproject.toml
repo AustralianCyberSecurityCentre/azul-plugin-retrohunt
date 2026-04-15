@@ -119,6 +119,8 @@ dev = [
     "ty>=0.0.27",
     "urllib3>=2.6.3",
     "fakeredis>=2.23.0",
+    "semantic-version>=2.10.0",
+    "starlette-exporter>=0.23.0",
 ]
 
 [tool.ruff]
