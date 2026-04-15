@@ -24,20 +24,25 @@ classifiers=[
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "aiofiles>=25.1.0",
     "azul-bedrock>=10.0.15",
     "azul-runner>=4.0.0",
     "click>=8.3.1",
     "fastapi>=0.128.0",
     "httpx>=0.28.1",
-    "idstools>=0.6.5",
     "jinja2>=3.1.6",
+    "prometheus-client>=0.24.1",
+    "pydantic>2",
+    "redis>=5.0.0",
+]
+
+[project.optional-dependencies]
+runtime = [
+    "aiofiles>=25.1.0",
+    "idstools>=0.6.5",
     "pendulum>=3.1.0",
     "progressbar2>=4.5.0",
     "prometheus-client>=0.24.1",
-    "pydantic>2",
     "python-multipart>=0.0.22",
-    "redis>=5.0.0",
     "semantic-version>=2.10.0",
     "starlette-exporter>=0.23.0",
     "uvicorn>=0.40.0",
@@ -114,6 +119,8 @@ dev = [
     "ty>=0.0.27",
     "urllib3>=2.6.3",
     "fakeredis>=2.23.0",
+    "semantic-version>=2.10.0",
+    "starlette-exporter>=0.23.0",
 ]
 
 [tool.ruff]

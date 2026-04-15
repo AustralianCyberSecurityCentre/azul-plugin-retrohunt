@@ -30,7 +30,6 @@ from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 
-
 app = FastAPI(
     title="Retrohunt Server",
     version=str(semantic_version.Version(SERVICE_VERSION)),
@@ -52,6 +51,11 @@ app.add_route("/metrics", handle_metrics)
 
 templates_path = files(__package__).joinpath("templates")
 templates = Jinja2Templates(directory=str(templates_path))
+# BASE_DIR = Path(__file__).resolve().parent
+# print("BASE DIR ", BASE_DIR)
+# templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+# templates.env.undefined = jinja2.StrictUndefined
+# templates.env.globals.pop("request", None)
 
 
 def format_duration(secs):
@@ -138,10 +142,10 @@ async def submit(*, search_type: str = Form(...), search: str = Form(...)) -> HT
 @app.get("/", include_in_schema=False)
 @app.get("/hunts", include_in_schema=False)
 async def list_hunts(req: Request, limit: int = 100) -> HTMLResponse:
-    """List all hunts."""
+    """List the latest retrohunts by submission time."""
     result = rs.list_hunts(limit)
     ordered_hunts = result["data"]
-    return templates.TemplateResponse("hunts.html", {"request": req, "hunts": ordered_hunts})
+    return templates.TemplateResponse(name="hunts.html", context={"hunts": ordered_hunts}, request=req)
 
 
 @app.get("/hunts/{id}", include_in_schema=False)
