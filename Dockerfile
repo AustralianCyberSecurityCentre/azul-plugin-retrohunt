@@ -79,8 +79,7 @@ ARG GID=21000
 # Easiest way to install with uv managing packages.
 USER root
 COPY ./pyproject.toml ./pyproject.toml
-#RUN uv pip install --system --group dev
-RUN uv sync --frozen --no-editable --group default --group dev
+RUN uv pip install --system --group dev
 USER azul
 # test scripts will be installed to the local user bin dir. Add local bin path for the azul user.
 ENV PATH="/home/azul/.local/bin:$PATH"
