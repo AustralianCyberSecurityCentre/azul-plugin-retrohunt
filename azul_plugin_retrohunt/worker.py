@@ -402,7 +402,7 @@ def main():
 
             # Start heartbeat
             stop_event = threading.Event()
-            start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL / 1_000_000, stop_event=stop_event)
+            start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL / 1_000, stop_event=stop_event)
 
             bgi_folders = []
             for _name, indexer_cfg in settings.indexers.items():
