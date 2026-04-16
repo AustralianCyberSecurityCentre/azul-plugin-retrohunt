@@ -97,20 +97,25 @@ test-utils = [
 name = "azul-plugin-retrohunt"
 source = { editable = "." }
 dependencies = [
-    { name = "aiofiles" },
     { name = "azul-bedrock" },
     { name = "azul-runner" },
     { name = "click" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "idstools" },
     { name = "jinja2" },
+    { name = "prometheus-client" },
+    { name = "pydantic" },
+    { name = "redis" },
+]
+
+[package.optional-dependencies]
+runtime = [
+    { name = "aiofiles" },
+    { name = "idstools" },
     { name = "pendulum" },
     { name = "progressbar2" },
     { name = "prometheus-client" },
-    { name = "pydantic" },
     { name = "python-multipart" },
-    { name = "redis" },
     { name = "semantic-version" },
     { name = "starlette-exporter" },
     { name = "uvicorn" },
@@ -126,6 +131,8 @@ dev = [
     { name = "pytest" },
     { name = "respx" },
     { name = "ruff" },
+    { name = "semantic-version" },
+    { name = "starlette-exporter" },
     { name = "tox" },
     { name = "ty" },
     { name = "urllib3" },
@@ -133,26 +140,28 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiofiles", specifier = ">=25.1.0" },
+    { name = "aiofiles", marker = "extra == 'runtime'", specifier = ">=25.1.0" },
     { name = "azul-bedrock", specifier = ">=10.0.15", index = "https://devpi.acsc.internal/azul/stable/" },
     { name = "azul-runner", specifier = ">=4.0.0", index = "https://devpi.acsc.internal/azul/stable/" },
     { name = "click", specifier = ">=8.3.1" },
     { name = "fastapi", specifier = ">=0.128.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "idstools", specifier = ">=0.6.5" },
+    { name = "idstools", marker = "extra == 'runtime'", specifier = ">=0.6.5" },
     { name = "jinja2", specifier = ">=3.1.6" },
-    { name = "pendulum", specifier = ">=3.1.0" },
-    { name = "progressbar2", specifier = ">=4.5.0" },
+    { name = "pendulum", marker = "extra == 'runtime'", specifier = ">=3.1.0" },
+    { name = "progressbar2", marker = "extra == 'runtime'", specifier = ">=4.5.0" },
     { name = "prometheus-client", specifier = ">=0.24.1" },
+    { name = "prometheus-client", marker = "extra == 'runtime'", specifier = ">=0.24.1" },
     { name = "pydantic", specifier = ">2" },
-    { name = "python-multipart", specifier = ">=0.0.22" },
+    { name = "python-multipart", marker = "extra == 'runtime'", specifier = ">=0.0.22" },
     { name = "redis", specifier = ">=5.0.0" },
-    { name = "semantic-version", specifier = ">=2.10.0" },
-    { name = "starlette-exporter", specifier = ">=0.23.0" },
-    { name = "uvicorn", specifier = ">=0.40.0" },
-    { name = "wheel", specifier = ">=0.46.3" },
-    { name = "yara-python", specifier = ">=4.5.4" },
+    { name = "semantic-version", marker = "extra == 'runtime'", specifier = ">=2.10.0" },
+    { name = "starlette-exporter", marker = "extra == 'runtime'", specifier = ">=0.23.0" },
+    { name = "uvicorn", marker = "extra == 'runtime'", specifier = ">=0.40.0" },
+    { name = "wheel", marker = "extra == 'runtime'", specifier = ">=0.46.3" },
+    { name = "yara-python", marker = "extra == 'runtime'", specifier = ">=4.5.4" },
 ]
+provides-extras = ["runtime"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -162,6 +171,8 @@ dev = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "respx", specifier = ">=0.22.0" },
     { name = "ruff", specifier = ">=0.15.8" },
+    { name = "semantic-version", specifier = ">=2.10.0" },
+    { name = "starlette-exporter", specifier = ">=0.23.0" },
     { name = "tox", specifier = ">=4.34.1" },
     { name = "ty", specifier = ">=0.0.27" },
     { name = "urllib3", specifier = ">=2.6.3" },

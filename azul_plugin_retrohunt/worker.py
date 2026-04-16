@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import threading
+import uuid
 from datetime import datetime
 from io import StringIO
 from time import sleep
@@ -28,7 +29,7 @@ prom_jobs_run = Counter(
 prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a workers run.")
 
 PLUGIN_NAME = "RetroHunter"
-PLUGIN_VERSION = "2026.02.26"
+PLUGIN_VERSION = "2026.03.25"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
 
@@ -106,7 +107,6 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             # Jump to end again
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
-
     rs.redis.set(job.entity.id, json.dumps(job.model_dump()))
     return job
 
@@ -246,6 +246,20 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job = _update_progress(job, logs)
 
 
+def check_lock_active(redis_client, job_id: str):
+    """Remove stale locks before trying to acquire a new one."""
+    lock_key = f"retrohunt:{job_id}:lock"
+    ttl = redis_client.ttl(lock_key)
+
+    # Lock exists but has no TTL → stale
+    if ttl == -1:
+        redis_client.delete(lock_key)
+
+    # TTL expired or invalid
+    if ttl <= 0:
+        redis_client.delete(lock_key)
+
+
 def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
     """Helper to aquire lock on retrohunt job."""
     lock_key = f"retrohunt:{job_id}:lock"
@@ -282,7 +296,7 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 def main():
     """Start the retrohunt worker."""
     global dp
-    worker_id = f"{socket.gethostname()}-{os.getpid()}"
+    worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
     LOCK_TTL = settings.RedisSettings().ttl
@@ -302,7 +316,7 @@ def main():
     prom_jobs_run.labels(azm.HuntState.FAILED.name)
 
     try:
-        rs.redis.xgroup_create("retrohunt-jobs", "retrohunt-workers", id="$", mkstream=True)
+        rs.redis.xgroup_create(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, id="$", mkstream=True)
     except ResponseError as e:
         if "BUSYGROUP" in str(e):
             pass  # already exists
@@ -315,10 +329,10 @@ def main():
             # Claim any stale jobs first
             try:
                 result = rs.redis.xautoclaim(
-                    "retrohunt-jobs",
-                    "retrohunt-workers",
+                    rs.RETROHUNT_JOB,
+                    rs.RETROHUNT_GROUP,
                     worker_id,
-                    min_idle_time=LOCK_TTL * 1000,
+                    min_idle_time=LOCK_TTL,
                     start_id="0-0",
                     count=1,
                 )
@@ -343,9 +357,9 @@ def main():
                 # no stale jobs, read new ones
                 try:
                     events = rs.redis.xreadgroup(
-                        groupname="retrohunt-workers",
+                        groupname=rs.RETROHUNT_GROUP,
                         consumername=worker_id,
-                        streams={"retrohunt-jobs": ">"},
+                        streams={rs.RETROHUNT_JOB: ">"},
                         count=1,
                         block=5000,
                     )
@@ -370,7 +384,7 @@ def main():
             event_json = rs.redis.get(payload[b"hunt_id"])
             if not event_json:
                 logger.error(f"Missing or corrupted event data for hunt_id={payload[b'hunt_id']}. Skipping.")
-                rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
+                rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
@@ -380,17 +394,15 @@ def main():
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 continue
 
-            logger.debug("Worker found job.")
+            check_lock_active(rs.redis, job_id)
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
                 continue
 
-            logger.debug("lock aquired")
-
             # Start heartbeat
             stop_event = threading.Event()
-            start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL, stop_event=stop_event)
+            start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL / 1_000_000, stop_event=stop_event)
 
             bgi_folders = []
             for _name, indexer_cfg in settings.indexers.items():
@@ -401,7 +413,7 @@ def main():
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
-                rs.redis.xack("retrohunt-jobs", "retrohunt-workers", msg_id)
+                rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
             finally:
                 stop_event.set()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")

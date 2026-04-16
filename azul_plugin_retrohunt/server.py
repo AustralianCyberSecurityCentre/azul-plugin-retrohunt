@@ -30,7 +30,6 @@ from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 
-
 app = FastAPI(
     title="Retrohunt Server",
     version=str(semantic_version.Version(SERVICE_VERSION)),
