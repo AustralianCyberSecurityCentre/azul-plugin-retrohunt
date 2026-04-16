@@ -141,7 +141,6 @@ def test_cronjob_cleanup_runs_and_cleans(service):
         env=os.environ.copy(),
     )
 
-    print(result)
     assert result.returncode == 0, f"Cronjob failed: {result.stderr}"
 
     # Hunt should be deleted

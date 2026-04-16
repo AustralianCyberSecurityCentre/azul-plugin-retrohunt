@@ -16,7 +16,6 @@ def run_cron():
     service = RetrohuntService()
 
     try:
-        print("Startig kron")
         service.run_periodic_tasks()
         log.info("Retrohunt cronjob completed successfully")
     except Exception as exc:
