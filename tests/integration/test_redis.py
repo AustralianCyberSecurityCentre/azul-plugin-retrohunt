@@ -81,14 +81,12 @@ def test_cronjob_cleanup_runs_and_cleans(service):
         "model_version": "1",
         "kafka_key": "hunt_stale",
         "timestamp": stale_iso,
-
         "author": {
             "name": "tester",
             "category": "user",
             "version": "1.0",
             "security": None,
         },
-
         "entity": {
             "id": "hunt_stale",
             "search_type": "wide",
@@ -114,9 +112,7 @@ def test_cronjob_cleanup_runs_and_cleans(service):
             "results": {},
             "error": "",
         },
-
         "action": "submitted",
-
         "source": {
             "submitter": "tester",
             "security": None,

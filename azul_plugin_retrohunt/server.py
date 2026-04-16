@@ -52,6 +52,7 @@ app.add_route("/metrics", handle_metrics)
 templates_path = files(__package__).joinpath("templates")
 templates = Jinja2Templates(directory=str(templates_path))
 
+
 def format_duration(secs):
     """Make time durations more human readable."""
     days = 60 * 60 * 24
