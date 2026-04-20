@@ -129,7 +129,6 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     return submission
 
 
-# restapi endpoints will be for webui integration
 @router.get(
     "/v0/retrohunt/retrohunts/{hunt_id}",
     response_model=RetrohuntResponse,
