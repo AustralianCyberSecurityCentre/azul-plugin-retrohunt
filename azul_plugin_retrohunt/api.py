@@ -185,7 +185,6 @@ def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
     return qr.fr(ctx, hunt.model_dump())
 
 
-
 @router.get(
     "/v0/retrohunt/retrohunts",
     response_model=RetrohuntsResponse,
@@ -223,10 +222,7 @@ def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
             entities = list(zip(["binary"] * len(hashes), hashes, strict=False))
 
             # query metastore
-            visible = [
-                x.id for x in query.check_entities(ctx, entities=entities)
-                if x.exists
-            ]
+            visible = [x.id for x in query.check_entities(ctx, entities=entities) if x.exists]
 
             hunt.tool_matches_total = len(visible)
 
@@ -235,7 +231,6 @@ def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
 
     # Convert models to dicts for JSON response
     return qr.fr(ctx, [h.model_dump() for h in hunts])
-
 
 
 @router.post(
