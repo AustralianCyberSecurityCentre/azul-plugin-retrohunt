@@ -138,7 +138,8 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
 )
 def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
     """Fetch details of specified hunt."""
-    response = RetrohuntService.get_hunts(hunt_id)
+    rs = RetrohuntService()
+    response = rs.get_hunts(hunt_id)
 
     # enrich/filter based on metastore
     hunt = response["data"]
@@ -175,7 +176,8 @@ def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
 )
 def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
     """Return list of hunts."""
-    r = RetrohuntService.list_hunts(limit)
+    rs = RetrohuntService()
+    r = rs.list_hunts(limit)
 
     # enrich/filter based on metastore
     results = r["data"]
@@ -207,9 +209,10 @@ def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
 def submit_hunt_route(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     """Submit a new retrohunt for processing."""
     enriched = submission.model_copy(update={"submitter": ctx.user_info.username})
+    rs = RetrohuntService()
     # submit the hunt and get the id
-    hunt_id = RetrohuntService.submit_hunt(enriched)
+    hunt_id = rs.submit_hunt(enriched)
     # get the hunt entity
-    hunt = RetrohuntService.get_hunts(hunt_id)
+    hunt = rs.get_hunts(hunt_id)
 
     return qr.fr(ctx, hunt["data"])
