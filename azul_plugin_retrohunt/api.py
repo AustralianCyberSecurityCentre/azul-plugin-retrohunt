@@ -129,6 +129,7 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     return submission
 
 
+# restapi endpoints will be for webui integration
 @router.get(
     "/v0/retrohunt/retrohunts/{hunt_id}",
     response_model=RetrohuntResponse,
@@ -137,33 +138,52 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
 )
 def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
     """Fetch details of specified hunt."""
-    response = service.get_hunts(hunt_id)
+    response = RetrohuntService.get_hunts(hunt_id)
 
-    # enrich/filter based on metastore
+    # response["data"] is a RetrohuntEntity model
     hunt = response["data"]
-    # mismatch in field namings between webapi/metastore and messaging/retrohunt api
-    if "markings" in hunt.get("security", {}):
-        hunt["security"]["other"] = hunt["security"].pop("markings")
 
+    # --- SECURITY FIELD FIXUP ---
+    security = hunt.security or {}
+
+    # rename "markings" → "other"
+    if "markings" in security:
+        security["other"] = security.pop("markings")
+
+    hunt.security = security
+
+    # --- RESULTS PROCESSING ---
     hashes = []
-    for matches in hunt.get("results", {}).values():
+    results = hunt.results or {}
+
+    for matches in results.values():
         if matches:
             hashes.extend(matches)
+
     if hashes:
-        # query as one aggregated multisearch
+        # aggregated multisearch
         entities = list(zip(["binary"] * len(hashes), hashes, strict=False))
         summaries = query.read_entities(ctx, entities=entities)
+
+        # map id → summary object
         sumdict = {s.id: s for s in summaries}
-        hunt["tool_matches_total"] = len(summaries)
+
+        hunt.tool_matches_total = len(summaries)
     else:
         sumdict = {}
-        hunt["tool_matches_total"] = 0
+        hunt.tool_matches_total = 0
 
-    # now override back into right term buckets
-    for term, matches in hunt.get("results", {}).items():
-        hunt["results"][term] = [sumdict[x] for x in matches if x in sumdict]
+    # --- REWRITE RESULTS WITH SUMMARY OBJECTS ---
+    new_results = {}
 
-    return qr.fr(ctx, hunt)
+    for term, matches in results.items():
+        new_results[term] = [sumdict[x].model_dump() for x in matches if x in sumdict]
+
+    hunt.results = new_results
+
+    # Convert model to dict for API response
+    return qr.fr(ctx, hunt.model_dump())
+
 
 
 @router.get(
@@ -174,27 +194,48 @@ def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
 )
 def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
     """Return list of hunts."""
-    r = service.list_hunts(limit)
+    r = RetrohuntService.list_hunts(limit)
 
-    # enrich/filter based on metastore
-    results = r["data"]
+    # r["data"] is now a list of RetrohuntEntity objects
+    hunts = r["data"]
 
-    # need to filter counts based on what user can actually see
-    for hunt in results:
-        # mismatch in field namings between webapi/metastore and messaging/retrohunt api
-        if "markings" in hunt.get("security", {}):
-            hunt["security"]["other"] = hunt["security"].pop("markings")
+    for hunt in hunts:
+        # --- SECURITY FIELD FIXUP ---
+        # hunt.security is likely a dict or None
+        security = hunt.security or {}
 
+        # rename "markings" → "other"
+        if "markings" in security:
+            security["other"] = security.pop("markings")
+
+        # assign back (Pydantic models allow attribute assignment)
+        hunt.security = security
+
+        # --- RESULTS PROCESSING ---
         hashes = []
-        for matches in hunt.get("results", {}).values():
+        results = hunt.results or {}
+
+        for matches in results.values():
             if matches:
                 hashes.extend(matches)
+
         if hashes:
             entities = list(zip(["binary"] * len(hashes), hashes, strict=False))
-            hunt["tool_matches_total"] = len([x.id for x in query.check_entities(ctx, entities=entities) if x.exists])
-            hunt.pop("results", None)
 
-    return qr.fr(ctx, results)
+            # query metastore
+            visible = [
+                x.id for x in query.check_entities(ctx, entities=entities)
+                if x.exists
+            ]
+
+            hunt.tool_matches_total = len(visible)
+
+            # remove results field entirely
+            hunt.results = {}
+
+    # Convert models to dicts for JSON response
+    return qr.fr(ctx, [h.model_dump() for h in hunts])
+
 
 
 @router.post(
@@ -207,8 +248,8 @@ def submit_hunt_route(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     """Submit a new retrohunt for processing."""
     enriched = submission.model_copy(update={"submitter": ctx.user_info.username})
     # submit the hunt and get the id
-    hunt_id = service.submit_hunt(enriched)
+    hunt_id = RetrohuntService.submit_hunt(enriched)
     # get the hunt entity
-    hunt = service.get_hunts(hunt_id)
+    hunt = RetrohuntService.get_hunts(hunt_id)
 
     return qr.fr(ctx, hunt["data"])
