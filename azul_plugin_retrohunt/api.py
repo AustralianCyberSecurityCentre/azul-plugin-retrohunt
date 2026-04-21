@@ -138,7 +138,7 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
 )
 def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
     """Fetch details of specified hunt."""
-    response = RetrohuntService.get_hunts(hunt_id)
+    response = service.get_hunts(hunt_id)
 
     # response["data"] is a RetrohuntEntity model
     hunt = response["data"]
@@ -193,7 +193,7 @@ def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
 )
 def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
     """Return list of hunts."""
-    r = RetrohuntService.list_hunts(limit)
+    r = service.list_hunts(limit)
 
     # r["data"] is now a list of RetrohuntEntity objects
     hunts = r["data"]
