@@ -241,5 +241,7 @@ def submit_hunt_route(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     hunt_id = RetrohuntService.submit_hunt(enriched)
     # get the hunt entity
     hunt = RetrohuntService.get_hunts(hunt_id)
+    print("hunt data type:", type(hunt["data"]))
+    print("hunt data:", hunt["data"])
 
     return qr.fr(ctx, hunt["data"])
