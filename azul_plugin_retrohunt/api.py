@@ -12,7 +12,7 @@ import httpx
 from azul_bedrock.exceptions_bedrock import BaseError
 from azul_metastore import query
 from azul_metastore.restapi.quick import qr
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from azul_plugin_retrohunt.models import RetrohuntResponse, RetrohuntsResponse, RetrohuntSubmission
 from azul_plugin_retrohunt.retrohunt import RetrohuntService
@@ -136,7 +136,7 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     responses={404: {"model": BaseError, "description": "The retrohunt was not found"}},
     **qr.kw,
 )
-def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
+def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     """Fetch details of specified hunt."""
     response = service.get_hunts(hunt_id)
 
@@ -185,7 +185,7 @@ def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
     responses={404: {"model": BaseError, "description": "No retrohunts found"}},
     **qr.kw,
 )
-def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
+def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
     """Return list of hunts."""
     r = service.list_hunts(limit)
 
