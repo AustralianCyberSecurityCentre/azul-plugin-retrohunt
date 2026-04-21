@@ -140,19 +140,15 @@ def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
     """Fetch details of specified hunt."""
     response = service.get_hunts(hunt_id)
 
-    # response["data"] is a RetrohuntEntity model
     hunt = response["data"]
 
-    # --- SECURITY FIELD FIXUP ---
     security = hunt.security or {}
 
-    # rename "markings" → "other"
     if "markings" in security:
         security["other"] = security.pop("markings")
 
     hunt.security = security
 
-    # --- RESULTS PROCESSING ---
     hashes = []
     results = hunt.results or {}
 
@@ -161,7 +157,6 @@ def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
             hashes.extend(matches)
 
     if hashes:
-        # aggregated multisearch
         entities = list(zip(["binary"] * len(hashes), hashes, strict=False))
         summaries = query.read_entities(ctx, entities=entities)
 
@@ -173,7 +168,6 @@ def hunt_results_route(hunt_id: str, ctx=Depends(qr.ctx)):
         sumdict = {}
         hunt.tool_matches_total = 0
 
-    # --- REWRITE RESULTS WITH SUMMARY OBJECTS ---
     new_results = {}
 
     for term, matches in results.items():
@@ -195,22 +189,16 @@ def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
     """Return list of hunts."""
     r = service.list_hunts(limit)
 
-    # r["data"] is now a list of RetrohuntEntity objects
     hunts = r["data"]
 
     for hunt in hunts:
-        # --- SECURITY FIELD FIXUP ---
-        # hunt.security is likely a dict or None
         security = hunt.security or {}
 
-        # rename "markings" → "other"
         if "markings" in security:
             security["other"] = security.pop("markings")
 
-        # assign back (Pydantic models allow attribute assignment)
         hunt.security = security
 
-        # --- RESULTS PROCESSING ---
         hashes = []
         results = hunt.results or {}
 
@@ -221,12 +209,10 @@ def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
         if hashes:
             entities = list(zip(["binary"] * len(hashes), hashes, strict=False))
 
-            # query metastore
             visible = [x.id for x in query.check_entities(ctx, entities=entities) if x.exists]
 
             hunt.tool_matches_total = len(visible)
 
-            # remove results field entirely
             hunt.results = {}
 
     # Convert models to dicts for JSON response
