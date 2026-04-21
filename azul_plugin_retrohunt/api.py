@@ -192,7 +192,7 @@ def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
     hunts = r["data"]
 
     for hunt in hunts:
-        security = hunt.security or {}
+        security = hunt.security or ""
 
         if "markings" in security:
             security["other"] = security.pop("markings")
