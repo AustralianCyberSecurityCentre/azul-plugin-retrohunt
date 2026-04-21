@@ -177,7 +177,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     hunt.results = new_results
 
     # Convert model to dict for API response
-    return qr.fr(ctx, hunt.model_dump())
+    return qr.fr(ctx, hunt.model_dump(), response)
 
 
 @router.get(
