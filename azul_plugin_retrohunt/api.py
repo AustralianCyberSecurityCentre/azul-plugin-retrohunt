@@ -216,7 +216,7 @@ def list_hunts_route(ctx=Depends(qr.ctx), limit: int = 50):
             hunt.results = {}
 
     # Convert models to dicts for JSON response
-    return qr.fr(ctx=ctx, response=[h.model_dump() for h in hunts])
+    return qr.fr(ctx=ctx, data=[h.model_dump() for h in hunts])
 
 
 @router.post(
