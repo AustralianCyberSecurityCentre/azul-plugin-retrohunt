@@ -30,7 +30,7 @@ extends:
   template: v2/stages/test-build-publish.yaml@PipelineTemplates
   parameters:
     is_python: true
-    is_python_package: false
+    is_python_package: true
     is_dev: true
     is_deploy: true
     is_docker: true
