@@ -244,4 +244,4 @@ def submit_hunt_route(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     print("hunt data type:", type(hunt["data"]))
     print("hunt data:", hunt["data"])
 
-    return qr.fr(ctx, hunt["data"])
+    return qr.fr(ctx,  hunt["data"].model_dump())
