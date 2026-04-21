@@ -149,7 +149,7 @@ class RetrohuntService:
                 status_code=404,
                 detail="There was an issue submitting the hunt.",
             )
-
+        
         try:
             self.redis.xgroup_create(self.RETROHUNT_JOB, self.RETROHUNT_GROUP, id="$", mkstream=True)
         except ResponseError as e:
@@ -159,9 +159,10 @@ class RetrohuntService:
                 raise
 
         event_dict = event.model_dump()
+        print("event dict: ", event_dict)
         self.redis.set(retrohunt_id, json.dumps(event_dict))
         self.redis.xadd(self.RETROHUNT_JOB, {"hunt_id": retrohunt_id, "action": "Submitted"})
-
+        
         return retrohunt_id
 
     def run_periodic_tasks(self):

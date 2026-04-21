@@ -236,6 +236,7 @@ def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
 def submit_hunt_route(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     """Submit a new retrohunt for processing."""
     enriched = submission.model_copy(update={"submitter": ctx.user_info.username})
+    print("enriched: ", enriched)
     # submit the hunt and get the id
     hunt_id = RetrohuntService.submit_hunt(enriched)
     # get the hunt entity
