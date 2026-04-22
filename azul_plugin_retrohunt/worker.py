@@ -52,6 +52,15 @@ MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max o
 
 rs = RetrohuntService()
 
+def is_cancelled(job_id: str) -> bool:
+    raw = rs.redis.get(job_id)
+    if not raw:
+        return False
+    try:
+        event = azm.RetrohuntEvent(**json.loads(raw))
+        return event.entity.status == azm.HuntState.CANCELLED
+    except Exception:
+        return False
 
 def capture_logs(level: int = logging.INFO) -> StringIO:
     """Return a StringIO that will capture relevant logs."""
@@ -124,6 +133,11 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
     def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job
 
+        if is_cancelled(job.entity.id):
+            logger.info(f"Hunt {job.entity.id} hunt cancelled by user.")
+            job.entity.status = azm.HuntState.CANCELLED
+            raise Exception("Hunt cancelled by user")
+
         if phase == SearchPhaseEnum.ATOM_PARSE:
             job.entity.status = azm.HuntState.PARSING_RULES
             job.entity.rules_parsed_total = total
@@ -172,6 +186,10 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             job = _update_progress(job, logs)
 
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
+        if is_cancelled(job.entity.id):
+            logger.info(f"Hunt {job.entity.id} job cancelled by user.")
+            job.entity.status = azm.HuntState.CANCELLED
+            raise Exception("Hunt cancelled by user")
         data: bytes = None
         match_hash: str = match_path.split("/")[-1]
 
@@ -214,6 +232,11 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             # index_dirs = os.path.join(index_dirs, "pcap")
         else:
             raise Exception("Unknown search type.")
+
+        if is_cancelled(job.entity.id):
+            logger.info(f"Hunt {job.entity.id} cancelled before starting.")
+            job.entity.status = azm.HuntState.CANCELLED
+            return
 
         search(
             search_query,
@@ -390,6 +413,15 @@ def main():
             job = azm.RetrohuntEvent(**json.loads(event_json))
 
             job_id = job.entity.id
+
+            # delete the hunt if a user cancels it
+            if job.entity.status == azm.HuntState.CANCELLED:
+                logger.info(f"Deleting cancelled hunt {job_id} from Redis")
+                rs.redis.delete(job_id)
+                rs.redis.delete(f"retrohunt:{job_id}:lock")
+                rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+                continue
+
             # these will be cleaned up by the cronjob later
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 continue
@@ -409,6 +441,11 @@ def main():
                 path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
                 bgi_folders.append(path_to_bgi_folder)
 
+             # Check cancellation before starting work
+            if is_cancelled(job_id):
+                logger.info(f"Hunt {job_id} was cancelled before processing started.")
+                raise Exception("Hunt cancelled by user")
+            
             try:
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)

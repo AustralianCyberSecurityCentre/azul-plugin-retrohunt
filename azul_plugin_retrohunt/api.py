@@ -252,3 +252,14 @@ def submit_hunt_route(response: Response, submission: RetrohuntSubmission, ctx=D
     hunt_id = service.submit_hunt(enriched)
 
     return qr.fr(ctx, {"retrohunt_id": hunt_id}, response)
+
+@router.post(
+    "/v0/retrohunt/retrohunts/{hunt_id}/cancel",
+    response_model=RetrohuntResponse,
+    responses={404: {"model": BaseError, "description": "Hunt not found"}},
+    **qr.kw,
+)
+def cancel_hunt_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
+    """Cancel a retrohunt."""
+    hunt = service.cancel_hunt(hunt_id, ctx.user_info.username)
+    return qr.fr(ctx, hunt.model_dump(), response)
