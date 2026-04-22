@@ -139,14 +139,21 @@ def submit_hunt(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
 )
 def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     """Fetch details of specified hunt."""
-    response = service.get_hunts(hunt_id)
+    r = service.get_hunts(hunt_id)
 
-    hunt = response["data"]
+    hunt = r["data"]
 
-    security = hunt.security or {}
+    security = hunt.security
 
-    if "markings" in security:
-        security["other"] = security.pop("markings")
+    # If security is a dict, convert it to a string
+    if isinstance(security, dict):
+        if "markings" in security:
+            security["other"] = security.pop("markings")
+        security = json.dumps(security)
+
+    # If security is None, make it an empty string
+    if security is None:
+        security = ""
 
     hunt.security = security
 
@@ -244,4 +251,4 @@ def submit_hunt_route(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     print("hunt data type:", type(hunt["data"]))
     print("hunt data:", hunt["data"])
 
-    return qr.fr(ctx, hunt["data"].model_dump())
+    return qr.fr(ctx,  hunt["data"].model_dump())
