@@ -159,7 +159,6 @@ class RetrohuntService:
                 raise
 
         event_dict = event.model_dump()
-        print("event dict: ", event_dict)
         self.redis.set(retrohunt_id, json.dumps(event_dict))
         self.redis.xadd(self.RETROHUNT_JOB, {"hunt_id": retrohunt_id, "action": "Submitted"})
 

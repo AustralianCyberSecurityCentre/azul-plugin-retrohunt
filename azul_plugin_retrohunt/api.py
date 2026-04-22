@@ -249,6 +249,6 @@ def submit_hunt_route(response: Response, submission: RetrohuntSubmission, ctx=D
     """Submit a new retrohunt for processing."""
     enriched = submission.model_copy(update={"submitter": ctx.user_info.username})
     # submit the hunt and get the id
-    hunt_id = RetrohuntService.submit_hunt(enriched)
+    hunt_id = service.submit_hunt(enriched)
 
     return qr.fr(ctx, {"retrohunt_id": hunt_id}, response)
