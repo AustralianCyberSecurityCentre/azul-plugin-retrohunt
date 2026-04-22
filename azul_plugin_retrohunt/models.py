@@ -30,6 +30,12 @@ class RetrohuntSubmission(BaseModel):
     security: dict | None = None
 
 
+class RetrohuntSubmitResponse(BaseModel):
+    """Retrohunt response for successful submit."""
+
+    retrohunt_id: str
+
+
 class FileMetadata(BaseModel):
     """Store metadata about an ingested file so it can be used to download a file from dispatcher later."""
 

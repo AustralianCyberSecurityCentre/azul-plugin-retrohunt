@@ -15,7 +15,12 @@ from azul_metastore import query
 from azul_metastore.restapi.quick import qr
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from azul_plugin_retrohunt.models import RetrohuntResponse, RetrohuntsResponse, RetrohuntSubmission
+from azul_plugin_retrohunt.models import (
+    RetrohuntResponse,
+    RetrohuntsResponse,
+    RetrohuntSubmission,
+    RetrohuntSubmitResponse,
+)
 from azul_plugin_retrohunt.retrohunt import RetrohuntService
 
 router = APIRouter()
@@ -236,19 +241,14 @@ def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
 
 @router.post(
     "/v0/retrohunt/retrohunts",
-    response_model=RetrohuntResponse,
+    response_model=RetrohuntSubmitResponse,
     responses={404: {"model": BaseError, "description": "Issue submitting hunt"}},
     **qr.kw,
 )
-def submit_hunt_route(submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
+def submit_hunt_route(response: Response, submission: RetrohuntSubmission, ctx=Depends(qr.ctx)):
     """Submit a new retrohunt for processing."""
     enriched = submission.model_copy(update={"submitter": ctx.user_info.username})
-    print("enriched: ", enriched)
     # submit the hunt and get the id
     hunt_id = RetrohuntService.submit_hunt(enriched)
-    # get the hunt entity
-    hunt = RetrohuntService.get_hunts(hunt_id)
-    print("hunt data type:", type(hunt["data"]))
-    print("hunt data:", hunt["data"])
 
-    return qr.fr(ctx,  hunt["data"].model_dump())
+    return qr.fr(ctx, {"retrohunt_id": hunt_id}, response)
