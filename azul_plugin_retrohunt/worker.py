@@ -52,7 +52,9 @@ MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max o
 
 rs = RetrohuntService()
 
+
 def is_cancelled(job_id: str) -> bool:
+    """Helper function for worker to check if job got cancelled."""
     raw = rs.redis.get(job_id)
     if not raw:
         return False
@@ -61,6 +63,7 @@ def is_cancelled(job_id: str) -> bool:
         return event.entity.status == azm.HuntState.CANCELLED
     except Exception:
         return False
+
 
 def capture_logs(level: int = logging.INFO) -> StringIO:
     """Return a StringIO that will capture relevant logs."""
@@ -441,11 +444,11 @@ def main():
                 path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
                 bgi_folders.append(path_to_bgi_folder)
 
-             # Check cancellation before starting work
+            # Check cancellation before starting work
             if is_cancelled(job_id):
                 logger.info(f"Hunt {job_id} was cancelled before processing started.")
                 raise Exception("Hunt cancelled by user")
-            
+
             try:
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)

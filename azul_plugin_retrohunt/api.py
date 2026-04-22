@@ -253,6 +253,7 @@ def submit_hunt_route(response: Response, submission: RetrohuntSubmission, ctx=D
 
     return qr.fr(ctx, {"retrohunt_id": hunt_id}, response)
 
+
 @router.post(
     "/v0/retrohunt/retrohunts/{hunt_id}/cancel",
     response_model=RetrohuntResponse,

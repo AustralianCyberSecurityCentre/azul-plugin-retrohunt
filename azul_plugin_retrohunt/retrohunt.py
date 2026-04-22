@@ -165,6 +165,7 @@ class RetrohuntService:
         return retrohunt_id
 
     def cancel_hunt(self, hunt_id: str):
+        """Called when user manually cancels a hunt."""
         # Load raw JSON from Redis
         raw_event = self.redis.get(hunt_id)
         if raw_event is None:
@@ -210,7 +211,6 @@ class RetrohuntService:
         self.redis.set(hunt_id, event.model_dump_json())
 
         return entity
-
 
     def run_periodic_tasks(self):
         """Used in cronjob to remove redis jobs and entries older than cleanup_delay days."""
