@@ -262,5 +262,5 @@ def submit_hunt_route(response: Response, submission: RetrohuntSubmission, ctx=D
 )
 def cancel_hunt_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     """Cancel a retrohunt."""
-    hunt = service.cancel_hunt(hunt_id, ctx.user_info.username)
+    hunt = service.cancel_hunt(hunt_id)
     return qr.fr(ctx, hunt.model_dump(), response)
