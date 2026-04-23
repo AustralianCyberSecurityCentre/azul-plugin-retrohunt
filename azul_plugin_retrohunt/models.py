@@ -1,6 +1,7 @@
 """Models common to Retrohunt Api and Server."""
 
 from azul_bedrock import models_network as azm
+from azul_bedrock.models_restapi.basic import Response as BedrockResponse
 from pydantic import BaseModel
 
 from azul_plugin_retrohunt.version import __version__
@@ -30,11 +31,10 @@ class RetrohuntSubmission(BaseModel):
     security: str | None = None
 
 
-class RetrohuntSubmitResponse(BaseModel):
-    """Retrohunt response for successful submit."""
+class RetrohuntSubmitResponse(BedrockResponse):
+    """Return basic response on successful submission."""
 
-    data: dict
-    meta: dict
+    pass
 
 
 class FileMetadata(BaseModel):
