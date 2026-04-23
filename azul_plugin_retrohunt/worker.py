@@ -272,24 +272,9 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job = _update_progress(job, logs)
 
 
-def check_lock_active(redis_client, job_id: str):
-    """Remove stale locks before trying to acquire a new one."""
-    lock_key = f"retrohunt:{job_id}:lock"
-    ttl = redis_client.ttl(lock_key)
-
-    # Lock exists but has no TTL → stale
-    if ttl == -1:
-        redis_client.delete(lock_key)
-
-    # TTL expired or invalid
-    if ttl <= 0:
-        redis_client.delete(lock_key)
-
-
 def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
     """Helper to aquire lock on retrohunt job."""
     lock_key = f"retrohunt:{job_id}:lock"
-    print("Trying to acquire lock ", lock_key)
     return redis_client.set(lock_key, worker_id, nx=True, ex=ttl_seconds)
 
 
@@ -360,7 +345,7 @@ def main():
                     rs.RETROHUNT_JOB,
                     rs.RETROHUNT_GROUP,
                     worker_id,
-                    min_idle_time=30000,
+                    min_idle_time=LOCK_TTL * 1000, # min_idle_time is in milliseconds
                     start_id="0-0",
                     count=1,
                 )
@@ -381,7 +366,6 @@ def main():
 
             if messages:
                 msg_id, payload = messages[0]
-                print("Found a stale job: ", payload)
             else:
                 # no stale jobs, read new ones
                 try:
@@ -432,16 +416,14 @@ def main():
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 continue
 
-            # check_lock_active(rs.redis, job_id)
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
-                print("Could not aquire a lock")
                 continue
 
             # Start heartbeat
             stop_event = threading.Event()
-            start_heartbeat(job_id, worker_id, ttl_seconds=30, stop_event=stop_event)
+            start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL, stop_event=stop_event)
 
             bgi_folders = []
             for _name, indexer_cfg in settings.indexers.items():
