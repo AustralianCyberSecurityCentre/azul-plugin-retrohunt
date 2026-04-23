@@ -305,7 +305,7 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
         while not stop_event.is_set():
             # Check if we still own the lock
             current_owner = rs.redis.get(lock_key)
-            
+
             if not current_owner or current_owner.decode() != worker_id:
                 # Lost the lock — stop heartbeating
                 return
@@ -432,7 +432,7 @@ def main():
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 continue
 
-            #check_lock_active(rs.redis, job_id)
+            # check_lock_active(rs.redis, job_id)
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
