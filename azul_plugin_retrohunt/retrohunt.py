@@ -193,8 +193,7 @@ class RetrohuntService:
             azm.HuntState.CANCELLED,
         ):
             logger.info(f"Deleting hunt {hunt_id} immediately (status={entity.status})")
-            self.redis.delete(hunt_id)
-            self.redis.delete(f"retrohunt:{hunt_id}:lock")
+            self.delete_hunt(hunt_id)
             return entity
 
         # Otherwise mark as cancelled
@@ -204,13 +203,31 @@ class RetrohuntService:
 
         # Update event metadata
         event.timestamp = now
-        event.action = azm.RetrohuntEvent.RetrohuntAction.Cancelled
         event.source.timestamp = now
 
         # Save updated event back to Redis
         self.redis.set(hunt_id, event.model_dump_json())
 
         return entity
+
+    def delete_hunt(self, hunt_id: str):
+        """Helper function to delete hunts when user requests."""
+        # Delete the hunt record and lock
+        self.redis.delete(hunt_id)
+        self.redis.delete(f"retrohunt:{hunt_id}:lock")
+
+        stream = "retrohunt-jobs"
+
+        # Iterate through all stream entries
+        entries = self.redis.xrange(stream, min="-", max="+")
+        for entry_id, fields in entries:
+            # Decode Redis bytes
+            decoded = {k.decode(): v.decode() for k, v in fields.items()}
+
+            # Delete only entries for this hunt
+            if decoded.get("hunt_id") == hunt_id:
+                logger.info(f"Deleting stream entry {entry_id} for hunt {hunt_id}")
+                self.redis.xdel(stream, entry_id)
 
     def run_periodic_tasks(self):
         """Used in cronjob to remove redis jobs and entries older than cleanup_delay days."""
