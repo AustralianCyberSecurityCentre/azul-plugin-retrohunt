@@ -345,7 +345,7 @@ def main():
                     rs.RETROHUNT_JOB,
                     rs.RETROHUNT_GROUP,
                     worker_id,
-                    min_idle_time=LOCK_TTL * 1000, # min_idle_time is in milliseconds
+                    min_idle_time=LOCK_TTL * 1000,  # min_idle_time is in milliseconds
                     start_id="0-0",
                     count=1,
                 )
@@ -415,7 +415,6 @@ def main():
             # these will be cleaned up by the cronjob later
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 continue
-
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
