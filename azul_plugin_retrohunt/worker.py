@@ -404,7 +404,6 @@ def main():
 
             job_id = job.entity.id
 
-
             # these will be cleaned up by the cronjob later
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
