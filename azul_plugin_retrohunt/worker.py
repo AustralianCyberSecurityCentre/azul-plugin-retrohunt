@@ -267,6 +267,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             prom_jobs_run.labels(azm.HuntState.FAILED.name).inc()
             job.entity.status = azm.HuntState.FAILED
             job.entity.error = exception_str
+        raise
     finally:
         job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
         job = _update_progress(job, logs)
