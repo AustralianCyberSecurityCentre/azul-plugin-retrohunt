@@ -404,16 +404,11 @@ def main():
 
             job_id = job.entity.id
 
-            # delete the hunt if a user cancels it
-            if job.entity.status == azm.HuntState.CANCELLED:
-                logger.info(f"Deleting cancelled hunt {job_id} from Redis")
-                rs.redis.delete(job_id)
-                rs.redis.delete(f"retrohunt:{job_id}:lock")
-                rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
-                continue
 
             # these will be cleaned up by the cronjob later
             if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
+                rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+                rs.redis.delete(f"retrohunt:{job_id}:lock")
                 continue
 
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
@@ -439,6 +434,17 @@ def main():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+            except Exception:
+                # Reload job status
+                event_json = rs.redis.get(job_id)
+                if event_json:
+                    job = azm.RetrohuntEvent(**json.loads(event_json))
+                    if job.entity.status == azm.HuntState.CANCELLED:
+                        logger.info(f"Cleaning up cancelled hunt {job_id}")
+                        rs.redis.delete(job_id)
+                        rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+                        continue
+                raise
             finally:
                 stop_event.set()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
