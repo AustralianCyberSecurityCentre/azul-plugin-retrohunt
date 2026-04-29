@@ -149,14 +149,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
 
     security = ""
 
-    # If security is a dict, convert it to a string
-    # if isinstance(security, dict):
-    #    if "markings" in security:
-    #        security["other"] = security.pop("markings")
-    #    security = json.dumps(security)
-
-    # If security is None, make it an empty string
-    # if security is None:
+    # FUTURE add security if needed
 
     hunt.security = security
 
@@ -203,20 +196,9 @@ def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
     hunts = r["data"]
 
     for hunt in hunts:
+        # FUTURE add security if needed
         security = ""
         hunt.security = security
-
-        # If security is a dict, convert it to a string
-        # if isinstance(security, dict):
-        #    if "markings" in security:
-        #        security["other"] = security.pop("markings")
-        #    security = json.dumps(security)
-
-        # If security is None, make it an empty string
-        # if security is None:
-        #    security = ""
-
-        # hunt.security = security
 
         hashes = []
         results = hunt.results or {}
