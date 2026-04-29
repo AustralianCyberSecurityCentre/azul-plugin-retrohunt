@@ -10,6 +10,8 @@ from collections import defaultdict
 import yara
 from prometheus_client import Histogram
 
+from azul_plugin_retrohunt.retrohunt import CancelException
+
 from . import (
     SEARCH_ATOM_SIZE_MIN,
     DataCallback,
@@ -121,6 +123,13 @@ def search(
             try:
                 progress_callback(search_phase, jobs_done, total_jobs, completed_item)
             except Exception as e:
+                # direct cancellation
+                if isinstance(e, CancelException):
+                    raise CancelException(str(e)) from None
+
+                # wrapped cancellation
+                if isinstance(e.__cause__, CancelException):
+                    raise CancelException(str(e.__cause__)) from None
                 raise ProgressCallbackException("Exception in progress callback") from e
 
     def checked_data_callback(path: str, config: dict[bytes, bytes]) -> bytes:
