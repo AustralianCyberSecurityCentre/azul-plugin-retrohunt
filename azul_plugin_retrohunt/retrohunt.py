@@ -25,6 +25,12 @@ class FatalException(Exception):
     pass
 
 
+class CancelException(Exception):
+    """Custom Exception used when user cancels hunt."""
+
+    pass
+
+
 class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
@@ -87,6 +93,7 @@ class RetrohuntService:
                 except ValidationError:
                     # corrupted data
                     logger.exception("Corrupted retrohunt data for id %s", key)
+                    self.delete_hunt(key)
                     continue
 
                 hunts[key] = event.entity
@@ -163,6 +170,71 @@ class RetrohuntService:
         self.redis.xadd(self.RETROHUNT_JOB, {"hunt_id": retrohunt_id, "action": "Submitted"})
 
         return retrohunt_id
+
+    def cancel_hunt(self, hunt_id: str):
+        """Called when user manually cancels a hunt."""
+        # Load raw JSON from Redis
+        raw_event = self.redis.get(hunt_id)
+        if raw_event is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Retrohunt with id {hunt_id} not found",
+            )
+
+        # Parse into RetrohuntEvent
+        try:
+            event = azm.RetrohuntEvent.model_validate_json(raw_event)
+        except ValidationError as err:
+            logger.exception("Corrupted retrohunt data for id %s", hunt_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Stored retrohunt data is invalid",
+            ) from err
+
+        entity = event.entity
+
+        # If terminal delete immediately
+        if entity.status in (
+            azm.HuntState.COMPLETED,
+            azm.HuntState.FAILED,
+            azm.HuntState.CANCELLED,
+        ):
+            logger.info(f"Deleting hunt {hunt_id} immediately (status={entity.status})")
+            self.delete_hunt(hunt_id)
+            return entity
+
+        # Otherwise mark as cancelled
+        now = datetime.now(timezone.utc)
+        entity.status = azm.HuntState.CANCELLED
+        entity.updated = now
+
+        # Update event metadata
+        event.timestamp = now
+        event.source.timestamp = now
+
+        # Save updated event back to Redis
+        self.redis.set(hunt_id, event.model_dump_json())
+
+        return entity
+
+    def delete_hunt(self, hunt_id: str):
+        """Helper function to delete hunts when user requests."""
+        # Delete the hunt record and lock
+        self.redis.delete(hunt_id)
+        self.redis.delete(f"retrohunt:{hunt_id}:lock")
+
+        stream = "retrohunt-jobs"
+
+        # Iterate through all stream entries
+        entries = self.redis.xrange(stream, min="-", max="+")
+        for entry_id, fields in entries:
+            # Decode Redis bytes
+            decoded = {k.decode(): v.decode() for k, v in fields.items()}
+
+            # Delete only entries for this hunt
+            if decoded.get("hunt_id") == hunt_id:
+                logger.info(f"Deleting stream entry {entry_id} for hunt {hunt_id}")
+                self.redis.xdel(stream, entry_id)
 
     def run_periodic_tasks(self):
         """Used in cronjob to remove redis jobs and entries older than cleanup_delay days."""

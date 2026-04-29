@@ -34,7 +34,7 @@ from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
 
 import azul_plugin_retrohunt
-from azul_plugin_retrohunt.retrohunt import FatalException
+from azul_plugin_retrohunt.retrohunt import FatalException, CancelException
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.ingestor import BigYaraIngestor
 from azul_plugin_retrohunt import worker as r_worker
@@ -162,10 +162,79 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
         # Lock must be deleted after processing
         assert self.fake_redis.get(f"retrohunt:{job_id}:lock") is None
 
+    @patch("azul_plugin_retrohunt.worker.sleep")
+    @patch("azul_plugin_retrohunt.worker.RetrohuntSettings")
+    @patch("azul_plugin_retrohunt.worker.start_http_server")
+    @patch("azul_plugin_retrohunt.retrohunt.RetrohuntService.redis", new_callable=PropertyMock)
+    def test_worker_handles_cancelled_job(
+        self,
+        mock_redis,  # RetrohuntService.redis
+        mock_http,  # start_http_server
+        mock_settings,  # RetrohuntSettings
+        mock_sleep,  # sleep
+    ):
+        mock_redis.return_value = self.fake_redis
+        self.fake_redis.flushdb()
+
+        mock_settings.return_value.redis.ttl = 30
+        mock_settings.return_value.redis.exception_wait = 0
+
+        job_id = SUBMISSION.entity.id
+
+        # Store CANCELLED job
+        job_copy = copy.deepcopy(SUBMISSION)
+        job_copy.action = azm.RetrohuntEvent.RetrohuntAction.Submitted
+        job_copy.entity.status = azm.HuntState.CANCELLED
+        self.fake_redis.set(job_id, job_copy.model_dump_json())
+
+        msg_id = self.fake_redis.xadd(
+            "retrohunt-jobs",
+            {b"hunt_id": job_id.encode(), b"action": b"submitted"},
+        )
+
+        def fake_xreadgroup(*args, **kwargs):
+            return [
+                (
+                    "retrohunt-jobs",
+                    [(msg_id, {b"hunt_id": job_id.encode(), b"action": b"submitted"})],
+                )
+            ]
+
+        def fake_xautoclaim(*args, **kwargs):
+            return ("retrohunt-jobs", [])
+
+        self.fake_redis.xgroup_create(
+            "retrohunt-jobs",
+            "retrohunt-workers",
+            id="0-0",
+            mkstream=True,
+        )
+
+        # If hunt() is ever called, fail the test immediately
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("hunt() should not be called for cancelled jobs")
+
+        with (
+            mock.patch.object(r_worker.rs.redis, "xreadgroup", side_effect=fake_xreadgroup),
+            mock.patch.object(r_worker.rs.redis, "xautoclaim", side_effect=fake_xautoclaim),
+            mock.patch(
+                "azul_plugin_retrohunt.worker.check_is_cancelled",
+                side_effect=FatalException("stop"),  # exit loop immediately
+            ) as cancel_mock,
+            mock.patch(
+                "azul_plugin_retrohunt.worker.hunt",
+                side_effect=fail_if_called,
+            ),
+        ):
+            with pytest.raises(FatalException):
+                r_worker.main()
+
+        cancel_mock.assert_called_once()
+
     @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
     def test_hunt_logs(self, mock_redis):
         """Test that when doing a hunt the logs never gets above the max allowed size to prevent large objects being
-        sent to kafka.
+        sent to kafka
         """
         mock_redis.return_value = self.fake_redis
         content1 = (
