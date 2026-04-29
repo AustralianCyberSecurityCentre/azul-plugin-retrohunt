@@ -234,7 +234,7 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
     @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
     def test_hunt_logs(self, mock_redis):
         """Test that when doing a hunt the logs never gets above the max allowed size to prevent large objects being
-        sent to kafka.k
+        sent to kafka
         """
         mock_redis.return_value = self.fake_redis
         content1 = (
