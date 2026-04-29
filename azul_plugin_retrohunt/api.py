@@ -6,7 +6,6 @@ results based on requesting user, etc.
 This is to be installed/deployed in the azul-restapi-server.
 """
 
-import json
 import os
 
 import httpx
@@ -148,17 +147,16 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
 
     hunt = r["data"]
 
-    security = hunt.security
+    security = ""
 
     # If security is a dict, convert it to a string
-    if isinstance(security, dict):
-        if "markings" in security:
-            security["other"] = security.pop("markings")
-        security = json.dumps(security)
+    # if isinstance(security, dict):
+    #    if "markings" in security:
+    #        security["other"] = security.pop("markings")
+    #    security = json.dumps(security)
 
     # If security is None, make it an empty string
-    if security is None:
-        security = ""
+    # if security is None:
 
     hunt.security = security
 
@@ -205,19 +203,20 @@ def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
     hunts = r["data"]
 
     for hunt in hunts:
-        security = hunt.security
+        security = ""
+        hunt.security = security
 
         # If security is a dict, convert it to a string
-        if isinstance(security, dict):
-            if "markings" in security:
-                security["other"] = security.pop("markings")
-            security = json.dumps(security)
+        # if isinstance(security, dict):
+        #    if "markings" in security:
+        #        security["other"] = security.pop("markings")
+        #    security = json.dumps(security)
 
         # If security is None, make it an empty string
-        if security is None:
-            security = ""
+        # if security is None:
+        #    security = ""
 
-        hunt.security = security
+        # hunt.security = security
 
         hashes = []
         results = hunt.results or {}

@@ -18,7 +18,7 @@ from prometheus_client import Counter, Summary, start_http_server
 from redis.exceptions import ResponseError
 
 from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
-from azul_plugin_retrohunt.retrohunt import FatalException, RetrohuntService
+from azul_plugin_retrohunt.retrohunt import CancelException, FatalException, RetrohuntService
 from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
 
 prom_jobs_run = Counter(
@@ -53,16 +53,19 @@ MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max o
 rs = RetrohuntService()
 
 
-def is_cancelled(job_id: str) -> bool:
-    """Helper function for worker to check if job got cancelled."""
+def check_is_cancelled(job_id: str):
+    """Raise CancelledException if the hunt is cancelled."""
     raw = rs.redis.get(job_id)
     if not raw:
-        return False
+        return  # treat missing as not cancelled
+
     try:
         event = azm.RetrohuntEvent(**json.loads(raw))
-        return event.entity.status == azm.HuntState.CANCELLED
     except Exception:
-        return False
+        return  # corrupted or missing, not considered cancelled
+
+    if event.entity.status == azm.HuntState.CANCELLED:
+        raise CancelException(f"Hunt {job_id} cancelled by user")
 
 
 def capture_logs(level: int = logging.INFO) -> StringIO:
@@ -136,10 +139,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
     def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job
 
-        if is_cancelled(job.entity.id):
-            logger.info(f"Hunt {job.entity.id} hunt cancelled by user.")
-            job.entity.status = azm.HuntState.CANCELLED
-            raise Exception("Hunt cancelled by user")
+        check_is_cancelled(job.entity.id)
 
         if phase == SearchPhaseEnum.ATOM_PARSE:
             job.entity.status = azm.HuntState.PARSING_RULES
@@ -189,10 +189,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             job = _update_progress(job, logs)
 
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
-        if is_cancelled(job.entity.id):
-            logger.info(f"Hunt {job.entity.id} job cancelled by user.")
-            job.entity.status = azm.HuntState.CANCELLED
-            raise Exception("Hunt cancelled by user")
+        check_is_cancelled(job.entity.id)
         data: bytes = None
         match_hash: str = match_path.split("/")[-1]
 
@@ -236,10 +233,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         else:
             raise Exception("Unknown search type.")
 
-        if is_cancelled(job.entity.id):
-            logger.info(f"Hunt {job.entity.id} cancelled before starting.")
-            job.entity.status = azm.HuntState.CANCELLED
-            return
+        check_is_cancelled(job.entity.id)
 
         search(
             search_query,
@@ -254,7 +248,8 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job.entity.status = azm.HuntState.COMPLETED
         prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
         logger.debug(job.entity)
-
+    except CancelException:
+        raise
     except Exception as ex:
         exception_str = str(repr(ex))
         if ex.__cause__:
@@ -267,7 +262,6 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             prom_jobs_run.labels(azm.HuntState.FAILED.name).inc()
             job.entity.status = azm.HuntState.FAILED
             job.entity.error = exception_str
-        raise
     finally:
         job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
         job = _update_progress(job, logs)
@@ -313,7 +307,8 @@ def main():
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
-    LOCK_TTL = settings.RedisSettings().ttl
+    LOCK_TTL = settings.redis.ttl
+    exception_sleep = settings.redis.exception_wait
     start_http_server(settings.prometheus_port_worker)
 
     dp = dispatcher.DispatcherAPI(
@@ -406,7 +401,7 @@ def main():
             job_id = job.entity.id
 
             # these will be cleaned up by the cronjob later
-            if job.entity.status in {azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
+            if job.entity.status in {azm.HuntState.FAILED}:
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
                 continue
@@ -425,26 +420,18 @@ def main():
                 bgi_folders.append(path_to_bgi_folder)
 
             # Check cancellation before starting work
-            if is_cancelled(job_id):
-                logger.info(f"Hunt {job_id} was cancelled before processing started.")
-                raise Exception("Hunt cancelled by user")
+            check_is_cancelled(job_id)
 
             try:
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
-            except Exception:
-                # Reload job status
-                event_json = rs.redis.get(job_id)
-                if event_json:
-                    job = azm.RetrohuntEvent(**json.loads(event_json))
-                    if job.entity.status == azm.HuntState.CANCELLED:
-                        logger.info(f"Cleaning up cancelled hunt {job_id}")
-                        rs.redis.delete(job_id)
-                        rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
-                        continue
-                raise
+            except CancelException:
+                logger.info(f"Cleaning up cancelled hunt {job_id}")
+                rs.redis.delete(job_id)
+                rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+                continue
             finally:
                 stop_event.set()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
@@ -453,7 +440,7 @@ def main():
             raise
         except Exception as e:
             logger.exception(f"Worker error, continuing loop: {e}")
-            sleep(settings.RedisSettings.exception_wait)
+            sleep(exception_sleep)
             continue
 
 

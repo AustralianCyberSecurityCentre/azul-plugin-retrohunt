@@ -25,6 +25,12 @@ class FatalException(Exception):
     pass
 
 
+class CancelException(Exception):
+    """Custom Exception used when user cancels hunt."""
+
+    pass
+
+
 class RetrohuntService:
     """Service to manage hunt getters and setters."""
 
@@ -87,6 +93,7 @@ class RetrohuntService:
                 except ValidationError:
                     # corrupted data
                     logger.exception("Corrupted retrohunt data for id %s", key)
+                    self.delete_hunt(key)
                     continue
 
                 hunts[key] = event.entity
