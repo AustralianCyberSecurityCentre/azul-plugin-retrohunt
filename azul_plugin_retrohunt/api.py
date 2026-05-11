@@ -161,7 +161,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
         if not matches:
             continue
 
-        # Normalize: extract sha256 from dicts OR accept raw strings
+        # Normalise
         for m in matches:
             if isinstance(m, dict) and "sha256" in m:
                 hashes.append(m["sha256"])
@@ -215,14 +215,13 @@ def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
             if not matches:
                 continue
 
-            # Normalize: extract sha256 from dicts OR accept raw strings
+            # Normalise
             for m in matches:
                 if isinstance(m, dict) and "sha256" in m:
                     hashes.append(m["sha256"])
                 elif isinstance(m, str):
                     hashes.append(m)
                 else:
-                    # unexpected type, ignore or log
                     pass
 
         if hashes:
