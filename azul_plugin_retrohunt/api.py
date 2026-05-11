@@ -158,13 +158,21 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     results = hunt.results or {}
 
     for matches in results.values():
-        if matches:
-            hashes.extend(matches)
+        if not matches:
+            continue
+
+        # Normalize: extract sha256 from dicts OR accept raw strings
+        for m in matches:
+            if isinstance(m, dict) and "sha256" in m:
+                hashes.append(m["sha256"])
+            elif isinstance(m, str):
+                hashes.append(m)
+            else:
+                pass
 
     if hashes:
         summaries = check_binaries(ctx, hashes)
 
-        # map id → summary object
         sumdict = {s["sha256"]: s for s in summaries}
 
         hunt.tool_matches_total = sum(1 for s in summaries if s["exists"])
@@ -204,8 +212,18 @@ def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
         results = hunt.results or {}
 
         for matches in results.values():
-            if matches:
-                hashes.extend(matches)
+            if not matches:
+                continue
+
+            # Normalize: extract sha256 from dicts OR accept raw strings
+            for m in matches:
+                if isinstance(m, dict) and "sha256" in m:
+                    hashes.append(m["sha256"])
+                elif isinstance(m, str):
+                    hashes.append(m)
+                else:
+                    # unexpected type, ignore or log
+                    pass
 
         if hashes:
             summaries = check_binaries(ctx, hashes)
