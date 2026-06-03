@@ -25,6 +25,7 @@ classifiers=[
 ]
 dependencies = [
     "azul-bedrock>=10.0.15",
+    "azul-metastore>=11.0.38",
     "azul-runner>=4.0.0",
     "click>=8.3.1",
     "fastapi>=0.128.0",
