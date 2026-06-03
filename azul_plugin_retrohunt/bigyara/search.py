@@ -88,9 +88,9 @@ class FileConfigReadException(Exception):
 
 def search(
     query: str,
-    query_type: QueryTypeEnum,
+    query_type: QueryTypeEnum | int,
     index_dirs: str | list[str],
-    data_callback: DataCallback = None,
+    data_callback: DataCallback,
     progress_callback: ProgressCallback = None,
     recursive: bool = True,
 ) -> RuleFileMatches:
