@@ -29,8 +29,6 @@ dependencies = [
     "azul-runner>=4.0.0",
     "click>=8.3.1",
     "fastapi>=0.128.0",
-    "httpx>=0.28.1",
-    "jinja2>=3.1.6",
     "prometheus-client>=0.24.1",
     "pydantic>2",
     "redis>=5.0.0",
