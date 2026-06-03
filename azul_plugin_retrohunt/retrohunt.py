@@ -290,7 +290,8 @@ class RetrohuntService:
                     continue
 
                 # Delete if older than 3 days AND not completed
-                if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
+                status_str = str(status).lower()
+                if submitted < cutoff_3d and status_str != "completed":
                     logger.info(f"Ageing off incomplete entry {key_str}")
                     self.redis.delete(key_str)
                     continue
@@ -344,7 +345,8 @@ class RetrohuntService:
                 continue
 
             # Drop stale or incomplete hunts older than 3 days
-            if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
+            status_str = str(status).lower()
+            if submitted < cutoff_3d and status_str != "completed":
                 logger.info(f"Ageing off incomplete stream {entry_id}")
                 self.redis.xdel(stream, entry_id)
                 continue
