@@ -90,7 +90,7 @@ def search(
     query: str,
     query_type: QueryTypeEnum | int,
     index_dirs: str | list[str],
-    data_callback: DataCallback,
+    data_callback: DataCallback | None = None,
     progress_callback: ProgressCallback = None,
     recursive: bool = True,
 ) -> RuleFileMatches:
