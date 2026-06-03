@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-05-27T23:28:06.099790032Z"
 exclude-newer-span = "P1W"
 
 [options.exclude-newer-package]
@@ -101,8 +101,6 @@ dependencies = [
     { name = "azul-runner" },
     { name = "click" },
     { name = "fastapi" },
-    { name = "httpx" },
-    { name = "jinja2" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "redis" },
@@ -145,9 +143,7 @@ requires-dist = [
     { name = "azul-runner", specifier = ">=4.0.0", index = "https://devpi.acsc.internal/azul/stable/" },
     { name = "click", specifier = ">=8.3.1" },
     { name = "fastapi", specifier = ">=0.128.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "idstools", marker = "extra == 'runtime'", specifier = ">=0.6.5" },
-    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "pendulum", marker = "extra == 'runtime'", specifier = ">=3.1.0" },
     { name = "progressbar2", marker = "extra == 'runtime'", specifier = ">=4.5.0" },
     { name = "prometheus-client", specifier = ">=0.24.1" },
