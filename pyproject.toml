@@ -121,6 +121,7 @@ dev = [
     "fakeredis>=2.23.0",
     "semantic-version>=2.10.0",
     "starlette-exporter>=0.23.0",
+    "azul-metastore>=11.0.38",
 ]
 
 [tool.ruff]
