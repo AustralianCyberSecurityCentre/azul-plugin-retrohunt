@@ -10,10 +10,16 @@ import shutil
 import tempfile
 import unittest
 
+from fastapi import FastAPI
+
+from azul_plugin_retrohunt.api import router
 from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
 from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
 from azul_plugin_retrohunt.models import FileMetadata
 from azul_plugin_retrohunt.settings import RetrohuntSettings
+
+app = FastAPI()
+app.include_router(router)
 
 
 class RetrohuntBaseTest:
