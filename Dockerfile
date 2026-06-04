@@ -40,7 +40,7 @@ RUN uv sync --frozen --no-editable
 RUN uv pip install --system hatchling hatch-vcs
 RUN uv build . --out-dir /tmp/
 RUN uv pip uninstall --system azul-plugin-retrohunt
-RUN uv pip install --system --no-deps --find-links /tmp/ azul-plugin-retrohunt[runtime]==$(hatchling version)
+RUN uv pip install --system --find-links /tmp/ azul-plugin-retrohunt[runtime]==$(hatchling version)
 
 # Upgrade to dev azul dependencies or upgrade non-dev azul dependencies depending on branch.
 RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ]; then \
