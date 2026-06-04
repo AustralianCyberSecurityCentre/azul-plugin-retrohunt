@@ -199,7 +199,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             job.action = azm.RetrohuntEvent.RetrohuntAction.Running
             job = _update_progress(job, logs)
 
-    def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes | None:
+    def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
         check_is_cancelled(job.entity.id)
         data: bytes
         match_hash: str = match_path.split("/")[-1]
