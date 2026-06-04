@@ -277,7 +277,7 @@ class RetrohuntService:
                         continue
 
                     submitted = event.entity.submitted_time
-                    if submitted.tzinfo is None:
+                    if submitted is not None and submitted.tzinfo is None:
                         submitted = submitted.replace(tzinfo=timezone.utc)
 
                 except Exception as e:
@@ -290,7 +290,7 @@ class RetrohuntService:
                     continue
 
                 # Delete if older than 3 days AND not completed
-                if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
+                if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.Completed:
                     logger.info(f"Ageing off incomplete entry {key_str}")
                     self.redis.delete(key_str)
                     continue
@@ -337,14 +337,14 @@ class RetrohuntService:
                 event = azm.RetrohuntEvent.model_validate_json(raw)
                 status = event.entity.status
                 submitted = event.entity.submitted_time
-                if submitted.tzinfo is None:
+                if submitted is not None and submitted.tzinfo is None:
                     submitted = submitted.replace(tzinfo=timezone.utc)
             except Exception as e:
                 logger.error(f"Error parsing hunt {hunt_id}: {e}")
                 continue
 
             # Drop stale or incomplete hunts older than 3 days
-            if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.COMPLETED:
+            if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.Completed:
                 logger.info(f"Ageing off incomplete stream {entry_id}")
                 self.redis.xdel(stream, entry_id)
                 continue

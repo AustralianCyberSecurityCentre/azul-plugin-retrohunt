@@ -28,8 +28,6 @@ dependencies = [
     "azul-runner>=4.0.0",
     "click>=8.3.1",
     "fastapi>=0.128.0",
-    "httpx>=0.28.1",
-    "jinja2>=3.1.6",
     "prometheus-client>=0.24.1",
     "pydantic>2",
     "redis>=5.0.0",
@@ -37,16 +35,11 @@ dependencies = [
 
 [project.optional-dependencies]
 runtime = [
-    "aiofiles>=25.1.0",
     "idstools>=0.6.5",
     "pendulum>=3.1.0",
-    "progressbar2>=4.5.0",
     "prometheus-client>=0.24.1",
-    "python-multipart>=0.0.22",
-    "semantic-version>=2.10.0",
     "starlette-exporter>=0.23.0",
     "uvicorn>=0.40.0",
-    "wheel>=0.46.3",
     "yara-python>=4.5.4",
 ]
 
@@ -64,7 +57,7 @@ retrohunt = "azul_plugin_retrohunt.api:router"
 [tool.uv]
 package = true
 exclude-newer = "1 week"
-exclude-newer-package = { azul-bedrock = false, azul-runner = false, azul-security=false, azul-metastore = false, azul-nsrl-lookup-serve=false, azul-nsrl-lookup-server=false, azul-plugin-retrohunt = false }
+exclude-newer-package = { azul-bedrock = false, azul-runner = false, azul-security=false, azul-metastore = false, azul-nsrl-lookup-serve=false, azul-nsrl-lookup-server=false, azul-plugin-retrohunt = false, malpz=false }
 
 [tool.uv.sources]
 azul-bedrock = { index="cache"}
@@ -73,6 +66,7 @@ azul-metastore = { index="cache"}
 azul-security = { index="cache"}
 azul-nsrl-lookup-server = { index="cache"}
 azul-plugin-retrohunt = { index="cache" }
+malpz = { index="cache" }
 
 [[tool.uv.index]]
 name = "pypi"
@@ -119,8 +113,8 @@ dev = [
     "ty>=0.0.27",
     "urllib3>=2.6.3",
     "fakeredis>=2.23.0",
-    "semantic-version>=2.10.0",
     "starlette-exporter>=0.23.0",
+    "azul-metastore>=11.0.0",
 ]
 
 [tool.ruff]
@@ -197,3 +191,6 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 docstring-code-format = false
 docstring-code-line-length = "dynamic"
+
+[tool.ty.src]
+exclude = ["tests"]
