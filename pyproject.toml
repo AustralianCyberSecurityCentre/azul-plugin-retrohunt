@@ -35,16 +35,11 @@ dependencies = [
 
 [project.optional-dependencies]
 runtime = [
-    "aiofiles>=25.1.0",
     "idstools>=0.6.5",
     "pendulum>=3.1.0",
-    "progressbar2>=4.5.0",
     "prometheus-client>=0.24.1",
-    "python-multipart>=0.0.22",
-    "semantic-version>=2.10.0",
     "starlette-exporter>=0.23.0",
     "uvicorn>=0.40.0",
-    "wheel>=0.46.3",
     "yara-python>=4.5.4",
 ]
 
@@ -118,7 +113,6 @@ dev = [
     "ty>=0.0.27",
     "urllib3>=2.6.3",
     "fakeredis>=2.23.0",
-    "semantic-version>=2.10.0",
     "starlette-exporter>=0.23.0",
     "azul-metastore>=11.0.0",
 ]
