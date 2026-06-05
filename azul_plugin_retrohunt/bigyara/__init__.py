@@ -23,7 +23,7 @@ FileConfig = dict[str, dict[bytes, bytes]]
 RuleContent = dict[str, bytes]
 
 # data_callback(file path, dict[config key, config value]) -> file data
-DataCallback = Callable[[str, dict[bytes, bytes]], bytes | None]
+DataCallback = Callable[[str, dict[bytes, bytes]], bytes]
 
 # progress_callback(searchPhase, done, total, tuple[new match rule, list[match path or atom]])
 ProgressCallback = Callable[[int, int, int, tuple[str, list[str | bytes]]], None]

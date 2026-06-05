@@ -32,7 +32,7 @@ PLUGIN_VERSION = "2026.03.25"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
 
-dp: dispatcher.DispatcherAPI
+dp: dispatcher.DispatcherAPI = None
 
 # hash => metadata
 MatchMetadata = dict[str, dict[bytes, bytes]]
@@ -165,23 +165,14 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
                 # convert config to string dict.
                 match_result_dict: dict[str, str] = {}
-                file_path = new_match[1][0]
-                if isinstance(file_path, bytes):
-                    file_key = file_path.decode()
-                else:
-                    file_key = file_path  # already a str
-
-                stream_label = match_metadata[file_key][b"stream_label"].decode()
-                stream_source = match_metadata[file_key][b"stream_source"].decode()
-
-                match_result_dict["stream_label"] = stream_label
-                match_result_dict["stream_source"] = stream_source
+                match_result_dict["stream_label"] = match_metadata[new_match[1][0]][b"stream_label"].decode()
+                match_result_dict["stream_source"] = match_metadata[new_match[1][0]][b"stream_source"].decode()
 
                 # if sample isn't set, use the hash generated for the filename
-                if b"sample" in match_metadata[file_key]:
-                    match_result_dict["sample"] = match_metadata[file_key][b"sample"].decode()
+                if b"sample" in match_metadata[new_match[1][0]]:
+                    match_result_dict["sample"] = match_metadata[new_match[1][0]][b"sample"].decode()
                 else:
-                    match_result_dict["sample"] = file_key.split("/")[-1]
+                    match_result_dict["sample"] = new_match[1][0].split("/")[-1]
 
                 if new_match[0] not in job.entity.results:
                     job.entity.results[new_match[0]] = []
@@ -201,19 +192,13 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
         check_is_cancelled(job.entity.id)
-        data: bytes
+        data: bytes = None
         match_hash: str = match_path.split("/")[-1]
 
         configd = {x.decode(): y.decode() for x, y in config.items()}
 
-        label_str = configd.get("stream_label")
+        label = configd.get("stream_label")
         source = configd.get("stream_source")
-
-        try:
-            label = azm.DataLabel(label_str)
-        except ValueError:
-            logger.error(f"Invalid DataLabel value: {label_str}")
-            return None
 
         if not label or not source:
             logger.error(f"Failed to retrieve metadata label and/or source for {match_hash}: {configd}")
@@ -238,6 +223,9 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job = _update_progress(job, logs)
         search_type_str = job.entity.search_type
         search_query: str = job.entity.search
+
+        # convert from string to enum
+        search_enum_type: int = -1
 
         # convert from string to enum
         if search_type_str == "Yara":
