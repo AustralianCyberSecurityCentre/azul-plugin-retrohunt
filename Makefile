@@ -57,7 +57,7 @@ azul_plugin_retrohunt/bigyara/bin/bgindex: BigGrep-master/src/bgindex
 compile: azul_plugin_retrohunt/bigyara/bin/yarac-large azul_plugin_retrohunt/bigyara/bin/yarac-small azul_plugin_retrohunt/bigyara/bin/bgparse azul_plugin_retrohunt/bigyara/bin/bgdump azul_plugin_retrohunt/bigyara/bin/bgindex
 
 bdist: compile
-	python setup.py bdist_wheel
+	uv build --wheel
 
 clean:
 	python setup.py clean
