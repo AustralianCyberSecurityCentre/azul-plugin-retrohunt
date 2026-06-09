@@ -33,7 +33,8 @@ from .yara_parse import parse_yara_rules
 RULE_BATCH_SIZE = 20  # how many rules per bgparse call
 INDEX_BATCH_SIZE = 10  # how many indices per bgparse call
 MAX_WORKERS = 8  # parallel bgparse calls
-
+_rule_atom_cache = {}
+_batch_cmd_cache = {}
 
 # FUTURE: multiprocessing has been removed from search functionality.
 #         performance should be investigated and improved where necessary.
@@ -155,7 +156,26 @@ def search(
 
     query_hash = hashlib.sha256(query.encode()).hexdigest()
 
-    rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
+    raw_rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
+
+    rule_atoms = {}
+
+    for rule_name, atoms in raw_rule_atoms.items():
+
+        # 1. Cache hit?
+        if rule_name in _rule_atom_cache:
+            rule_atoms[rule_name] = _rule_atom_cache[rule_name]
+            continue
+
+        # 2. Minimise atom explosion (nocase → fewer atoms)
+        minimised = minimise_case_atoms(atoms)
+
+        # 3. Store in cache
+        _rule_atom_cache[rule_name] = minimised
+
+        # 4. Use minimised atoms
+        rule_atoms[rule_name] = minimised
+
     logger.info("Starting Broad search")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(query_type, indices, rule_atoms, checked_progress_callback)
@@ -226,6 +246,42 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
+def minimise_case_atoms(atoms):
+    """
+    Reduce atom explosion caused by nocase by collapsing case variants.
+    If an atom differs only by ASCII case, keep only the lowercase version.
+    """
+    normalised = set()
+    for atom in atoms:
+        try:
+            # Only normalise ASCII letters; leave binary atoms untouched
+            lowered = bytes([b | 0x20 if 65 <= b <= 90 else b for b in atom])
+            normalised.add(lowered)
+        except Exception:
+            normalised.add(atom)
+    return list(normalised)
+
+def batch_rules_by_atom_count(rule_items, max_atoms=250):
+    """
+    Group rules into batches such that the total atom count per batch
+    does not exceed max_atoms. This keeps bgparse calls balanced.
+    """
+    batch = []
+    atom_total = 0
+
+    for rule_name, atoms in rule_items:
+        # If adding this rule would exceed the limit, yield the batch
+        if batch and atom_total + len(atoms) > max_atoms:
+            yield batch
+            batch = []
+            atom_total = 0
+
+        batch.append((rule_name, atoms))
+        atom_total += len(atoms)
+
+    if batch:
+        yield batch
+
 def _chunked(seq, size):
     """Yield successive fixed‑size chunks from a sequence.
 
@@ -249,61 +305,69 @@ def _run_bgparse_for_batch(
     index_batch: list[str],
     rule_batch: list[tuple[str, list[bytes]]],
 ) -> tuple[dict[str, list[str]], FileConfig]:
-    """Execute a single bgparse search over one index file using a batch of rules.
-
-    Args:
-        query_type (int):
-            Identifier for the type of query being executed.
-        index_batch (list[str]):
-            A list containing exactly one .bgi index file path.
-        rule_batch (list[tuple[str, list[bytes]]]):
-            A batch of rules, where each entry is (rule_name, atoms).
-
-    Returns:
-        tuple:
-            - dict[str, list[str]]:
-                Mapping of rule_name → list of matched file IDs.
-            - FileConfig:
-                Aggregated file configuration metadata extracted from bgparse output.
-
-    Raises:
-        BiggrepException:
-            If bgparse returns a non‑zero exit code or reports an internal error.
-
-    Notes:
-        bgparse only supports a single index file per invocation.
-        Rule batching is supported and significantly reduces total bgparse calls.
     """
-    # bgparse only supports ONE index file
+    Run bgparse once for a batch of rules against a single index file.
+
+    This function:
+      - Builds (or reuses) a cached bgparse command prefix for the rule batch
+      - Appends the index file to the command
+      - Executes bgparse
+      - Splits the output back into per‑rule match lists
+      - Returns (rule_matches, file_config)
+    """
+
+    # bgparse only supports one index per invocation
     index = index_batch[0]
 
-    cmd = [executables["bgparse"]]
+    # Cache key: sorted rule names (order does not matter)
+    batch_key = tuple(sorted(rn for rn, _ in rule_batch))
 
-    # add atom flags
-    for _, atoms in rule_batch:
-        for atom in atoms:
-            cmd.extend(["-s", binascii.b2a_hex(atom).upper().decode()])
+    # 1. Check cache for command prefix
+    if batch_key in _batch_cmd_cache:
+        cmd = _batch_cmd_cache[batch_key].copy()
+    else:
+        # 2. Build command prefix (expensive step)
+        cmd = [executables["bgparse"]]
+        for _, atoms in rule_batch:
+            for atom in atoms:
+                cmd.extend(["-s", binascii.b2a_hex(atom).upper().decode()])
 
-    # add the single index file
+        # 3. Store prefix in cache
+        _batch_cmd_cache[batch_key] = cmd.copy()
+
+    # 4. Append the index file (cannot be cached)
+    cmd = cmd.copy()
     cmd.append(index)
 
+    # Execute bgparse
     process = subprocess.run(  # noqa: S603
         cmd,
         capture_output=True,
     )
 
     if process.returncode != 0:
-        raise BiggrepException(f"bgparse returned exit code {process.returncode}. Args: {cmd}\n{process.stderr}")
+        raise BiggrepException(
+            f"bgparse returned exit code {process.returncode}. Args: {cmd}\n{process.stderr}"
+        )
 
     if b"<error>" in process.stderr:
-        error_message = process.stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
-        raise BiggrepException(f"bgparse error:{error_message} - errored while searching for {rule_batch} in {index}")
+        error_message = (
+            process.stderr.decode()
+            .split("<error>", 1)[1]
+            .split(":", 1)[1]
+            .split("\n")[0]
+        )
+        raise BiggrepException(
+            f"bgparse error:{error_message} - errored while searching for {rule_batch} in {index}"
+        )
 
+    # Prepare output containers
     batch_rule_matches: RuleFileMatches = {}
     batch_file_config: FileConfig = {}
 
     stdout = process.stdout
 
+    # Parse output per rule
     for rule_name, _atoms in rule_batch:
         new_matches, batch_file_config = _process_bgparse_output(
             stdout,
@@ -363,7 +427,8 @@ def _broad_phase_search(
 
     # RULE batching stays the same
     rule_items = list(rule_atoms.items())
-    rule_batches = list(_chunked(rule_items, RULE_BATCH_SIZE))
+    #rule_batches = list(_chunked(rule_items, RULE_BATCH_SIZE))
+    rule_batches = list(batch_rules_by_atom_count(rule_items, max_atoms=250))
 
     # INDEX batching must be ONE index per batch
     index_batches = [[idx] for idx in indices]
