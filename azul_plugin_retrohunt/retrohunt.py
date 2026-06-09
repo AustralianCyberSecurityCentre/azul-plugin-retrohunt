@@ -277,7 +277,7 @@ class RetrohuntService:
                         continue
 
                     submitted = event.entity.submitted_time
-                    if submitted is not None and submitted.tzinfo is None:
+                    if submitted is not None and submitted.tzinfo is not None:
                         submitted = submitted.replace(tzinfo=timezone.utc)
 
                 except Exception as e:
@@ -337,7 +337,7 @@ class RetrohuntService:
                 event = azm.RetrohuntEvent.model_validate_json(raw)
                 status = event.entity.status
                 submitted = event.entity.submitted_time
-                if submitted is not None and submitted.tzinfo is None:
+                if submitted is not None and submitted.tzinfo is not None:
                     submitted = submitted.replace(tzinfo=timezone.utc)
             except Exception as e:
                 logger.error(f"Error parsing hunt {hunt_id}: {e}")
