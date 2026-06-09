@@ -388,104 +388,93 @@ def _broad_phase_search(
     rule_atoms: RuleAtoms,
     progress_callback: ProgressCallback,
 ) -> tuple[RuleFileMatches, FileConfig]:
-    """Perform the broad‑phase retrohunt search across all indices and rules.
+    """Optimized broad‑phase search that preserves correct semantics.
 
-    This stage:
-      - Splits rules into batches.
-      - Assigns each index to its own bgparse invocation.
-      - Executes searches in parallel across multiple worker threads.
-      - Merges all match results and file configuration data.
+    - YARA: ANY atom may match → search atom‑by‑atom.
+    - SURICATA: ALL atoms must match → batch atoms together.
 
-    Args:
-        query_type (int):
-            Identifier for the type of query being executed.
-        indices (list[str]):
-            List of .bgi index file paths to search.
-        rule_atoms (RuleAtoms):
-            Mapping of rule_name → list of extracted atom bytes.
-        progress_callback (callable):
-            Function invoked to report progress updates.
-
-    Returns:
-        tuple:
-            - RuleFileMatches:
-                Combined mapping of rule_name → list of matched file IDs.
-            - FileConfig:
-                Combined configuration metadata for all matched files.
-
-    Raises:
-        NoIndexMatchesException:
-            If no rules match any index during the broad phase.
-
-    Notes:
-        This function is responsible for orchestrating parallel bgparse calls.
-        Each bgparse invocation receives:
-            - one index file
-            - one batch of rules
-        This maximizes throughput while respecting bgparse constraints.
+    Parallelized across indices and atoms/rules.
     """
     rule_matches: RuleFileMatches = {}
     file_config: FileConfig = {}
 
-    # RULE batching stays the same
-    rule_items = list(rule_atoms.items())
-    # rule_batches = list(_chunked(rule_items, RULE_BATCH_SIZE))
-    rule_batches = list(batch_rules_by_atom_count(rule_items, max_atoms=250))
+    # Count total bgparse jobs
+    if query_type == QueryTypeEnum.SURICATA:
+        total_jobs = len(indices) * len(rule_atoms)
+    else:
+        total_jobs = sum(len(atoms) for atoms in rule_atoms.values()) * len(indices)
 
-    for i, batch in enumerate(rule_batches):
-        total_atoms = sum(len(atoms) for _, atoms in batch)
-        logger.info(f"[batch] Rule batch {i + 1}/{len(rule_batches)}: {len(batch)} rules, {total_atoms} atoms")
-
-    # INDEX batching must be ONE index per batch
-    index_batches = [[idx] for idx in indices]
-
-    total_jobs = len(index_batches) * len(rule_batches)
     searches_complete = 0
-
-    progress_callback(
-        SearchPhaseEnum.BROAD_PHASE,
-        searches_complete,
-        total_jobs,
-        None,
-    )
+    progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, total_jobs, None)
 
     lock = Lock()
 
+    def run_single_bgparse(index: str, rule_name: str, search_args: list[str]):
+        """Run bgparse for a single atom (YARA) or batched atoms (Suricata)."""
+        cmd = [executables["bgparse"]] + search_args + [index]
+
+        process = subprocess.run(cmd, capture_output=True)  # noqa: S603
+
+        if process.returncode != 0:
+            raise BiggrepException(f"bgparse returned exit code {process.returncode}. Args: {cmd}\n{process.stderr}")
+
+        if b"<error>" in process.stderr:
+            error_message = process.stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
+            raise BiggrepException(
+                f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
+            )
+
+        new_matches, new_cfg = _process_bgparse_output(
+            process.stdout,
+            rule_name,
+            rule_matches.get(rule_name, []),
+            file_config,
+        )
+
+        with lock:
+            rule_matches.setdefault(rule_name, []).extend(new_matches)
+            for path, cfg in new_cfg.items():
+                file_config.setdefault(path, {}).update(cfg)
+
+        return new_matches
+
+    # Build all bgparse jobs
+    jobs = []
+
+    for index in indices:
+        for rule_name, atoms in rule_atoms.items():
+            if query_type == QueryTypeEnum.SURICATA:
+                # SURICATA → batch all atoms
+                search_args = []
+                for atom in atoms:
+                    search_args += ["-s", binascii.b2a_hex(atom).upper().decode()]
+                jobs.append((index, rule_name, search_args))
+
+            else:
+                # YARA → atom‑by‑atom
+                for atom in atoms:
+                    search_args = ["-s", binascii.b2a_hex(atom).upper().decode()]
+                    jobs.append((index, rule_name, search_args))
+
+    # Execute in parallel
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
-        for index_batch in index_batches:
-            for rule_batch in rule_batches:
-                futures.append(
-                    executor.submit(
-                        _run_bgparse_for_batch,
-                        query_type,
-                        index_batch,
-                        rule_batch,
-                    )
-                )
+        for index, rule_name, search_args in jobs:
+            futures.append(executor.submit(run_single_bgparse, index, rule_name, search_args))
 
         for future in as_completed(futures):
-            batch_rule_matches, batch_file_config = future.result()
-
-            with lock:
-                for rule_name, matches in batch_rule_matches.items():
-                    rule_matches.setdefault(rule_name, []).extend(matches)
-
-                for path, cfg in batch_file_config.items():
-                    file_config.setdefault(path, {}).update(cfg)
-
-                searches_complete += 1
-                progress_callback(
-                    SearchPhaseEnum.BROAD_PHASE,
-                    searches_complete,
-                    total_jobs,
-                    None,
-                )
+            future.result()
+            searches_complete += 1
+            progress_callback(
+                SearchPhaseEnum.BROAD_PHASE,
+                searches_complete,
+                total_jobs,
+                None,
+            )
 
     if not rule_matches:
         raise NoIndexMatchesException("Search aborted due to index matches.")
 
-    logger.debug("All index searches completed (batched + parallel)")
     return rule_matches, file_config
 
 
