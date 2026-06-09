@@ -227,19 +227,21 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
 def _chunked(seq, size):
+    """Yield successive fixed‑size chunks from a sequence.
+
+    Args:
+        seq (Sequence): The sequence to split into chunks.
+        size (int): Maximum size of each chunk.
+
+    Yields:
+        list: A slice of `seq` containing up to `size` elements.
+
+    Notes:
+        Used to batch rules or indices so the system can process them
+        in manageable units rather than all at once.
+    """
     for i in range(0, len(seq), size):
         yield seq[i : i + size]
-
-
-def _build_search_string(rule_batch, query_type: int) -> str:
-    # rule_batch: list[tuple[rule_name, atoms]]
-    # For now we still treat each rule as its own atom group, but in one bgparse call.
-    parts: list[str] = []
-    for _rule_name, atoms in rule_batch:
-        # You could add rule-specific flags here if bgparse supports it.
-        for atom in atoms:
-            parts.append(f"-s {binascii.b2a_hex(atom).upper().decode()}")
-    return " ".join(parts)
 
 
 def _run_bgparse_for_batch(
@@ -247,9 +249,33 @@ def _run_bgparse_for_batch(
     index_batch: list[str],
     rule_batch: list[tuple[str, list[bytes]]],
 ) -> tuple[dict[str, list[str]], FileConfig]:
-    """Run bgparse once for a batch of rules over a batch of indices."""
-    search_string = _build_search_string(rule_batch, query_type)
-    indices_arg = " ".join(index_batch)
+    """Execute a single bgparse search over one index file using a batch of rules.
+
+    Args:
+        query_type (int):
+            Identifier for the type of query being executed.
+        index_batch (list[str]):
+            A list containing exactly one .bgi index file path.
+        rule_batch (list[tuple[str, list[bytes]]]):
+            A batch of rules, where each entry is (rule_name, atoms).
+
+    Returns:
+        tuple:
+            - dict[str, list[str]]:
+                Mapping of rule_name → list of matched file IDs.
+            - FileConfig:
+                Aggregated file configuration metadata extracted from bgparse output.
+
+    Raises:
+        BiggrepException:
+            If bgparse returns a non‑zero exit code or reports an internal error.
+
+    Notes:
+        bgparse only supports a single index file per invocation.
+        Rule batching is supported and significantly reduces total bgparse calls.
+    """
+    # bgparse only supports ONE index file
+    index = index_batch[0]
 
     cmd = [executables["bgparse"]]
 
@@ -258,43 +284,34 @@ def _run_bgparse_for_batch(
         for atom in atoms:
             cmd.extend(["-s", binascii.b2a_hex(atom).upper().decode()])
 
-    # add indices
-    cmd.extend(index_batch)
+    # add the single index file
+    cmd.append(index)
 
-    process = subprocess.run(  # noqa S603
+    process = subprocess.run(  # noqa: S603
         cmd,
         capture_output=True,
     )
 
     if process.returncode != 0:
-        raise BiggrepException(
-            f"bgparse returned exit code {process.returncode}. Args: {search_string}{indices_arg}\n{process.stderr}"
-        )
+        raise BiggrepException(f"bgparse returned exit code {process.returncode}. Args: {cmd}\n{process.stderr}")
+
     if b"<error>" in process.stderr:
         error_message = process.stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
-        raise BiggrepException(
-            f"bgparse error:{error_message} - errored while searching for {rule_batch} in {indices_arg}"
-        )
+        raise BiggrepException(f"bgparse error:{error_message} - errored while searching for {rule_batch} in {index}")
 
-    # We need to split the output back per rule.
-    # Assuming _process_bgparse_output can be called per rule_name by filtering.
-    # If not, you may need to adjust bgparse output format or parsing.
     batch_rule_matches: RuleFileMatches = {}
     batch_file_config: FileConfig = {}
 
     stdout = process.stdout
 
     for rule_name, _atoms in rule_batch:
-        # existing helper: (stdout, rule_name, existing_matches, file_config)
         new_matches, batch_file_config = _process_bgparse_output(
             stdout,
             rule_name,
             batch_rule_matches.get(rule_name, []),
             batch_file_config,
         )
-        if rule_name not in batch_rule_matches:
-            batch_rule_matches[rule_name] = []
-        batch_rule_matches[rule_name].extend(new_matches)
+        batch_rule_matches.setdefault(rule_name, []).extend(new_matches)
 
     return batch_rule_matches, batch_file_config
 
@@ -305,14 +322,51 @@ def _broad_phase_search(
     rule_atoms: RuleAtoms,
     progress_callback: ProgressCallback,
 ) -> tuple[RuleFileMatches, FileConfig]:
-    """Broad phase search with batched, parallel bgparse calls."""
+    """Perform the broad‑phase retrohunt search across all indices and rules.
+
+    This stage:
+      - Splits rules into batches.
+      - Assigns each index to its own bgparse invocation.
+      - Executes searches in parallel across multiple worker threads.
+      - Merges all match results and file configuration data.
+
+    Args:
+        query_type (int):
+            Identifier for the type of query being executed.
+        indices (list[str]):
+            List of .bgi index file paths to search.
+        rule_atoms (RuleAtoms):
+            Mapping of rule_name → list of extracted atom bytes.
+        progress_callback (callable):
+            Function invoked to report progress updates.
+
+    Returns:
+        tuple:
+            - RuleFileMatches:
+                Combined mapping of rule_name → list of matched file IDs.
+            - FileConfig:
+                Combined configuration metadata for all matched files.
+
+    Raises:
+        NoIndexMatchesException:
+            If no rules match any index during the broad phase.
+
+    Notes:
+        This function is responsible for orchestrating parallel bgparse calls.
+        Each bgparse invocation receives:
+            - one index file
+            - one batch of rules
+        This maximizes throughput while respecting bgparse constraints.
+    """
     rule_matches: RuleFileMatches = {}
     file_config: FileConfig = {}
 
-    # Precompute batches
-    rule_items = list(rule_atoms.items())  # list[(rule_name, atoms)]
-    index_batches = list(_chunked(indices, INDEX_BATCH_SIZE))
+    # RULE batching stays the same
+    rule_items = list(rule_atoms.items())
     rule_batches = list(_chunked(rule_items, RULE_BATCH_SIZE))
+
+    # INDEX batching must be ONE index per batch
+    index_batches = [[idx] for idx in indices]
 
     total_jobs = len(index_batches) * len(rule_batches)
     searches_complete = 0
@@ -343,20 +397,13 @@ def _broad_phase_search(
             batch_rule_matches, batch_file_config = future.result()
 
             with lock:
-                # merge matches
                 for rule_name, matches in batch_rule_matches.items():
-                    if rule_name not in rule_matches:
-                        rule_matches[rule_name] = []
-                    rule_matches[rule_name].extend(matches)
+                    rule_matches.setdefault(rule_name, []).extend(matches)
 
-                # merge file_config
                 for path, cfg in batch_file_config.items():
-                    if path not in file_config:
-                        file_config[path] = {}
-                    file_config[path].update(cfg)
+                    file_config.setdefault(path, {}).update(cfg)
 
                 searches_complete += 1
-                # we don't have per-rule new_matches here, so pass None or a summary
                 progress_callback(
                     SearchPhaseEnum.BROAD_PHASE,
                     searches_complete,
