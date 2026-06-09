@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import subprocess  # noqa: S404  # nosec: B404
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -161,6 +162,7 @@ def search(
     rule_atoms = {}
 
     for rule_name, atoms in raw_rule_atoms.items():
+        before = len(atoms)
         # 1. Cache hit?
         if rule_name in _rule_atom_cache:
             rule_atoms[rule_name] = _rule_atom_cache[rule_name]
@@ -171,6 +173,10 @@ def search(
 
         # 3. Store in cache
         _rule_atom_cache[rule_name] = minimised
+
+        after = len(minimised)
+
+        logger.info(f"[atoms] {rule_name}: {before} → {after} atoms")
 
         # 4. Use minimised atoms
         rule_atoms[rule_name] = minimised
@@ -323,9 +329,11 @@ def _run_bgparse_for_batch(
 
     # 1. Check cache for command prefix
     if batch_key in _batch_cmd_cache:
+        logger.debug(f"[cache] HIT for batch {batch_key}")
         cmd = _batch_cmd_cache[batch_key].copy()
     else:
         # 2. Build command prefix (expensive step)
+        logger.debug(f"[cache] MISS for batch {batch_key} — building command")
         cmd = [executables["bgparse"]]
         for _, atoms in rule_batch:
             for atom in atoms:
@@ -338,11 +346,15 @@ def _run_bgparse_for_batch(
     cmd = cmd.copy()
     cmd.append(index)
 
+    start = time.time()
     # Execute bgparse
     process = subprocess.run(  # noqa: S603
         cmd,
         capture_output=True,
     )
+
+    duration = time.time() - start
+    logger.info(f"[bgparse] {index} finished in {duration:.3f}s")
 
     if process.returncode != 0:
         raise BiggrepException(f"bgparse returned exit code {process.returncode}. Args: {cmd}\n{process.stderr}")
@@ -419,6 +431,10 @@ def _broad_phase_search(
     rule_items = list(rule_atoms.items())
     # rule_batches = list(_chunked(rule_items, RULE_BATCH_SIZE))
     rule_batches = list(batch_rules_by_atom_count(rule_items, max_atoms=250))
+
+    for i, batch in enumerate(rule_batches):
+        total_atoms = sum(len(atoms) for _, atoms in batch)
+        logger.info(f"[batch] Rule batch {i + 1}/{len(rule_batches)}: {len(batch)} rules, {total_atoms} atoms")
 
     # INDEX batching must be ONE index per batch
     index_batches = [[idx] for idx in indices]
