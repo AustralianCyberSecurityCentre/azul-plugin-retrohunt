@@ -467,7 +467,7 @@ def _narrow_phase_search(
             status, file_path, rules_for_file, results = f.result()
 
             if status == "missing":
-                logger.warning(f"Unable to locate data for {file_path} - skipping")
+                #logger.warning(f"Unable to locate data for {file_path} - skipping")
                 for rule_name in rules_for_file:
                     total_jobs -= 1
                     rule_matches_sets[rule_name].discard(file_path)
