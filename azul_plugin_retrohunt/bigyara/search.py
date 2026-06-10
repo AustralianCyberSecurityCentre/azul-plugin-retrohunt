@@ -346,40 +346,33 @@ def _broad_phase_search(
 
 
 def _process_bgparse_output(
-    output: bytes, rule_name: str, file_matches: set[str], file_config: FileConfig
+    output: bytes, rule_name: str, file_matches: list[str], file_config: FileConfig
 ) -> tuple[list[str], FileConfig]:
     """Turn bgparse stdout into a list of matching files and their config."""
     start = time.perf_counter()
     new_match_paths = []
 
-    if not output:
-        return new_match_paths, file_config
+    if output:
+        for line in output.splitlines():
+            line = line.rstrip()
+            if not line:
+                continue
 
-    for line in output.splitlines():
-        if not line:
-            continue
+            parts = line.split(b",")
+            path = parts[0].decode()
 
-        parts = line.rstrip().split(b",")
-        if not parts:
-            continue
+            if path not in file_matches:
+                new_match_paths.append(path)
 
-        path = parts[0].decode()
-
-        # Fast membership check using a set
-        if path not in file_matches:
-            new_match_paths.append(path)
-            file_matches.add(path)
-
-        # Only parse config once per path
-        if path not in file_config:
-            cfg = {}
-            for kv in parts[1:-1]:
-                key_value = kv.split(b"=", 1)
-                if len(key_value) != 2:
-                    raise FileConfigReadException(f"Could not read file config from index for {path}")
-                key, value = key_value
-                cfg[key] = value
-            file_config[path] = cfg
+            if path not in file_config:
+                cfg = {}
+                for kv in parts[1:-1]:
+                    key_value = kv.split(b"=", 1)
+                    if len(key_value) != 2:
+                        raise FileConfigReadException(f"Could not read file config from index for {path}")
+                    key, value = key_value
+                    cfg[key] = value
+                file_config[path] = cfg
 
     elapsed = time.perf_counter() - start
     BGPARSE_TIMING[rule_name] += elapsed
