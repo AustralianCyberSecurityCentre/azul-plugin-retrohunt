@@ -8,7 +8,7 @@ import subprocess  # noqa: S404  # nosec: B404
 from collections import defaultdict
 
 import yara
-from prometheus_client import Histogram
+from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
 
@@ -46,6 +46,45 @@ prom_narrow_phase_duration = Histogram(
     "retrohunt_narrow_phase_duration_seconds",
     "Time spent in narrow phase search.",
     ["query_hash"],
+    buckets=_DURATION_BUCKETS,
+)
+# bgparse latency
+prom_bgparse_duration = Histogram(
+    "retrohunt_bgparse_duration_seconds",
+    "Time spent executing bgparse during broad phase.",
+    ["query_hash", "index_path", "rule_name"],
+    buckets=_DURATION_BUCKETS,
+)
+# PVC/index potential issues
+prom_bgparse_errors = Counter(
+    "retrohunt_bgparse_errors_total",
+    "Number of bgparse errors encountered during broad phase.",
+    ["query_hash", "index_path", "rule_name"],
+)
+# per-file read latency
+prom_narrow_io_duration = Histogram(
+    "retrohunt_narrow_io_duration_seconds",
+    "Time spent reading file data during narrow phase.",
+    ["query_hash"],
+    buckets=_DURATION_BUCKETS,
+)
+# Throughput
+prom_narrow_io_bytes = Counter(
+    "retrohunt_narrow_io_bytes_total",
+    "Total bytes read during narrow phase.",
+    ["query_hash"],
+)
+# stale index check
+prom_missing_files = Counter(
+    "retrohunt_missing_files_total",
+    "Number of files missing during narrow phase.",
+    ["query_hash"],
+)
+# CPU time spent matching
+prom_narrow_cpu_duration = Histogram(
+    "retrohunt_narrow_cpu_duration_seconds",
+    "CPU time spent matching rules during narrow phase.",
+    ["query_hash", "rule_name"],
     buckets=_DURATION_BUCKETS,
 )
 
@@ -150,7 +189,13 @@ def search(
     rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
-        rule_matches, file_config = _broad_phase_search(query_type, indices, rule_atoms, checked_progress_callback)
+        rule_matches, file_config = _broad_phase_search(
+            query_type,
+            indices,
+            rule_atoms,
+            checked_progress_callback,
+            query_hash=query_hash,
+        )
 
     for rule_name in rule_atoms:
         if len(rule_matches[rule_name]) > 0:
@@ -167,6 +212,7 @@ def search(
             file_config,
             checked_data_callback,
             checked_progress_callback,
+            query_hash=query_hash,
         )
 
     return rule_matches
@@ -223,6 +269,7 @@ def _broad_phase_search(
     indices: list[str],
     rule_atoms: RuleAtoms,
     progress_callback: ProgressCallback,
+    query_hash,
 ) -> tuple[RuleFileMatches, FileConfig]:
     """Broad phase search by passing atoms to bgparse to find matches."""
     # suricata can do the broad stage search in batches for each rule,
@@ -258,11 +305,16 @@ def _broad_phase_search(
 
             for search_string in search_strings:
                 # run bgparse
-                process: subprocess.CompletedProcess[bytes] = subprocess.run(  # noqa: S602
-                    f"{executables['bgparse']}  {search_string}{index}",
-                    shell=True,  # noqa: S602
-                    capture_output=True,
-                )
+                with prom_bgparse_duration.labels(
+                    query_hash=query_hash,
+                    index_path=index,
+                    rule_name=rule_name,
+                ).time():
+                    process: subprocess.CompletedProcess[bytes] = subprocess.run(  # noqa: S602
+                        f"{executables['bgparse']}  {search_string}{index}",
+                        shell=True,  # noqa: S602
+                        capture_output=True,
+                    )
 
                 # handle bgparse errors
                 if process.returncode != 0:
@@ -282,6 +334,8 @@ def _broad_phase_search(
                     rule_name,
                     rule_matches.get(rule_name, []),
                     file_config,
+                    query_hash=query_hash,
+                    index_path=index,
                 )
                 if rule_name not in rule_matches:
                     rule_matches[rule_name] = []
@@ -304,7 +358,12 @@ def _broad_phase_search(
 
 
 def _process_bgparse_output(
-    output: bytes, rule_name: str, file_matches: list[str], file_config: FileConfig
+    output: bytes,
+    rule_name: str,
+    file_matches: list[str],
+    file_config: FileConfig,
+    query_hash: str,
+    index_path: str,
 ) -> tuple[RuleFileMatches, FileConfig]:
     """Turn bgparse stdout into a list of matching files and their config."""
     new_match_paths: list[str] = []
@@ -325,6 +384,11 @@ def _process_bgparse_output(
                         if len(key_value) == 2:
                             file_config[path][key_value[0]] = key_value[1]
                         else:
+                            prom_bgparse_errors.labels(
+                                query_hash=query_hash,
+                                index_path=index_path,
+                                rule_name=rule_name,
+                            ).inc()
                             raise FileConfigReadException(f"Could not read file config from index for {path}")
     return (new_match_paths, file_config)
 
@@ -341,6 +405,7 @@ def _narrow_phase_search(
     file_config: FileConfig,
     data_callback: DataCallback,
     progress_callback: ProgressCallback,
+    query_hash,
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
     if queryType == QueryTypeEnum.STRING:
@@ -362,8 +427,14 @@ def _narrow_phase_search(
 
     for file_path, yara_rules in file_to_all_matches_dict.items():
         # Load data
-        data = data_callback(file_path, file_config[file_path])
+        with prom_narrow_io_duration.labels(query_hash=query_hash).time():
+            data = data_callback(file_path, file_config[file_path])
+
+        if data:
+            prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
+
         if not data:
+            prom_missing_files.labels(query_hash=query_hash).inc()
             logger.warning(f"Unable to locate data for {file_path} - skipping")
             for rule_name in yara_rules:
                 # Decrement total jobs as file couldn't be located.
@@ -388,18 +459,22 @@ def _narrow_phase_search(
             if queryType == QueryTypeEnum.YARA:
                 # FUTURE: this should have a better timeout.
                 # FUTURE: yara include directives should be turned off.
-                matched = (
-                    len(
-                        compiled_yara_rules[rule_name].match(
-                            data=data,
-                            callback=yara_callback,
-                            which_callbacks=yara.CALLBACK_MATCHES,
-                            fast=True,
-                            timeout=60,
+                with prom_narrow_cpu_duration.labels(
+                    query_hash=query_hash,
+                    rule_name=rule_name,
+                ).time():
+                    matched = (
+                        len(
+                            compiled_yara_rules[rule_name].match(
+                                data=data,
+                                callback=yara_callback,
+                                which_callbacks=yara.CALLBACK_MATCHES,
+                                fast=True,
+                                timeout=60,
+                            )
                         )
+                        > 0
                     )
-                    > 0
-                )
             elif queryType == QueryTypeEnum.SURICATA:
                 matched = _run_suricata(rule_content[rule_name], file_path, data)
             jobs_complete += 1
