@@ -8,6 +8,7 @@ import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 import yara
@@ -398,48 +399,42 @@ def _narrow_phase_search(
     if queryType == QueryTypeEnum.STRING:
         return rule_matches
 
-    # Invert the rule matches so that we know what rules each file uses.
-    # This way if a file can't be found we don't compile the rule.
-    file_to_all_matches_dict = defaultdict(list)
-    for rule_name, file_path_list in rule_matches.items():
-        for file_path in file_path_list:
-            file_to_all_matches_dict[file_path].append(rule_name)
+    # Convert rule_matches to sets for fast removal
+    rule_matches_sets: dict[str, set[str]] = {rule_name: set(paths) for rule_name, paths in rule_matches.items()}
 
-    total_jobs = 0
+    # Invert mapping: file → rules
+    file_to_rules: dict[str, set[str]] = defaultdict(set)
+    for rule_name, paths in rule_matches_sets.items():
+        for p in paths:
+            file_to_rules[p].add(rule_name)
+
+    # Precompile YARA rules once
+    compiled_yara_rules = {}
+    if queryType == QueryTypeEnum.YARA:
+        for rule_name, content in rule_content.items():
+            if not content.startswith('import "pe"\n'):
+                rule_content[rule_name] = 'import "pe"\n' + content
+            compiled_yara_rules[rule_name] = yara.compile(source=rule_content[rule_name])
+
+    # Precompute total jobs
+    total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
     jobs_complete = 0
-    compiled_yara_rules: dict[str, yara.Rules] = dict()
-    for rule_file_paths in rule_matches.values():
-        total_jobs += len(rule_file_paths)
-    progress_callback(SearchPhaseEnum.NARROW_PHASE, jobs_complete, total_jobs, None)
 
-    for file_path, yara_rules in file_to_all_matches_dict.items():
-        # Load data
-        data = data_callback(file_path, file_config[file_path])
+    progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
+
+    # ------------------------------------------------------------
+    # Worker function (pure, no side effects)
+    # ------------------------------------------------------------
+    def worker(file_path: str, rules_for_file: frozenset[str]):
+        cfg = file_config.get(file_path)
+        data = data_callback(file_path, cfg)
+
         if not data:
-            logger.warning(f"Unable to locate data for {file_path} - skipping")
-            for rule_name in yara_rules:
-                # Decrement total jobs as file couldn't be located.
-                total_jobs -= 1
-                rule_matches[rule_name].remove(file_path)
-            continue
+            return ("missing", file_path, rules_for_file, None)
 
-        # Compile and cache yara rules
-        if queryType == QueryTypeEnum.YARA:
-            for rule_name in yara_rules:
-                if rule_name in compiled_yara_rules:
-                    continue
-                # FUTURE: parse the imports from the top of the rule content to apply to all rules,
-                #         instead of just assuming it needs pe.
-                # FUTURE: make sure yara is compiled with all standard modules so that import them works.
-                rule_content[rule_name] = 'import "pe"\n' + rule_content[rule_name]
-                compiled_rule: yara.Rules = yara.compile(source=rule_content[rule_name])
-                compiled_yara_rules[rule_name] = compiled_rule
-
-        for rule_name in yara_rules:
-            matched: bool = False
+        results = []
+        for rule_name in rules_for_file:
             if queryType == QueryTypeEnum.YARA:
-                # FUTURE: this should have a better timeout.
-                # FUTURE: yara include directives should be turned off.
                 matched = (
                     len(
                         compiled_yara_rules[rule_name].match(
@@ -452,40 +447,63 @@ def _narrow_phase_search(
                     )
                     > 0
                 )
-            elif queryType == QueryTypeEnum.SURICATA:
-                matched = _run_suricata(rule_content[rule_name], file_path, data)
-            jobs_complete += 1
-            if matched:
-                # even though a narrow phase search is unnecessary for string searches,
-                # we still call the progress callback in case the user is trying to do
-                # something important in it.
-                progress_callback(
-                    SearchPhaseEnum.NARROW_PHASE,
-                    jobs_complete,
-                    total_jobs,
-                    (rule_name, [file_path]),
-                )
             else:
-                progress_callback(
-                    SearchPhaseEnum.NARROW_PHASE,
-                    jobs_complete,
-                    total_jobs,
-                    (rule_name, []),
-                )
+                matched = _run_suricata(rule_content[rule_name], file_path, data)
 
-                rule_matches[rule_name].remove(file_path)
+            results.append((rule_name, matched))
 
-    # Clear all of the now empty rule_matches.
-    for rule_name in list(rule_matches.keys()):
-        if not rule_matches[rule_name]:
-            del rule_matches[rule_name]
+        return ("ok", file_path, rules_for_file, results)
 
-    if rule_matches:
-        logger.info(f"Found {len(rule_matches)} confirmed matches for provided yara rules.")
+    # ------------------------------------------------------------
+    # Run workers in parallel
+    # ------------------------------------------------------------
+    futures = []
+    with ThreadPoolExecutor() as executor:
+        for file_path, rules_for_file in file_to_rules.items():
+            futures.append(executor.submit(worker, file_path, frozenset(rules_for_file)))
+
+        # Process results in deterministic order
+        for f in futures:
+            status, file_path, rules_for_file, results = f.result()
+
+            if status == "missing":
+                logger.warning(f"Unable to locate data for {file_path} - skipping")
+                for rule_name in rules_for_file:
+                    total_jobs -= 1
+                    rule_matches_sets[rule_name].discard(file_path)
+                continue
+
+            for rule_name, matched in results:
+                jobs_complete += 1
+
+                if matched:
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        (rule_name, [file_path]),
+                    )
+                else:
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        (rule_name, []),
+                    )
+                    rule_matches_sets[rule_name].discard(file_path)
+
+    # Convert back to lists and remove empty rules
+    final_matches: RuleFileMatches = {}
+    for rule_name, paths in rule_matches_sets.items():
+        if paths:
+            final_matches[rule_name] = list(paths)
+
+    if final_matches:
+        logger.info(f"Found {len(final_matches)} confirmed matches for provided yara rules.")
     else:
         logger.info("No rules matched after Narrowing.")
 
-    return rule_matches
+    return final_matches
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
