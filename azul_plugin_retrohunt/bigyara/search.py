@@ -334,6 +334,8 @@ def _broad_phase_search(
                     rule_name,
                     rule_matches.get(rule_name, []),
                     file_config,
+                    query_hash=query_hash,
+                    index_path=index,
                 )
                 if rule_name not in rule_matches:
                     rule_matches[rule_name] = []
@@ -356,7 +358,12 @@ def _broad_phase_search(
 
 
 def _process_bgparse_output(
-    output: bytes, rule_name: str, file_matches: list[str], file_config: FileConfig
+    output: bytes,
+    rule_name: str,
+    file_matches: list[str],
+    file_config: FileConfig,
+    query_hash: str,
+    index_path: str,
 ) -> tuple[RuleFileMatches, FileConfig]:
     """Turn bgparse stdout into a list of matching files and their config."""
     new_match_paths: list[str] = []
@@ -377,6 +384,11 @@ def _process_bgparse_output(
                         if len(key_value) == 2:
                             file_config[path][key_value[0]] = key_value[1]
                         else:
+                            prom_bgparse_errors.labels(
+                                query_hash=query_hash,
+                                index_path=index_path,
+                                rule_name=rule_name,
+                            ).inc()
                             raise FileConfigReadException(f"Could not read file config from index for {path}")
     return (new_match_paths, file_config)
 
