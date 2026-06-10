@@ -3,9 +3,11 @@
 import binascii
 import hashlib
 import logging
+import multiprocessing as mp
 import os
 import subprocess  # noqa: S404  # nosec: B404
 from collections import defaultdict
+from functools import partial
 
 import yara
 from prometheus_client import Histogram
@@ -218,85 +220,113 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
+def _run_bgparse_task(bgparse_exec, index, rule_name, search_string):
+    """Worker function executed in subprocess pool."""
+    cmd = f"{bgparse_exec} {search_string}{index}"
+
+    process = subprocess.run(  # noqa S602
+        cmd,
+        shell=True,
+        capture_output=True,
+    )
+
+    return (
+        rule_name,
+        index,
+        search_string,
+        process.returncode,
+        process.stdout,
+        process.stderr,
+    )
+
+
 def _broad_phase_search(
     query_type: int,
     indices: list[str],
     rule_atoms: RuleAtoms,
     progress_callback: ProgressCallback,
 ) -> tuple[RuleFileMatches, FileConfig]:
-    """Broad phase search by passing atoms to bgparse to find matches."""
-    # suricata can do the broad stage search in batches for each rule,
-    # since all atoms must be found to progress to the next phase.
-    # unfortunately, biggrep does not support doing batch searches where any of the files can match.
-    # therefore for yara queries we must search atom-by-atom.
 
-    rule_matches: RuleFileMatches = {}
+    bgparse_exec = executables["bgparse"]
+
+    # ------------------------------------------------------------
+    # 1. Precompute hex atoms
+    # ------------------------------------------------------------
+    hex_atoms = {rule: [binascii.b2a_hex(a).upper().decode() for a in atoms] for rule, atoms in rule_atoms.items()}
+
+    # ------------------------------------------------------------
+    # 2. Precompute search strings
+    # ------------------------------------------------------------
+    if query_type == QueryTypeEnum.SURICATA:
+        search_strings = {rule: ["-s " + " -s ".join(hex_atoms[rule]) + " "] for rule in rule_atoms}
+    else:
+        search_strings = {rule: [f"-s{h} " for h in hex_atoms[rule]] for rule in rule_atoms}
+
+    # ------------------------------------------------------------
+    # 3. Build flat task list
+    # ------------------------------------------------------------
+    tasks = []
+    for index in indices:
+        for rule_name, s_list in search_strings.items():
+            for s in s_list:
+                tasks.append((index, rule_name, s))
+
+    search_count = len(tasks)
+    searches_complete = 0
+
+    progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
+
+    # ------------------------------------------------------------
+    # 4. Run tasks in multiprocessing pool
+    # ------------------------------------------------------------
+    worker = partial(_run_bgparse_task, bgparse_exec)
+
+    rule_matches: RuleFileMatches = {rule: [] for rule in rule_atoms}
     file_config: FileConfig = {}
 
-    searches_complete: int = 0
-    search_count: int = 0
-
-    if query_type == QueryTypeEnum.SURICATA:
-        search_count: int = len(rule_atoms) * len(indices)
-    else:
-        for atoms in rule_atoms.values():
-            search_count += len(atoms)
-        search_count *= len(indices)
-
-    progress_callback(SearchPhaseEnum.BROAD_PHASE, searches_complete, search_count, None)
-
-    for index in indices:
-        for rule_name, atoms in rule_atoms.items():
-            search_strings: list[str] = []
-            if query_type == QueryTypeEnum.SURICATA:
-                search_strings = [""]
-                for atom in atoms:
-                    search_strings[0] += f"-s {binascii.b2a_hex(atom).upper().decode()} "
-            else:
-                for atom in atoms:
-                    search_strings.append("-s" + binascii.b2a_hex(atom).upper().decode() + " ")
-
-            for search_string in search_strings:
-                # run bgparse
-                process: subprocess.CompletedProcess[bytes] = subprocess.run(  # noqa: S602
-                    f"{executables['bgparse']}  {search_string}{index}",
-                    shell=True,  # noqa: S602
-                    capture_output=True,
+    with mp.Pool() as pool:
+        for (
+            rule_name,
+            index,
+            search_string,
+            returncode,
+            stdout,
+            stderr,
+        ) in pool.imap_unordered(lambda t: worker(*t), tasks):
+            # ------------------------------------------------------------
+            # Error handling
+            # ------------------------------------------------------------
+            if returncode != 0:
+                raise BiggrepException(
+                    f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
                 )
 
-                # handle bgparse errors
-                if process.returncode != 0:
-                    raise BiggrepException(
-                        f"bgparse returned exit code {process.returncode}. "
-                        f"Args: {search_string}{index}\n{process.stderr}"
-                    )
-                if b"<error>" in process.stderr:
-                    error_message = process.stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
-                    raise BiggrepException(
-                        f"bgparse error:{error_message} - errored while searching for {atoms} in {index}"
-                    )
-
-                # process the output into match files and their corresponding config
-                new_matches, file_config = _process_bgparse_output(
-                    process.stdout,
-                    rule_name,
-                    rule_matches.get(rule_name, []),
-                    file_config,
-                )
-                if rule_name not in rule_matches:
-                    rule_matches[rule_name] = []
-                rule_matches[rule_name].extend(new_matches)
-
-                # if the search found something, pass it through to the progress callback
-                searches_complete += 1
-                progress_callback(
-                    SearchPhaseEnum.BROAD_PHASE,
-                    searches_complete,
-                    search_count,
-                    (rule_name, new_matches),
+            if b"<error>" in stderr:
+                error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
+                raise BiggrepException(
+                    f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
                 )
 
-    if len(rule_matches) == 0:
+            # ------------------------------------------------------------
+            # 5. Aggregate results
+            # ------------------------------------------------------------
+            new_matches, file_config = _process_bgparse_output(
+                stdout,
+                rule_name,
+                rule_matches[rule_name],
+                file_config,
+            )
+            rule_matches[rule_name].extend(new_matches)
+
+            searches_complete += 1
+            progress_callback(
+                SearchPhaseEnum.BROAD_PHASE,
+                searches_complete,
+                search_count,
+                (rule_name, new_matches),
+            )
+
+    if all(len(v) == 0 for v in rule_matches.values()):
         raise NoIndexMatchesException("Search aborted due to index matches.")
 
     logger.debug("All index searches completed")
