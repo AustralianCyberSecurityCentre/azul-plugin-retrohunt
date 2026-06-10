@@ -6,6 +6,7 @@ import logging
 import multiprocessing as mp
 import os
 import subprocess  # noqa: S404  # nosec: B404
+import time
 from collections import defaultdict
 from functools import partial
 
@@ -28,6 +29,9 @@ from . import (
 from .env import executables
 from .suricata_parse import parse_suricata_rules
 from .yara_parse import parse_yara_rules
+
+BGPARSE_TIMING = defaultdict(float)
+BGPARSE_CALLS = defaultdict(int)
 
 # FUTURE: multiprocessing has been removed from search functionality.
 #         performance should be investigated and improved where necessary.
@@ -277,7 +281,7 @@ def _broad_phase_search(
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
 
     # ------------------------------------------------------------
-    # 4. Run tasks in multiprocessing pool
+    # 4. Run tasks in multiprocessing pool (patched)
     # ------------------------------------------------------------
     worker = partial(_run_bgparse_task, bgparse_exec)
 
@@ -285,6 +289,7 @@ def _broad_phase_search(
     file_config: FileConfig = {}
 
     with mp.Pool() as pool:
+        # starmap is pickle‑safe and expands tuples automatically
         for (
             rule_name,
             index,
@@ -292,7 +297,7 @@ def _broad_phase_search(
             returncode,
             stdout,
             stderr,
-        ) in pool.imap_unordered(lambda t: worker(*t), tasks):
+        ) in pool.starmap(worker, tasks):
             # ------------------------------------------------------------
             # Error handling
             # ------------------------------------------------------------
@@ -330,33 +335,57 @@ def _broad_phase_search(
         raise NoIndexMatchesException("Search aborted due to index matches.")
 
     logger.debug("All index searches completed")
+
+    # Timing summary
+    for rule, total_time in BGPARSE_TIMING.items():
+        calls = BGPARSE_CALLS[rule]
+        avg = total_time / calls if calls else 0
+        logger.debug(f"[TIMING] rule={rule} calls={calls} total={total_time:.6f}s avg={avg:.6f}s")
+
     return (rule_matches, file_config)
 
 
 def _process_bgparse_output(
-    output: bytes, rule_name: str, file_matches: list[str], file_config: FileConfig
-) -> tuple[RuleFileMatches, FileConfig]:
+    output: bytes, rule_name: str, file_matches: set[str], file_config: FileConfig
+) -> tuple[list[str], FileConfig]:
     """Turn bgparse stdout into a list of matching files and their config."""
-    new_match_paths: list[str] = []
+    start = time.perf_counter()
+    new_match_paths = []
 
-    if output:
-        for line in output.splitlines():
-            line = line.rstrip()
-            if len(line) > 0:
-                path = line.split(b",")[0].decode()
-                if path not in file_matches:
-                    new_match_paths.append(path)
+    if not output:
+        return new_match_paths, file_config
 
-                if path not in file_config:
-                    file_config[path] = {}
-                    storage_config_byte_list = line.split(b",")[1:-1]
-                    for storage_config_bytes in storage_config_byte_list:
-                        key_value = storage_config_bytes.split(b"=")
-                        if len(key_value) == 2:
-                            file_config[path][key_value[0]] = key_value[1]
-                        else:
-                            raise FileConfigReadException(f"Could not read file config from index for {path}")
-    return (new_match_paths, file_config)
+    for line in output.splitlines():
+        if not line:
+            continue
+
+        parts = line.rstrip().split(b",")
+        if not parts:
+            continue
+
+        path = parts[0].decode()
+
+        # Fast membership check using a set
+        if path not in file_matches:
+            new_match_paths.append(path)
+            file_matches.add(path)
+
+        # Only parse config once per path
+        if path not in file_config:
+            cfg = {}
+            for kv in parts[1:-1]:
+                key_value = kv.split(b"=", 1)
+                if len(key_value) != 2:
+                    raise FileConfigReadException(f"Could not read file config from index for {path}")
+                key, value = key_value
+                cfg[key] = value
+            file_config[path] = cfg
+
+    elapsed = time.perf_counter() - start
+    BGPARSE_TIMING[rule_name] += elapsed
+    BGPARSE_CALLS[rule_name] += 1
+
+    return new_match_paths, file_config
 
 
 def yara_callback(_data):
