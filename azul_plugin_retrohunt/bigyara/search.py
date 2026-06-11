@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 import yara
-from prometheus_client import Histogram
+from prometheus_client import Histogram, Counter
 
 from azul_plugin_retrohunt.retrohunt import CancelException
 
@@ -41,7 +41,7 @@ BGPARSE_CALLS = defaultdict(int)
 
 logger = logging.getLogger("bigyara.search")
 
-_DURATION_BUCKETS = [0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
+_DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
     "retrohunt_broad_phase_duration_seconds",
@@ -53,6 +53,45 @@ prom_narrow_phase_duration = Histogram(
     "retrohunt_narrow_phase_duration_seconds",
     "Time spent in narrow phase search.",
     ["query_hash"],
+    buckets=_DURATION_BUCKETS,
+)
+# bgparse latency
+prom_bgparse_duration = Histogram(
+    "retrohunt_bgparse_duration_seconds",
+    "Time spent executing bgparse during broad phase.",
+    ["query_hash", "index_path", "rule_name"],
+    buckets=_DURATION_BUCKETS,
+)
+# PVC/index potential issues
+prom_bgparse_errors = Counter(
+    "retrohunt_bgparse_errors_total",
+    "Number of bgparse errors encountered during broad phase.",
+    ["query_hash", "index_path", "rule_name"],
+)
+# per-file read latency
+prom_narrow_io_duration = Histogram(
+    "retrohunt_narrow_io_duration_seconds",
+    "Time spent reading file data during narrow phase.",
+    ["query_hash"],
+    buckets=_DURATION_BUCKETS,
+)
+# Throughput
+prom_narrow_io_bytes = Counter(
+    "retrohunt_narrow_io_bytes_total",
+    "Total bytes read during narrow phase.",
+    ["query_hash"],
+)
+# stale index check
+prom_missing_files = Counter(
+    "retrohunt_missing_files_total",
+    "Number of files missing during narrow phase.",
+    ["query_hash"],
+)
+# CPU time spent matching
+prom_narrow_cpu_duration = Histogram(
+    "retrohunt_narrow_cpu_duration_seconds",
+    "CPU time spent matching rules during narrow phase.",
+    ["query_hash", "rule_name"],
     buckets=_DURATION_BUCKETS,
 )
 
@@ -174,6 +213,7 @@ def search(
             file_config,
             checked_data_callback,
             checked_progress_callback,
+            query_hash=query_hash
         )
 
     return rule_matches
@@ -225,15 +265,19 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
-def _run_bgparse_task(bgparse_exec, index, rule_name, search_string):
+def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash):
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
-
-    process = subprocess.run(  # noqa S602
-        cmd,
-        shell=True,
-        capture_output=True,
-    )
+    with prom_bgparse_duration.labels(
+        query_hash=query_hash,
+        index_path=index,
+        rule_name=rule_name,
+    ).time():
+        process = subprocess.run(  # noqa S602
+            cmd,
+            shell=True,
+            capture_output=True,
+        )
 
     return (
         rule_name,
@@ -250,6 +294,7 @@ def _broad_phase_search(
     indices: list[str],
     rule_atoms: RuleAtoms,
     progress_callback: ProgressCallback,
+    query_hash : str,
 ) -> tuple[RuleFileMatches, FileConfig]:
 
     bgparse_exec = executables["bgparse"]
@@ -284,7 +329,7 @@ def _broad_phase_search(
     # ------------------------------------------------------------
     # 4. Run tasks in multiprocessing pool (patched)
     # ------------------------------------------------------------
-    worker = partial(_run_bgparse_task, bgparse_exec)
+    worker = partial(_run_bgparse_task, bgparse_exec, query_hash=query_hash)
 
     rule_matches: RuleFileMatches = {rule: [] for rule in rule_atoms}
     file_config: FileConfig = {}
@@ -321,6 +366,8 @@ def _broad_phase_search(
                 rule_name,
                 rule_matches[rule_name],
                 file_config,
+                query_hash=query_hash,
+                index_path=index,
             )
             rule_matches[rule_name].extend(new_matches)
 
@@ -347,10 +394,9 @@ def _broad_phase_search(
 
 
 def _process_bgparse_output(
-    output: bytes, rule_name: str, file_matches: list[str], file_config: FileConfig
+    output: bytes, rule_name: str, file_matches: list[str], file_config: FileConfig, query_hash: str, index_path: str,
 ) -> tuple[list[str], FileConfig]:
     """Turn bgparse stdout into a list of matching files and their config."""
-    start = time.perf_counter()
     new_match_paths = []
 
     if output:
@@ -370,14 +416,15 @@ def _process_bgparse_output(
                 for kv in parts[1:-1]:
                     key_value = kv.split(b"=", 1)
                     if len(key_value) != 2:
+                        prom_bgparse_errors.labels(
+                            query_hash=query_hash,
+                            index_path=index_path,
+                            rule_name=rule_name,
+                        ).inc()
                         raise FileConfigReadException(f"Could not read file config from index for {path}")
                     key, value = key_value
                     cfg[key] = value
                 file_config[path] = cfg
-
-    elapsed = time.perf_counter() - start
-    BGPARSE_TIMING[rule_name] += elapsed
-    BGPARSE_CALLS[rule_name] += 1
 
     return new_match_paths, file_config
 
@@ -394,6 +441,7 @@ def _narrow_phase_search(
     file_config: FileConfig,
     data_callback: DataCallback,
     progress_callback: ProgressCallback,
+    query_hash: str,
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
     if queryType == QueryTypeEnum.STRING:
@@ -425,28 +473,37 @@ def _narrow_phase_search(
     # ------------------------------------------------------------
     # Worker function (pure, no side effects)
     # ------------------------------------------------------------
-    def worker(file_path: str, rules_for_file: frozenset[str]):
+    def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
         cfg = file_config.get(file_path)
-        data = data_callback(file_path, cfg)
+        with prom_narrow_io_duration.labels(query_hash=query_hash).time():
+            data = data_callback(file_path, cfg)
+        
+        if data:
+            prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
 
         if not data:
+            prom_missing_files.labels(query_hash=query_hash).inc()
             return ("missing", file_path, rules_for_file, None)
 
         results = []
         for rule_name in rules_for_file:
             if queryType == QueryTypeEnum.YARA:
-                matched = (
-                    len(
-                        compiled_yara_rules[rule_name].match(
-                            data=data,
-                            callback=yara_callback,
-                            which_callbacks=yara.CALLBACK_MATCHES,
-                            fast=True,
-                            timeout=60,
+                with prom_narrow_cpu_duration.labels(
+                    query_hash=query_hash,
+                    rule_name=rule_name,
+                ).time():
+                    matched = (
+                        len(
+                            compiled_yara_rules[rule_name].match(
+                                data=data,
+                                callback=yara_callback,
+                                which_callbacks=yara.CALLBACK_MATCHES,
+                                fast=True,
+                                timeout=60,
+                            )
                         )
+                        > 0
                     )
-                    > 0
-                )
             else:
                 matched = _run_suricata(rule_content[rule_name], file_path, data)
 
@@ -460,7 +517,7 @@ def _narrow_phase_search(
     futures = []
     with ThreadPoolExecutor() as executor:
         for file_path, rules_for_file in file_to_rules.items():
-            futures.append(executor.submit(worker, file_path, frozenset(rules_for_file)))
+            futures.append(executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash))
 
         # Process results in deterministic order
         for f in futures:
