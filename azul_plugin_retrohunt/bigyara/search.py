@@ -490,20 +490,22 @@ def _narrow_phase_search(
         results = []
         for rule_name in rules_for_file:
             if queryType == QueryTypeEnum.YARA:
-                # FUTURE: this should have a better timeout.
-                # FUTURE: yara include directives should be turned off.
-                matched = (
-                    len(
-                        compiled_yara_rules[rule_name].match(
-                            data=data,
-                            callback=yara_callback,
-                            which_callbacks=yara.CALLBACK_MATCHES,
-                            fast=True,
-                            timeout=60,
+                with prom_narrow_cpu_duration.labels(
+                    query_hash=query_hash,
+                    rule_name=rule_name,
+                ).time():
+                    matched = (
+                        len(
+                            compiled_yara_rules[rule_name].match(
+                                data=data,
+                                callback=yara_callback,
+                                which_callbacks=yara.CALLBACK_MATCHES,
+                                fast=True,
+                                timeout=60,
+                            )
                         )
+                        > 0
                     )
-                    > 0
-                )
             elif queryType == QueryTypeEnum.SURICATA:
                 matched = _run_suricata(rule_content[rule_name], file_path, data)
 
