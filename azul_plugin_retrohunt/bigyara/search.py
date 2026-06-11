@@ -12,7 +12,6 @@ from functools import partial
 
 import yara
 from prometheus_client import Counter, Histogram
-from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
 
