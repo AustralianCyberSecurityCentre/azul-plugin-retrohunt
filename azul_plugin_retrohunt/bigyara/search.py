@@ -6,13 +6,12 @@ import logging
 import multiprocessing as mp
 import os
 import subprocess  # noqa: S404  # nosec: B404
-import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 import yara
-from prometheus_client import Histogram, Counter
+from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
 
@@ -30,9 +29,6 @@ from . import (
 from .env import executables
 from .suricata_parse import parse_suricata_rules
 from .yara_parse import parse_yara_rules
-
-BGPARSE_TIMING = defaultdict(float)
-BGPARSE_CALLS = defaultdict(int)
 
 # FUTURE: multiprocessing has been removed from search functionality.
 #         performance should be investigated and improved where necessary.
@@ -213,7 +209,7 @@ def search(
             file_config,
             checked_data_callback,
             checked_progress_callback,
-            query_hash=query_hash
+            query_hash=query_hash,
         )
 
     return rule_matches
@@ -294,7 +290,7 @@ def _broad_phase_search(
     indices: list[str],
     rule_atoms: RuleAtoms,
     progress_callback: ProgressCallback,
-    query_hash : str,
+    query_hash: str,
 ) -> tuple[RuleFileMatches, FileConfig]:
 
     bgparse_exec = executables["bgparse"]
@@ -384,17 +380,16 @@ def _broad_phase_search(
 
     logger.debug("All index searches completed")
 
-    # Timing summary
-    for rule, total_time in BGPARSE_TIMING.items():
-        calls = BGPARSE_CALLS[rule]
-        avg = total_time / calls if calls else 0
-        logger.debug(f"[TIMING] rule={rule} calls={calls} total={total_time:.6f}s avg={avg:.6f}s")
-
     return (rule_matches, file_config)
 
 
 def _process_bgparse_output(
-    output: bytes, rule_name: str, file_matches: list[str], file_config: FileConfig, query_hash: str, index_path: str,
+    output: bytes,
+    rule_name: str,
+    file_matches: list[str],
+    file_config: FileConfig,
+    query_hash: str,
+    index_path: str,
 ) -> tuple[list[str], FileConfig]:
     """Turn bgparse stdout into a list of matching files and their config."""
     new_match_paths = []
@@ -477,7 +472,7 @@ def _narrow_phase_search(
         cfg = file_config.get(file_path)
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
             data = data_callback(file_path, cfg)
-        
+
         if data:
             prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
 
