@@ -12,6 +12,7 @@ from functools import partial
 
 import yara
 from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
 
@@ -192,7 +193,13 @@ def search(
     rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
-        rule_matches, file_config = _broad_phase_search(query_type, indices, rule_atoms, checked_progress_callback)
+        rule_matches, file_config = _broad_phase_search(
+            query_type,
+            indices,
+            rule_atoms,
+            checked_progress_callback,
+            query_hash=query_hash,
+        )
 
     for rule_name in rule_atoms:
         if len(rule_matches[rule_name]) > 0:
@@ -483,23 +490,21 @@ def _narrow_phase_search(
         results = []
         for rule_name in rules_for_file:
             if queryType == QueryTypeEnum.YARA:
-                with prom_narrow_cpu_duration.labels(
-                    query_hash=query_hash,
-                    rule_name=rule_name,
-                ).time():
-                    matched = (
-                        len(
-                            compiled_yara_rules[rule_name].match(
-                                data=data,
-                                callback=yara_callback,
-                                which_callbacks=yara.CALLBACK_MATCHES,
-                                fast=True,
-                                timeout=60,
-                            )
+                # FUTURE: this should have a better timeout.
+                # FUTURE: yara include directives should be turned off.
+                matched = (
+                    len(
+                        compiled_yara_rules[rule_name].match(
+                            data=data,
+                            callback=yara_callback,
+                            which_callbacks=yara.CALLBACK_MATCHES,
+                            fast=True,
+                            timeout=60,
                         )
-                        > 0
                     )
-            else:
+                    > 0
+                )
+            elif queryType == QueryTypeEnum.SURICATA:
                 matched = _run_suricata(rule_content[rule_name], file_path, data)
 
             results.append((rule_name, matched))
