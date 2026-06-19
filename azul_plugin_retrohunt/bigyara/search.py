@@ -5,6 +5,7 @@ import hashlib
 import logging
 import multiprocessing as mp
 import os
+import time
 import subprocess  # noqa: S404  # nosec: B404
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -270,16 +271,16 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash):
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
-    with prom_bgparse_duration.labels(
-        query_hash=query_hash,
-        index_path=index,
-        rule_name=rule_name,
-    ).time():
-        process = subprocess.run(  # noqa S602
-            cmd,
-            shell=True,
-            capture_output=True,
-        )
+    
+    start = time.time()
+
+    process = subprocess.run(  # noqa S602
+        cmd,
+        shell=True,
+        capture_output=True,
+    )
+
+    duration = time.time() - start
 
     return (
         rule_name,
@@ -288,6 +289,7 @@ def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash)
         process.returncode,
         process.stdout,
         process.stderr,
+        duration,
     )
 
 
@@ -345,7 +347,14 @@ def _broad_phase_search(
             returncode,
             stdout,
             stderr,
+            duration,
         ) in pool.starmap(worker, tasks):
+            
+            prom_bgparse_duration.labels(
+                query_hash=query_hash,
+                index_path=index,
+                rule_name=rule_name,
+            ).observe(duration)
             # ------------------------------------------------------------
             # Error handling
             # ------------------------------------------------------------
