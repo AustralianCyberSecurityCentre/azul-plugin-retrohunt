@@ -5,8 +5,8 @@ import hashlib
 import logging
 import multiprocessing as mp
 import os
-import time
 import subprocess  # noqa: S404  # nosec: B404
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -271,7 +271,7 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash):
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
-    
+
     start = time.time()
 
     process = subprocess.run(  # noqa S602
@@ -349,7 +349,6 @@ def _broad_phase_search(
             stderr,
             duration,
         ) in pool.starmap(worker, tasks):
-            
             prom_bgparse_duration.labels(
                 query_hash=query_hash,
                 index_path=index,
