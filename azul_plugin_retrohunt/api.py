@@ -32,49 +32,55 @@ service = RetrohuntService()
 def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     """Fetch details of specified hunt."""
     r = service.get_hunts(hunt_id)
-
     hunt = r["data"]
 
-    security = ""
-
     # FUTURE add security if needed
+    hunt.security = ""
 
-    hunt.security = security
-
-    hashes = []
     results = hunt.results or {}
+    hashes = []
 
-    for matches in results.values():
-        if not matches:
-            continue
+    # -----------------------------
+    # 1. Normalize all matches into SHA256 strings
+    # -----------------------------
+    normalized_results = {}
 
-        # Normalise
-        for m in matches:
-            if isinstance(m, dict) and "sha256" in m:
-                hashes.append(m["sha256"])
-            elif isinstance(m, str):
-                hashes.append(m)
-            else:
-                pass
+    for term, matches in results.items():
+        norm = []
+        if matches:
+            for m in matches:
+                if isinstance(m, dict) and "sha256" in m:
+                    norm.append(m["sha256"])
+                elif isinstance(m, str):
+                    norm.append(m)
+                # ignore anything else
+        normalized_results[term] = norm
+        hashes.extend(norm)
 
+    # -----------------------------
+    # 2. Lookup binary summaries
+    # -----------------------------
     if hashes:
         summaries = check_binaries(ctx, hashes)
-
         sumdict = {s["sha256"]: s for s in summaries}
-
         hunt.tool_matches_total = sum(1 for s in summaries if s["exists"])
     else:
         sumdict = {}
         hunt.tool_matches_total = 0
 
+    # -----------------------------
+    # 3. Build filtered results
+    # -----------------------------
     new_results = {}
 
-    for term, matches in results.items():
-        new_results[term] = [sumdict[x] for x in matches if x in sumdict and sumdict[x]["exists"]]
+    for term, norm_matches in normalized_results.items():
+        new_results[term] = [sumdict[h] for h in norm_matches if h in sumdict and sumdict[h]["exists"]]
 
     hunt.results = new_results
 
-    # Convert model to dict for API response
+    # -----------------------------
+    # 4. Return API response
+    # -----------------------------
     return qr.fr(ctx, hunt.model_dump(), response)
 
 
