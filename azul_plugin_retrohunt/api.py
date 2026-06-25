@@ -40,9 +40,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     results = hunt.results or {}
     hashes = []
 
-    # -----------------------------
-    # 1. Normalize all matches into SHA256 strings
-    # -----------------------------
+    # Normalize all matches into SHA256 strings
     normalized_results = {}
 
     for term, matches in results.items():
@@ -57,9 +55,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
         normalized_results[term] = norm
         hashes.extend(norm)
 
-    # -----------------------------
     # 2. Lookup binary summaries
-    # -----------------------------
     if hashes:
         summaries = check_binaries(ctx, hashes)
         sumdict = {s["sha256"]: s for s in summaries}
@@ -68,9 +64,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
         sumdict = {}
         hunt.tool_matches_total = 0
 
-    # -----------------------------
     # 3. Build filtered results
-    # -----------------------------
     new_results = {}
 
     for term, norm_matches in normalized_results.items():
@@ -78,9 +72,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
 
     hunt.results = new_results
 
-    # -----------------------------
     # 4. Return API response
-    # -----------------------------
     return qr.fr(ctx, hunt.model_dump(), response)
 
 
@@ -90,7 +82,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     responses={404: {"model": BaseError, "description": "No retrohunts found"}},
     **qr.kw,
 )
-def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
+def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 5000):
     """Return list of hunts."""
     r = service.list_hunts(limit)
 
