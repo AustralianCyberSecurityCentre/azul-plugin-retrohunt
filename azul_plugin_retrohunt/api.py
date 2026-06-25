@@ -82,7 +82,7 @@ def hunt_results_route(response: Response, hunt_id: str, ctx=Depends(qr.ctx)):
     responses={404: {"model": BaseError, "description": "No retrohunts found"}},
     **qr.kw,
 )
-def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 5000):
+def list_hunts_route(response: Response, ctx=Depends(qr.ctx), limit: int = 50):
     """Return list of hunts."""
     r = service.list_hunts(limit)
 
