@@ -430,7 +430,6 @@ def main():
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
-                logger.info(f"[worker={worker_id}] hunt() completed for job_id={job_id}, XACKing msg_id={msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
             except CancelException:
                 logger.info(f"Cleaning up cancelled hunt {job_id}")
