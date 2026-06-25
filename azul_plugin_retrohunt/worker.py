@@ -331,8 +331,10 @@ def main():
 
     try:
         rs.redis.xgroup_create(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, id="$", mkstream=True)
+        logger.info(f"[worker={worker_id}] created consumer group {rs.RETROHUNT_GROUP}")
     except ResponseError as e:
         if "BUSYGROUP" in str(e):
+            logger.info(f"[worker={worker_id}] consumer group {rs.RETROHUNT_GROUP} already exists")
             pass  # already exists
         else:
             raise
@@ -342,6 +344,7 @@ def main():
         try:
             # Claim any stale jobs first
             try:
+                logger.debug(f"[worker={worker_id}] attempting XAUTOCLAIM for stale jobs")
                 result = rs.redis.xautoclaim(
                     rs.RETROHUNT_JOB,
                     rs.RETROHUNT_GROUP,
@@ -367,9 +370,11 @@ def main():
 
             if messages:
                 msg_id, payload = messages[0]
+                logger.info(f"[worker={worker_id}] claimed STALE job msg_id={msg_id} payload={payload}")
             else:
                 # no stale jobs, read new ones
                 try:
+                    logger.debug(f"[worker={worker_id}] XREADGROUP blocking for new jobs")
                     events = rs.redis.xreadgroup(
                         groupname=rs.RETROHUNT_GROUP,
                         consumername=worker_id,
@@ -404,19 +409,24 @@ def main():
             job = azm.RetrohuntEvent(**json.loads(event_json))
 
             job_id = job.entity.id
-
+            logger.info(f"[worker={worker_id}] loaded job_id={job_id} status={job.entity.status.name}")
             # these will be cleaned up by the cronjob later
             if job.entity.status in {azm.HuntState.FAILED}:
+                logger.info(f"[worker={worker_id}] job_id={job_id} already FAILED, XACK and delete lock")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
                 continue
 
+            logger.debug(f"[worker={worker_id}] attempting to acquire lock for job_id={job_id}")
             if not acquire_lock(rs.redis, job_id, worker_id, ttl_seconds=LOCK_TTL):
                 # Another worker is running this hunt
+                logger.info(f"[worker={worker_id}] lock already held for job_id={job_id}, skipping")
                 continue
+            logger.info(f"[worker={worker_id}] acquired lock for job_id={job_id}")
 
             # Start heartbeat
             stop_event = threading.Event()
+            logger.debug(f"[worker={worker_id}] starting heartbeat for job_id={job_id}")
             start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL, stop_event=stop_event)
 
             bgi_folders = []
@@ -425,26 +435,31 @@ def main():
                 bgi_folders.append(path_to_bgi_folder)
 
             # Check cancellation before starting work
+            logger.debug(f"[worker={worker_id}] checking cancellation for job_id={job_id}")
             check_is_cancelled(job_id)
 
             try:
+                logger.info(f"[worker={worker_id}] starting hunt() for job_id={job_id}")
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
+                logger.info(f"[worker={worker_id}] hunt() completed for job_id={job_id}, XACKing msg_id={msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
             except CancelException:
+                logger.info(f"[worker={worker_id}] CancelException for job_id={job_id}, cleaning up and XACK")
                 logger.info(f"Cleaning up cancelled hunt {job_id}")
                 rs.redis.delete(job_id)
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 continue
             finally:
+                logger.info(f"[worker={worker_id}] stopping heartbeat and deleting lock for job_id={job_id}")
                 stop_event.set()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
         # used by tests
         except FatalException:
             raise
         except Exception as e:
-            logger.exception(f"Worker error, continuing loop: {e}")
+            logger.exception(f"[worker={worker_id}] worker error, sleeping {exception_sleep}s: {e}")
             sleep(exception_sleep)
             continue
 
