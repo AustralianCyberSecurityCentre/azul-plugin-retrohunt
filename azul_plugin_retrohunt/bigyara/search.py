@@ -485,7 +485,9 @@ def _narrow_phase_search(
     def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
         cfg = file_config.get(file_path)
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
+            logger.info(f"Starting narrow I/O for {file_path}")
             data = data_callback(file_path, cfg)
+            logger.info(f"Finished narrow I/O for {file_path}")
 
         if data:
             prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
@@ -530,7 +532,9 @@ def _narrow_phase_search(
 
         # Process results in deterministic order
         for f in futures:
+            logger.info(f"Waiting for future {file_path}")
             status, file_path, rules_for_file, results = f.result()
+            logger.info(f"Future completed {file_path}")
 
             if status == "missing":
                 for rule_name in rules_for_file:
