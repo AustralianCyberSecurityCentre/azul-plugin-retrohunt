@@ -37,7 +37,7 @@ from .yara_parse import parse_yara_rules
 #         in batches according to available core count.
 
 logger = logging.getLogger("bigyara.search")
-
+RAM_DIR = "/tmp/retrohunt_ram"
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -328,7 +328,7 @@ def _broad_phase_search(
         total_io_bytes += size_bytes * atom_count
         for rule_name, s_list in search_strings.items():
             for s in s_list:
-                tasks.append((index, rule_name, s))
+                tasks.append((maybe_cache_index(index), rule_name, s))
     logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
     searches_complete = 0
@@ -490,9 +490,7 @@ def _narrow_phase_search(
     def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
         cfg = file_config.get(file_path)
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-            logger.info(f"Starting narrow I/O for {file_path}")
             data = data_callback(file_path, cfg)
-            logger.info(f"Finished narrow I/O for {file_path}")
 
         if data:
             prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
@@ -537,9 +535,7 @@ def _narrow_phase_search(
 
         # Process results in deterministic order
         for f in futures:
-            logger.info(f"Waiting for future {file_path}")
             status, file_path, rules_for_file, results = f.result()
-            logger.info(f"Future completed {file_path}")
 
             if status == "missing":
                 for rule_name in rules_for_file:
@@ -579,6 +575,38 @@ def _narrow_phase_search(
 
     return final_matches
 
+def get_free_memory_bytes():
+    with open("/proc/meminfo") as f:
+        meminfo = f.read().splitlines()
+
+    for line in meminfo:
+        if line.startswith("MemAvailable:"):
+            kb = int(line.split()[1])
+            return kb * 1024  # bytes
+
+    return 0
+
+def maybe_cache_index(index_path: str) -> str:
+    size_bytes = os.path.getsize(index_path)
+    free_bytes = get_free_memory_bytes()
+
+    # Decide whether to cache
+    if size_bytes < free_bytes - (2 * 1024 * 1024 * 1024):
+        ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
+
+        if not os.path.exists(ram_path):
+            shutil.copyfile(index_path, ram_path)
+
+        index_to_use = ram_path
+    else:
+        index_to_use = index_path
+
+    logger.info(
+        f"Index {index_path} size={size_bytes/1e6:.2f}MB "
+        f"free_mem={free_bytes/1e6:.2f}MB using={index_to_use}"
+    )
+
+    return index_to_use
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
     """Run suricata rule on data. Returns True if there is at least one match."""
