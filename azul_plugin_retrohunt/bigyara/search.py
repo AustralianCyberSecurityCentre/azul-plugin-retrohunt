@@ -320,11 +320,16 @@ def _broad_phase_search(
     # 3. Build flat task list
     # ------------------------------------------------------------
     tasks = []
+    logger.info("Broad phase index file sizes:")
+    total_io_bytes = 0
     for index in indices:
+        size_bytes = os.path.getsize(index)
+        atom_count = sum(len(atoms) for atoms in rule_atoms.values())
+        total_io_bytes += size_bytes * atom_count
         for rule_name, s_list in search_strings.items():
             for s in s_list:
                 tasks.append((index, rule_name, s))
-
+    logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
     searches_complete = 0
 
