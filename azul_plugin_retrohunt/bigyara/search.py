@@ -3,6 +3,7 @@
 import binascii
 import hashlib
 import logging
+import mmap
 import multiprocessing as mp
 import os
 import subprocess  # noqa: S404  # nosec: B404
@@ -271,17 +272,50 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 #         batched searches as an OR on those searches.
 def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash):
     """Worker function executed in subprocess pool."""
+    mm = None
+    f = None
+
+    # Try to mmap the index file instead of relying purely on PVC reads
+    try:
+        size_bytes = os.path.getsize(index)
+        shm_free = get_free_shm_bytes()
+
+        logger.info(f"bgparse index={index} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
+
+        if size_bytes <= MAX_MMAP_BYTES and size_bytes <= shm_free:
+            f = open(index, "rb")
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            logger.info(f"mmap active for index {index}")
+        else:
+            logger.info(f"mmap skipped for {index}, using PVC directly")
+    except Exception as e:
+        logger.warning(f"mmap setup failed for {index}: {e}")
+        mm = None
+        if f:
+            f.close()
+            f = None
+
     cmd = f"{bgparse_exec} {search_string}{index}"
 
     start = time.time()
-
-    process = subprocess.run(  # noqa S602
+    process = subprocess.run(  # noqa: S602
         cmd,
         shell=True,
         capture_output=True,
     )
-
     duration = time.time() - start
+
+    # Tear down mmap if it was used
+    if mm is not None:
+        try:
+            mm.close()
+        except Exception:
+            logger.warning(f"Failed to close mmap for {index}")
+    if f is not None:
+        try:
+            f.close()
+        except Exception:
+            logger.warning(f"Failed to close file handle for {index}")
 
     return (
         rule_name,
