@@ -316,7 +316,7 @@ def main():
     exception_sleep = settings.redis.exception_wait
     start_http_server(settings.prometheus_port_worker)
 
-    os.makedirs("/tmp/retrohunt_ram", exist_ok=True)
+    os.makedirs("/retrohunt_ram", exist_ok=True)
 
     dp = dispatcher.DispatcherAPI(
         events_url=settings.events_url,

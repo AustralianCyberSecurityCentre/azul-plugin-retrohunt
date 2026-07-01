@@ -5,6 +5,7 @@ import hashlib
 import logging
 import multiprocessing as mp
 import os
+import shutil
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
@@ -37,7 +38,7 @@ from .yara_parse import parse_yara_rules
 #         in batches according to available core count.
 
 logger = logging.getLogger("bigyara.search")
-RAM_DIR = "/tmp/retrohunt_ram"
+RAM_DIR = "/retrohunt_ram"
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -575,7 +576,9 @@ def _narrow_phase_search(
 
     return final_matches
 
+
 def get_free_memory_bytes():
+    """Get available memory."""
     with open("/proc/meminfo") as f:
         meminfo = f.read().splitlines()
 
@@ -586,7 +589,9 @@ def get_free_memory_bytes():
 
     return 0
 
+
 def maybe_cache_index(index_path: str) -> str:
+    """Check if we can put index file into memory before bgparse."""
     size_bytes = os.path.getsize(index_path)
     free_bytes = get_free_memory_bytes()
 
@@ -602,11 +607,11 @@ def maybe_cache_index(index_path: str) -> str:
         index_to_use = index_path
 
     logger.info(
-        f"Index {index_path} size={size_bytes/1e6:.2f}MB "
-        f"free_mem={free_bytes/1e6:.2f}MB using={index_to_use}"
+        f"Index {index_path} size={size_bytes / 1e6:.2f}MB free_mem={free_bytes / 1e6:.2f}MB using={index_to_use}"
     )
 
     return index_to_use
+
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
     """Run suricata rule on data. Returns True if there is at least one match."""
