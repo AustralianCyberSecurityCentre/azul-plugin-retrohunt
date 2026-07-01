@@ -59,6 +59,19 @@ prom_bgparse_duration = Histogram(
     ["query_hash", "index_path", "rule_name"],
     buckets=_DURATION_BUCKETS,
 )
+# bgparse io duration
+prom_bgparse_io_duration = Histogram(
+    "retrohunt_bgparse_io_duration_seconds",
+    "Time spent reading bgparse stdout during broad phase.",
+    ["query_hash", "index_path"],
+    buckets=_DURATION_BUCKETS,
+)
+# bgparse throughput
+prom_bgparse_io_bytes = Counter(
+    "retrohunt_bgparse_io_bytes_total",
+    "Total bytes read from bgparse stdout during broad phase.",
+    ["query_hash", "index_path"],
+)
 # PVC/index potential issues
 prom_bgparse_errors = Counter(
     "retrohunt_bgparse_errors_total",
@@ -191,7 +204,7 @@ def search(
     query_hash = hashlib.sha256(query.encode()).hexdigest()
 
     rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
-    logger.info("Starting Broad search")
+    logger.info("Starting Broad search optimised")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
             query_type,
@@ -354,6 +367,16 @@ def _broad_phase_search(
                 index_path=index,
                 rule_name=rule_name,
             ).observe(duration)
+
+            prom_bgparse_io_duration.labels(
+                query_hash=query_hash,
+                index_path=index,
+            ).observe(duration)
+
+            prom_bgparse_io_bytes.labels(
+                query_hash=query_hash,
+                index_path=index,
+            ).inc(len(stdout))
             # ------------------------------------------------------------
             # Error handling
             # ------------------------------------------------------------
