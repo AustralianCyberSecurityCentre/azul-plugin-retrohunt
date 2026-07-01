@@ -5,7 +5,6 @@ import hashlib
 import logging
 import multiprocessing as mp
 import os
-import shutil
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
@@ -38,7 +37,8 @@ from .yara_parse import parse_yara_rules
 #         in batches according to available core count.
 
 logger = logging.getLogger("bigyara.search")
-RAM_DIR = "/dev/shm/retrohunt_ram"  # noqa: S108
+MAX_MMAP_BYTES = 16 * 1024 * 1024 * 1024  # 16GB
+RAM_DIR = "/dev/shm"  # noqa: S108
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -577,40 +577,32 @@ def _narrow_phase_search(
     return final_matches
 
 
-def get_free_memory_bytes():
+def get_free_shm_bytes():
     """Get available memory."""
-    with open("/proc/meminfo") as f:
-        meminfo = f.read().splitlines()
-
-    for line in meminfo:
-        if line.startswith("MemAvailable:"):
-            kb = int(line.split()[1])
-            return kb * 1024  # bytes
-
-    return 0
+    stat = os.statvfs("/dev/shm")  # noqa: S108
+    return stat.f_bavail * stat.f_frsize
 
 
 def maybe_cache_index(index_path: str) -> str:
-    """Check if we can put index file into memory before bgparse."""
+    """Decide whether to use memory or pvc dir."""
     size_bytes = os.path.getsize(index_path)
-    free_bytes = get_free_memory_bytes()
+    shm_free = get_free_shm_bytes()
 
-    # Decide whether to cache
-    if size_bytes < free_bytes - (2 * 1024 * 1024 * 1024):
-        ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
+    logger.info(f"Index {index_path} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
 
-        if not os.path.exists(ram_path):
-            shutil.copyfile(index_path, ram_path)
+    # Too large → use PVC
+    if size_bytes > MAX_MMAP_BYTES:
+        logger.warning(f"Index > 16GB, using PVC: {index_path}")
+        return index_path
 
-        index_to_use = ram_path
-    else:
-        index_to_use = index_path
+    # Not enough shm → use PVC
+    if size_bytes > shm_free:
+        logger.warning(f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}")
+        return index_path
 
-    logger.info(
-        f"Index {index_path} size={size_bytes / 1e6:.2f}MB free_mem={free_bytes / 1e6:.2f}MB using={index_to_use}"
-    )
-
-    return index_to_use
+    # mmap directly from original file
+    logger.info(f"Using mmap directly on {index_path}")
+    return index_path
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
