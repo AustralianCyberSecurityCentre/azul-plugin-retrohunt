@@ -60,18 +60,16 @@ prom_bgparse_duration = Histogram(
     buckets=_DURATION_BUCKETS,
 )
 # bgparse io duration
-prom_bgparse_io_duration = Histogram(
-    "retrohunt_bgparse_io_duration_seconds",
-    "Time spent reading bgparse stdout during broad phase.",
-    ["query_hash", "index_path"],
-    buckets=_DURATION_BUCKETS,
-)
+prom_bgparse_io_duration.labels(
+    query_hash=query_hash,
+    index_path=index,
+).observe(duration)
+
 # bgparse throughput
-prom_bgparse_io_bytes = Counter(
-    "retrohunt_bgparse_io_bytes_total",
-    "Total bytes read from bgparse stdout during broad phase.",
-    ["query_hash", "index_path"],
-)
+prom_bgparse_io_bytes.labels(
+    query_hash=query_hash,
+    index_path=index,
+).inc(len(stdout))
 # PVC/index potential issues
 prom_bgparse_errors = Counter(
     "retrohunt_bgparse_errors_total",
@@ -104,7 +102,6 @@ prom_narrow_cpu_duration = Histogram(
     ["query_hash", "rule_name"],
     buckets=_DURATION_BUCKETS,
 )
-
 
 class BiggrepException(Exception):
     """Error when running bgparse."""
@@ -367,16 +364,7 @@ def _broad_phase_search(
                 index_path=index,
                 rule_name=rule_name,
             ).observe(duration)
-
-            prom_bgparse_io_duration.labels(
-                query_hash=query_hash,
-                index_path=index,
-            ).observe(duration)
-
-            prom_bgparse_io_bytes.labels(
-                query_hash=query_hash,
-                index_path=index,
-            ).inc(len(stdout))
+            
             # ------------------------------------------------------------
             # Error handling
             # ------------------------------------------------------------
