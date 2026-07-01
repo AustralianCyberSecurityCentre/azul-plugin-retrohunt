@@ -216,8 +216,8 @@ def search(
             indices,
             rule_atoms,
             checked_progress_callback,
-            data_callback,
-            query_hash=query_hash,
+            query_hash,
+            data_callback=checked_data_callback,
         )
 
     for rule_name in rule_atoms:
@@ -235,8 +235,8 @@ def search(
             file_config,
             checked_data_callback,
             checked_progress_callback,
+            query_hash,
             preloaded_binaries,
-            query_hash=query_hash,
         )
 
     return rule_matches
