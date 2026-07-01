@@ -602,30 +602,21 @@ def maybe_cache_index(index_path: str) -> str:
     size_bytes = os.path.getsize(index_path)
     shm_free = get_free_shm_bytes()
 
-    logger.info(
-        f"Index {index_path} size={size_bytes / 1e6:.2f}MB "
-        f"shm_free={shm_free / 1e6:.2f}MB"
-    )
+    logger.info(f"Index {index_path} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
 
     # Too small not worth caching
     if size_bytes < MIN_CACHE_BYTES:
-        logger.info(
-            f"Index < {MIN_CACHE_BYTES / 1e6:.2f}MB, using PVC: {index_path}"
-        )
+        logger.info(f"Index < {MIN_CACHE_BYTES / 1e6:.2f}MB, using PVC: {index_path}")
         return index_path
 
     # Too large use PVC
     if size_bytes > MAX_MMAP_BYTES:
-        logger.warning(
-            f"Index > {MAX_MMAP_BYTES / 1e9:.1f}GB, using PVC: {index_path}"
-        )
+        logger.warning(f"Index > {MAX_MMAP_BYTES / 1e9:.1f}GB, using PVC: {index_path}")
         return index_path
 
     # Not enough shm use PVC
     if size_bytes > shm_free:
-        logger.warning(
-            f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}"
-        )
+        logger.warning(f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}")
         return index_path
 
     ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
