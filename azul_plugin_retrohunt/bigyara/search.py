@@ -92,24 +92,6 @@ prom_narrow_cpu_duration = Histogram(
     buckets=_DURATION_BUCKETS,
 )
 
-prom_bgparse_io_duration = Histogram(
-    "bgparse_io_duration_seconds",
-    "Time spent reading index files during broad phase",
-    ["query_hash", "index_path"],
-)
-
-prom_bgparse_io_bytes = Counter(
-    "bgparse_io_bytes_total",
-    "Total bytes read from index files during broad phase",
-    ["query_hash", "index_path"],
-)
-
-prom_bgparse_io_files = Counter(
-    "bgparse_io_files_total",
-    "Total number of index files accessed during broad phase",
-    ["query_hash"],
-)
-
 
 class BiggrepException(Exception):
     """Error when running bgparse."""
@@ -211,13 +193,12 @@ def search(
     rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
-        rule_matches, file_config, preloaded_binaries = _broad_phase_search(
+        rule_matches, file_config = _broad_phase_search(
             query_type,
             indices,
             rule_atoms,
             checked_progress_callback,
-            query_hash,
-            data_callback=checked_data_callback,
+            query_hash=query_hash,
         )
 
     for rule_name in rule_atoms:
@@ -235,8 +216,7 @@ def search(
             file_config,
             checked_data_callback,
             checked_progress_callback,
-            query_hash,
-            preloaded_binaries,
+            query_hash=query_hash,
         )
 
     return rule_matches
@@ -319,21 +299,9 @@ def _broad_phase_search(
     rule_atoms: RuleAtoms,
     progress_callback: ProgressCallback,
     query_hash: str,
-    data_callback: DataCallback = None,
 ) -> tuple[RuleFileMatches, FileConfig]:
 
     bgparse_exec = executables["bgparse"]
-
-    preloaded_binaries: dict[str, bytes] = {}
-
-    def preload_binary(path: str, cfg: dict[bytes, bytes]):
-        try:
-            data = data_callback(path, cfg)
-            if data:
-                preloaded_binaries[path] = data
-        except Exception:
-            # Binary does not exist in Azul or dispatcher throttled then skip
-            return
 
     # ------------------------------------------------------------
     # 1. Precompute hex atoms
@@ -386,16 +354,6 @@ def _broad_phase_search(
                 index_path=index,
                 rule_name=rule_name,
             ).observe(duration)
-
-            prom_bgparse_io_duration.labels(
-                query_hash=query_hash,
-                index_path=index,
-            ).observe(duration)
-
-            prom_bgparse_io_bytes.labels(
-                query_hash=query_hash,
-                index_path=index,
-            ).inc(len(stdout))
             # ------------------------------------------------------------
             # Error handling
             # ------------------------------------------------------------
@@ -420,7 +378,6 @@ def _broad_phase_search(
                 file_config,
                 query_hash=query_hash,
                 index_path=index,
-                preload_callback=preload_binary,
             )
             rule_matches[rule_name].extend(new_matches)
 
@@ -437,7 +394,7 @@ def _broad_phase_search(
 
     logger.debug("All index searches completed")
 
-    return (rule_matches, file_config, preloaded_binaries)
+    return (rule_matches, file_config)
 
 
 def _process_bgparse_output(
@@ -447,7 +404,6 @@ def _process_bgparse_output(
     file_config: FileConfig,
     query_hash: str,
     index_path: str,
-    preload_callback=None,
 ) -> tuple[list[str], FileConfig]:
     """Turn bgparse stdout into a list of matching files and their config."""
     new_match_paths = []
@@ -479,9 +435,6 @@ def _process_bgparse_output(
                     cfg[key] = value
                 file_config[path] = cfg
 
-                if preload_callback:
-                    preload_callback(path, cfg)
-
     return new_match_paths, file_config
 
 
@@ -498,7 +451,6 @@ def _narrow_phase_search(
     data_callback: DataCallback,
     progress_callback: ProgressCallback,
     query_hash: str,
-    preloaded_binaries: dict[str, bytes],
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
     if queryType == QueryTypeEnum.STRING:
@@ -533,12 +485,9 @@ def _narrow_phase_search(
     def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
         cfg = file_config.get(file_path)
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-            if file_path in preloaded_binaries:
-                data = preloaded_binaries[file_path]
-                logger.info(f"Using preloaded binary for {file_path}")
-            else:
-                data = data_callback(file_path, cfg)
-                logger.info(f"Fetched binary via dispatcher for {file_path}")
+            logger.info(f"Starting narrow I/O for {file_path}")
+            data = data_callback(file_path, cfg)
+            logger.info(f"Finished narrow I/O for {file_path}")
 
         if data:
             prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
