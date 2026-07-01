@@ -6,6 +6,7 @@ import logging
 import mmap
 import multiprocessing as mp
 import os
+import shutil
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
@@ -38,8 +39,10 @@ from .yara_parse import parse_yara_rules
 #         in batches according to available core count.
 
 logger = logging.getLogger("bigyara.search")
-MAX_MMAP_BYTES = 16 * 1024 * 1024 * 1024  # 16GB
-RAM_DIR = "/dev/shm"  # noqa: S108
+MAX_MMAP_BYTES = 4 * 1024 * 1024 * 1024  # 4GB
+MIN_CACHE_BYTES = 1 * 1024 * 1024 * 1024  # 1GB
+RAM_DIR = "/dev/shm/retrohunt_indices"  # noqa: S108
+
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -272,50 +275,17 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 #         batched searches as an OR on those searches.
 def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash):
     """Worker function executed in subprocess pool."""
-    mm = None
-    f = None
-
-    # Try to mmap the index file instead of relying purely on PVC reads
-    try:
-        size_bytes = os.path.getsize(index)
-        shm_free = get_free_shm_bytes()
-
-        logger.info(f"bgparse index={index} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
-
-        if size_bytes <= MAX_MMAP_BYTES and size_bytes <= shm_free:
-            f = open(index, "rb")
-            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-            logger.info(f"mmap active for index {index}")
-        else:
-            logger.info(f"mmap skipped for {index}, using PVC directly")
-    except Exception as e:
-        logger.warning(f"mmap setup failed for {index}: {e}")
-        mm = None
-        if f:
-            f.close()
-            f = None
-
     cmd = f"{bgparse_exec} {search_string}{index}"
 
     start = time.time()
-    process = subprocess.run(  # noqa: S602
+
+    process = subprocess.run(  # noqa S602
         cmd,
         shell=True,
         capture_output=True,
     )
-    duration = time.time() - start
 
-    # Tear down mmap if it was used
-    if mm is not None:
-        try:
-            mm.close()
-        except Exception:
-            logger.warning(f"Failed to close mmap for {index}")
-    if f is not None:
-        try:
-            f.close()
-        except Exception:
-            logger.warning(f"Failed to close file handle for {index}")
+    duration = time.time() - start
 
     return (
         rule_name,
@@ -617,26 +587,55 @@ def get_free_shm_bytes():
     return stat.f_bavail * stat.f_frsize
 
 
+def mmap_index(index_path: str) -> mmap.mmap:
+    """Map Index file."""
+    fd = os.open(index_path, os.O_RDONLY)
+    try:
+        mm = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        return mm
+    finally:
+        os.close(fd)
+
+
 def maybe_cache_index(index_path: str) -> str:
-    """Decide whether to use memory or pvc dir."""
+    """Decide whether to pass BGParse index in ram or PVC."""
     size_bytes = os.path.getsize(index_path)
     shm_free = get_free_shm_bytes()
 
-    logger.info(f"Index {index_path} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
+    logger.info(
+        f"Index {index_path} size={size_bytes / 1e6:.2f}MB "
+        f"shm_free={shm_free / 1e6:.2f}MB"
+    )
 
-    # Too large → use PVC
+    # Too small not worth caching
+    if size_bytes < MIN_CACHE_BYTES:
+        logger.info(
+            f"Index < {MIN_CACHE_BYTES / 1e6:.2f}MB, using PVC: {index_path}"
+        )
+        return index_path
+
+    # Too large use PVC
     if size_bytes > MAX_MMAP_BYTES:
-        logger.warning(f"Index > 16GB, using PVC: {index_path}")
+        logger.warning(
+            f"Index > {MAX_MMAP_BYTES / 1e9:.1f}GB, using PVC: {index_path}"
+        )
         return index_path
 
-    # Not enough shm → use PVC
+    # Not enough shm use PVC
     if size_bytes > shm_free:
-        logger.warning(f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}")
+        logger.warning(
+            f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}"
+        )
         return index_path
 
-    # mmap directly from original file
-    logger.info(f"Using mmap directly on {index_path}")
-    return index_path
+    ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
+
+    if not os.path.exists(ram_path):
+        logger.info(f"Copying index to shm: {index_path} → {ram_path}")
+        shutil.copyfile(index_path, ram_path)
+
+    logger.info(f"Using shm index: {ram_path}")
+    return ram_path
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
