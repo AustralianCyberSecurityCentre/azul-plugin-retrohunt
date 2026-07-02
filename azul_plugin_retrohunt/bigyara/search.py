@@ -278,31 +278,37 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash):
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
-
     start = time.time()
 
-    process = subprocess.run(  # noqa S602
-        cmd,
-        shell=True,
-        capture_output=True,
-    )
+    try:
+        process = subprocess.run(  # noqa: S602
+            cmd,
+            shell=True,
+            capture_output=True,
+        )
 
-    duration = time.time() - start
+        duration = time.time() - start
 
-    # Decrement refcount if this worker used a cached index
-    if index.startswith(RAM_DIR):
-        ref_path = index + ".ref"
-        decrement_refcount(ref_path, index)
+        return (
+            rule_name,
+            index,
+            search_string,
+            process.returncode,
+            process.stdout,
+            process.stderr,
+            duration,
+        )
 
-    return (
-        rule_name,
-        index,
-        search_string,
-        process.returncode,
-        process.stdout,
-        process.stderr,
-        duration,
-    )
+    finally:
+        # Ensure refcount is always decremented for cached indices
+        if index.startswith(RAM_DIR):
+            try:
+                decrement_refcount(index + ".ref", index)
+            except Exception:
+                logger.exception(
+                    "Failed to decrement cache refcount for %s",
+                    index,
+                )
 
 
 def _broad_phase_search(
@@ -604,74 +610,109 @@ def mmap_index(index_path: str) -> mmap.mmap:
         os.close(fd)
 
 
-def increment_refcount(ref_path: str):
+def increment_refcount(ref_path: str) -> int:
     """Increment ref count."""
-    with open(ref_path, "a+") as f:
-        f.seek(0)
-        try:
-            count = int(f.read() or "0")
-        except ValueError:
-            count = 0
-        count += 1
-        f.seek(0)
-        f.write(str(count))
-        f.truncate()
+    return locked_update(ref_path, lambda c: c + 1)
 
 
 def decrement_refcount(ref_path: str, ram_path: str):
     """Decrement ref count."""
+    try:
+        locked_update(
+            ref_path,
+            lambda c: max(0, c - 1),
+        )
+    except FileNotFoundError:
+        pass
+
+
+def locked_update(ref_path: str, update_fn) -> int:
+    """Atomically update a refcount file."""
+    # Ensure file exists
+    open(ref_path, "a").close()
+
     with open(ref_path, "r+") as f:
-        f.seek(0)
-        count = int(f.read() or "0")
-        count -= 1
-        f.seek(0)
-        f.write(str(count))
-        f.truncate()
-
-    if count <= 0:
-        os.remove(ram_path)
-        os.remove(ref_path)
-
-
-def locked_update(ref_path, update_fn):
-    """Lock refcount file when updating."""
-    with open(ref_path, "a+") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
-        f.seek(0)
-        content = f.read()
-        count = int(content or "0")
-        count = update_fn(count)
-        f.seek(0)
-        f.write(str(count))
-        f.truncate()
-        fcntl.flock(f, fcntl.LOCK_UN)
-        return count
+
+        try:
+            f.seek(0)
+            content = f.read().strip()
+
+            try:
+                count = int(content) if content else 0
+            except ValueError:
+                logger.error(
+                    "Corrupt refcount file %s (first 100 chars: %s)",
+                    ref_path,
+                    content[:100],
+                )
+                count = 0
+
+            count = update_fn(count)
+
+            f.seek(0)
+            f.truncate()
+            f.write(str(count))
+            f.flush()
+            os.fsync(f.fileno())
+
+            return count
+
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def cleanup_cached_indices(indices):
-    """Cleanup index files in cache."""
+    """Cleanup cached indices whose refcount has reached zero."""
     for index_path in indices:
         ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
         ref_path = ram_path + ".ref"
+        cache_lock = ram_path + ".lock"
 
         if not os.path.exists(ref_path):
             continue
 
-        # Read refcount
-        with open(ref_path, "r") as f:
-            try:
-                count = int(f.read() or "0")
-            except ValueError:
-                count = 0
+        try:
+            with open(cache_lock, "a") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
 
-        # Only delete if refcount is zero
-        if count == 0:
-            try:
-                os.remove(ram_path)
-                os.remove(ref_path)
-                logger.info(f"Deleted cached index {ram_path} (refcount=0)")
-            except FileNotFoundError:
-                pass
+                try:
+                    with open(ref_path, "r+") as f:
+                        fcntl.flock(f, fcntl.LOCK_EX)
+
+                        try:
+                            f.seek(0)
+                            content = f.read().strip()
+
+                            try:
+                                count = int(content) if content else 0
+                            except ValueError:
+                                logger.warning(
+                                    "Corrupt refcount file %s during cleanup",
+                                    ref_path,
+                                )
+                                count = 0
+
+                            if count == 0:
+                                for path in (ram_path, ref_path):
+                                    try:
+                                        os.remove(path)
+                                    except FileNotFoundError:
+                                        pass
+
+                                logger.info(
+                                    "Deleted cached index %s (refcount=0)",
+                                    ram_path,
+                                )
+
+                        finally:
+                            fcntl.flock(f, fcntl.LOCK_UN)
+
+                finally:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+        except FileNotFoundError:
+            continue
 
 
 def maybe_cache_index(index_path: str) -> str:
@@ -679,32 +720,44 @@ def maybe_cache_index(index_path: str) -> str:
     size_bytes = os.path.getsize(index_path)
     shm_free = get_free_shm_bytes()
 
-    ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
-    ref_path = ram_path + ".ref"
-
-    # Already cached increment refcount and reuse
-    if os.path.exists(ram_path):
-        locked_update(ref_path, lambda c: c + 1)
-        logger.info(f"Index already cached in shm: {ram_path}")
-        return ram_path
-
-    # Too small use PVC
+    # Too small -> use PVC
     if size_bytes < MIN_CACHE_BYTES:
         return index_path
 
-    # Too large use PVC
+    # Too large -> use PVC
     if size_bytes > MAX_MMAP_BYTES:
         return index_path
 
-    # Not enough shm use PVC
+    # Not enough shm -> use PVC
     if size_bytes > shm_free:
         return index_path
 
-    # Cache it
-    shutil.copyfile(index_path, ram_path)
-    locked_update(ref_path, lambda c: c + 1)
-    logger.info(f"Copied index to shm: {ram_path}")
-    return ram_path
+    ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
+    ref_path = ram_path + ".ref"
+    cache_lock = ram_path + ".lock"
+
+    with open(cache_lock, "a") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+
+        try:
+            if os.path.exists(ram_path):
+                increment_refcount(ref_path)
+                logger.debug(f"Reusing cached index: {ram_path}")
+                return ram_path
+
+            shutil.copyfile(index_path, ram_path)
+
+            if not os.path.exists(ref_path):
+                with open(ref_path, "w") as f:
+                    f.write("0")
+
+            increment_refcount(ref_path)
+
+            logger.info(f"Copied index to shm: {ram_path}")
+            return ram_path
+
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
