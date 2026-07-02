@@ -1,13 +1,10 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
-import fcntl
 import hashlib
 import logging
-import mmap
 import multiprocessing as mp
 import os
-import shutil
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
@@ -40,10 +37,8 @@ from .yara_parse import parse_yara_rules
 #         in batches according to available core count.
 
 logger = logging.getLogger("bigyara.search")
-MAX_MMAP_BYTES = 4 * 1024 * 1024 * 1024  # 4GB
-MIN_CACHE_BYTES = 1 * 1024 * 1024 * 1024  # 1GB
-RAM_DIR = "/dev/shm/retrohunt_indices"  # noqa: S108
-
+MAX_MMAP_BYTES = 16 * 1024 * 1024 * 1024  # 16GB
+RAM_DIR = "/dev/shm"  # noqa: S108
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -225,7 +220,6 @@ def search(
             query_hash=query_hash,
         )
 
-    cleanup_cached_indices(indices)
     return rule_matches
 
 
@@ -278,9 +272,10 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
 def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash):
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
+
     start = time.time()
 
-    process = subprocess.run(  # noqa: S602
+    process = subprocess.run(  # noqa S602
         cmd,
         shell=True,
         capture_output=True,
@@ -328,23 +323,13 @@ def _broad_phase_search(
     tasks = []
     logger.info("Broad phase index file sizes:")
     total_io_bytes = 0
-
-    # Cache each index exactly once
-    cached_indices: dict[str, str] = {}
-
-    for index in indices:
-        cached_indices[index] = maybe_cache_index(index)
-
     for index in indices:
         size_bytes = os.path.getsize(index)
         atom_count = sum(len(atoms) for atoms in rule_atoms.values())
         total_io_bytes += size_bytes * atom_count
-
-        cached_index = cached_indices[index]
-
         for rule_name, s_list in search_strings.items():
             for s in s_list:
-                tasks.append((cached_index, rule_name, s))
+                tasks.append((maybe_cache_index(index), rule_name, s))
     logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
     searches_complete = 0
@@ -359,61 +344,56 @@ def _broad_phase_search(
     rule_matches: RuleFileMatches = {rule: [] for rule in rule_atoms}
     file_config: FileConfig = {}
 
-    try:
-        with mp.Pool() as pool:
-            # starmap is pickle‑safe and expands tuples automatically
-            for (
-                rule_name,
-                index,
-                search_string,
-                returncode,
+    with mp.Pool() as pool:
+        # starmap is pickle‑safe and expands tuples automatically
+        for (
+            rule_name,
+            index,
+            search_string,
+            returncode,
+            stdout,
+            stderr,
+            duration,
+        ) in pool.starmap(worker, tasks):
+            prom_bgparse_duration.labels(
+                query_hash=query_hash,
+                index_path=index,
+                rule_name=rule_name,
+            ).observe(duration)
+            # ------------------------------------------------------------
+            # Error handling
+            # ------------------------------------------------------------
+            if returncode != 0:
+                raise BiggrepException(
+                    f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
+                )
+
+            if b"<error>" in stderr:
+                error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
+                raise BiggrepException(
+                    f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
+                )
+
+            # ------------------------------------------------------------
+            # 5. Aggregate results
+            # ------------------------------------------------------------
+            new_matches, file_config = _process_bgparse_output(
                 stdout,
-                stderr,
-                duration,
-            ) in pool.starmap(worker, tasks):
-                prom_bgparse_duration.labels(
-                    query_hash=query_hash,
-                    index_path=index,
-                    rule_name=rule_name,
-                ).observe(duration)
-                # ------------------------------------------------------------
-                # Error handling
-                # ------------------------------------------------------------
-                if returncode != 0:
-                    raise BiggrepException(
-                        f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
-                    )
+                rule_name,
+                rule_matches[rule_name],
+                file_config,
+                query_hash=query_hash,
+                index_path=index,
+            )
+            rule_matches[rule_name].extend(new_matches)
 
-                if b"<error>" in stderr:
-                    error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
-                    raise BiggrepException(
-                        f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
-                    )
-
-                # ------------------------------------------------------------
-                # 5. Aggregate results
-                # ------------------------------------------------------------
-                new_matches, file_config = _process_bgparse_output(
-                    stdout,
-                    rule_name,
-                    rule_matches[rule_name],
-                    file_config,
-                    query_hash=query_hash,
-                    index_path=index,
-                )
-                rule_matches[rule_name].extend(new_matches)
-
-                searches_complete += 1
-                progress_callback(
-                    SearchPhaseEnum.BROAD_PHASE,
-                    searches_complete,
-                    search_count,
-                    (rule_name, new_matches),
-                )
-    finally:
-        for cached_index in cached_indices.values():
-            if cached_index.startswith(RAM_DIR):
-                decrement_refcount(cached_index + ".ref")
+            searches_complete += 1
+            progress_callback(
+                SearchPhaseEnum.BROAD_PHASE,
+                searches_complete,
+                search_count,
+                (rule_name, new_matches),
+            )
 
     if all(len(v) == 0 for v in rule_matches.values()):
         raise NoIndexMatchesException("Search aborted due to index matches.")
@@ -603,164 +583,26 @@ def get_free_shm_bytes():
     return stat.f_bavail * stat.f_frsize
 
 
-def mmap_index(index_path: str) -> mmap.mmap:
-    """Map Index file."""
-    fd = os.open(index_path, os.O_RDONLY)
-    try:
-        mm = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
-        return mm
-    finally:
-        os.close(fd)
-
-
-def increment_refcount(ref_path: str) -> int:
-    """Increment ref count."""
-    return locked_update(ref_path, lambda c: c + 1)
-
-
-def decrement_refcount(ref_path: str):
-    """Decrement ref count."""
-    try:
-        locked_update(
-            ref_path,
-            lambda c: max(0, c - 1),
-        )
-    except FileNotFoundError:
-        pass
-
-
-def locked_update(ref_path: str, update_fn) -> int:
-    """Atomically update a refcount file."""
-    # Ensure file exists
-    open(ref_path, "a").close()
-
-    with open(ref_path, "r+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-
-        try:
-            f.seek(0)
-            content = f.read().strip()
-
-            try:
-                count = int(content) if content else 0
-            except ValueError:
-                logger.error(
-                    "Corrupt refcount file %s (first 100 chars: %s)",
-                    ref_path,
-                    content[:100],
-                )
-                count = 0
-
-            count = update_fn(count)
-
-            f.seek(0)
-            f.truncate()
-            f.write(str(count))
-            f.flush()
-            os.fsync(f.fileno())
-
-            return count
-
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-
-
-def cleanup_cached_indices(indices):
-    """Cleanup cached indices whose refcount has reached zero."""
-    for index_path in indices:
-        ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
-        ref_path = ram_path + ".ref"
-        cache_lock = ram_path + ".lock"
-
-        if not os.path.exists(ref_path):
-            continue
-
-        try:
-            with open(cache_lock, "a") as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
-
-                try:
-                    with open(ref_path, "r+") as f:
-                        fcntl.flock(f, fcntl.LOCK_EX)
-
-                        try:
-                            f.seek(0)
-                            content = f.read().strip()
-
-                            try:
-                                count = int(content) if content else 0
-                            except ValueError:
-                                logger.warning(
-                                    "Corrupt refcount file %s during cleanup",
-                                    ref_path,
-                                )
-                                count = 0
-
-                            if count == 0:
-                                for path in (ram_path, ref_path):
-                                    try:
-                                        os.remove(path)
-                                    except FileNotFoundError:
-                                        pass
-
-                                logger.info(
-                                    "Deleted cached index %s (refcount=0)",
-                                    ram_path,
-                                )
-
-                        finally:
-                            fcntl.flock(f, fcntl.LOCK_UN)
-
-                finally:
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
-
-        except FileNotFoundError:
-            continue
-
-
 def maybe_cache_index(index_path: str) -> str:
-    """Cache index files where we can."""
+    """Decide whether to use memory or pvc dir."""
     size_bytes = os.path.getsize(index_path)
     shm_free = get_free_shm_bytes()
 
-    # Too small -> use PVC
-    if size_bytes < MIN_CACHE_BYTES:
-        return index_path
+    logger.info(f"Index {index_path} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
 
-    # Too large -> use PVC
+    # Too large → use PVC
     if size_bytes > MAX_MMAP_BYTES:
+        logger.warning(f"Index > 16GB, using PVC: {index_path}")
         return index_path
 
-    # Not enough shm -> use PVC
+    # Not enough shm → use PVC
     if size_bytes > shm_free:
+        logger.warning(f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}")
         return index_path
 
-    ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
-    ref_path = ram_path + ".ref"
-    cache_lock = ram_path + ".lock"
-
-    with open(cache_lock, "a") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-
-        try:
-            if os.path.exists(ram_path):
-                increment_refcount(ref_path)
-                logger.debug(f"Reusing cached index: {ram_path}")
-                return ram_path
-
-            shutil.copyfile(index_path, ram_path)
-
-            if not os.path.exists(ref_path):
-                with open(ref_path, "w") as f:
-                    f.write("0")
-
-            increment_refcount(ref_path)
-
-            logger.info(f"Copied index to shm: {ram_path}")
-            return ram_path
-
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    # mmap directly from original file
+    logger.info(f"Using mmap directly on {index_path}")
+    return index_path
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
