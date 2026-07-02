@@ -1,6 +1,7 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
+import fcntl
 import hashlib
 import logging
 import mmap
@@ -224,6 +225,7 @@ def search(
             query_hash=query_hash,
         )
 
+    cleanup_cached_indices(indices)
     return rule_matches
 
 
@@ -286,6 +288,11 @@ def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash)
     )
 
     duration = time.time() - start
+
+    # Decrement refcount if this worker used a cached index
+    if index.startswith(RAM_DIR):
+        ref_path = index + ".ref"
+        decrement_refcount(ref_path, index)
 
     return (
         rule_name,
@@ -597,35 +604,106 @@ def mmap_index(index_path: str) -> mmap.mmap:
         os.close(fd)
 
 
+def increment_refcount(ref_path: str):
+    """Increment ref count."""
+    with open(ref_path, "a+") as f:
+        f.seek(0)
+        try:
+            count = int(f.read() or "0")
+        except ValueError:
+            count = 0
+        count += 1
+        f.seek(0)
+        f.write(str(count))
+        f.truncate()
+
+
+def decrement_refcount(ref_path: str, ram_path: str):
+    """Decrement ref count."""
+    with open(ref_path, "r+") as f:
+        f.seek(0)
+        count = int(f.read() or "0")
+        count -= 1
+        f.seek(0)
+        f.write(str(count))
+        f.truncate()
+
+    if count <= 0:
+        os.remove(ram_path)
+        os.remove(ref_path)
+
+
+def locked_update(ref_path, update_fn):
+    """Lock refcount file when updating."""
+    with open(ref_path, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        content = f.read()
+        count = int(content or "0")
+        count = update_fn(count)
+        f.seek(0)
+        f.write(str(count))
+        f.truncate()
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return count
+
+
+def cleanup_cached_indices(indices):
+    """Cleanup index files in cache."""
+    for index_path in indices:
+        ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
+        ref_path = ram_path + ".ref"
+
+        if not os.path.exists(ref_path):
+            continue
+
+        # Read refcount
+        with open(ref_path, "r") as f:
+            try:
+                count = int(f.read() or "0")
+            except ValueError:
+                count = 0
+
+        # Only delete if refcount is zero
+        if count == 0:
+            try:
+                os.remove(ram_path)
+                os.remove(ref_path)
+                logger.info(f"Deleted cached index {ram_path} (refcount=0)")
+            except FileNotFoundError:
+                pass
+
+
 def maybe_cache_index(index_path: str) -> str:
-    """Decide whether to pass BGParse index in ram or PVC."""
+    """Cache index files where we can."""
     size_bytes = os.path.getsize(index_path)
     shm_free = get_free_shm_bytes()
 
-    logger.info(f"Index {index_path} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
+    ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
+    ref_path = ram_path + ".ref"
 
-    # Too small not worth caching
+    # Already cached increment refcount and reuse
+    if os.path.exists(ram_path):
+        locked_update(ref_path, lambda c: c + 1)
+        logger.info(f"Index already cached in shm: {ram_path}")
+        return ram_path
+
+    # Too small use PVC
     if size_bytes < MIN_CACHE_BYTES:
-        logger.info(f"Index < {MIN_CACHE_BYTES / 1e6:.2f}MB, using PVC: {index_path}")
         return index_path
 
     # Too large use PVC
     if size_bytes > MAX_MMAP_BYTES:
-        logger.warning(f"Index > {MAX_MMAP_BYTES / 1e9:.1f}GB, using PVC: {index_path}")
         return index_path
 
     # Not enough shm use PVC
     if size_bytes > shm_free:
-        logger.warning(f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}")
         return index_path
 
-    ram_path = os.path.join(RAM_DIR, os.path.basename(index_path))
-
-    if not os.path.exists(ram_path):
-        logger.info(f"Copying index to shm: {index_path} → {ram_path}")
-        shutil.copyfile(index_path, ram_path)
-
-    logger.info(f"Using shm index: {ram_path}")
+    # Cache it
+    shutil.copyfile(index_path, ram_path)
+    locked_update(ref_path, lambda c: c + 1)
+    logger.info(f"Copied index to shm: {ram_path}")
     return ram_path
 
 
