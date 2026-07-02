@@ -330,7 +330,7 @@ def _broad_phase_search(
         for rule_name, s_list in search_strings.items():
             for s in s_list:
                 # tasks.append((maybe_cache_index(index), rule_name, s))
-                tasks.append(index, rule_name, s)
+                tasks.append((index, rule_name, s))
     logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
     searches_complete = 0
