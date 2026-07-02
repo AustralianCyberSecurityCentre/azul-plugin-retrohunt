@@ -329,7 +329,8 @@ def _broad_phase_search(
         total_io_bytes += size_bytes * atom_count
         for rule_name, s_list in search_strings.items():
             for s in s_list:
-                tasks.append((maybe_cache_index(index), rule_name, s))
+                # tasks.append((maybe_cache_index(index), rule_name, s))
+                tasks.append(index, rule_name, s)
     logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
     searches_complete = 0
@@ -583,26 +584,26 @@ def get_free_shm_bytes():
     return stat.f_bavail * stat.f_frsize
 
 
-def maybe_cache_index(index_path: str) -> str:
-    """Decide whether to use memory or pvc dir."""
-    size_bytes = os.path.getsize(index_path)
-    shm_free = get_free_shm_bytes()
+# def maybe_cache_index(index_path: str) -> str:
+#    """Decide whether to use memory or pvc dir."""
+#    size_bytes = os.path.getsize(index_path)
+#    shm_free = get_free_shm_bytes()
 
-    logger.info(f"Index {index_path} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
+#    logger.info(f"Index {index_path} size={size_bytes / 1e6:.2f}MB shm_free={shm_free / 1e6:.2f}MB")
 
-    # Too large → use PVC
-    if size_bytes > MAX_MMAP_BYTES:
-        logger.warning(f"Index > 16GB, using PVC: {index_path}")
-        return index_path
+# Too large → use PVC
+#    if size_bytes > MAX_MMAP_BYTES:
+# logger.warning(f"Index > 16GB, using PVC: {index_path}")
+#        return index_path
 
-    # Not enough shm → use PVC
-    if size_bytes > shm_free:
-        logger.warning(f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}")
-        return index_path
+# Not enough shm → use PVC
+#    if size_bytes > shm_free:
+# logger.warning(f"Not enough shm ({shm_free / 1e6:.2f}MB), using PVC: {index_path}")
+#        return index_path
 
-    # mmap directly from original file
-    logger.info(f"Using mmap directly on {index_path}")
-    return index_path
+# mmap directly from original file
+# logger.info(f"Using mmap directly on {index_path}")
+#    return index_path
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
