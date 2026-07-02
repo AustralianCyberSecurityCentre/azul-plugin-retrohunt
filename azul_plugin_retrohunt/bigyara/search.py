@@ -280,35 +280,23 @@ def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash)
     cmd = f"{bgparse_exec} {search_string}{index}"
     start = time.time()
 
-    try:
-        process = subprocess.run(  # noqa: S602
-            cmd,
-            shell=True,
-            capture_output=True,
-        )
+    process = subprocess.run(  # noqa: S602
+        cmd,
+        shell=True,
+        capture_output=True,
+    )
 
-        duration = time.time() - start
+    duration = time.time() - start
 
-        return (
-            rule_name,
-            index,
-            search_string,
-            process.returncode,
-            process.stdout,
-            process.stderr,
-            duration,
-        )
-
-    finally:
-        # Ensure refcount is always decremented for cached indices
-        if index.startswith(RAM_DIR):
-            try:
-                decrement_refcount(index + ".ref", index)
-            except Exception:
-                logger.exception(
-                    "Failed to decrement cache refcount for %s",
-                    index,
-                )
+    return (
+        rule_name,
+        index,
+        search_string,
+        process.returncode,
+        process.stdout,
+        process.stderr,
+        duration,
+    )
 
 
 def _broad_phase_search(
@@ -340,13 +328,23 @@ def _broad_phase_search(
     tasks = []
     logger.info("Broad phase index file sizes:")
     total_io_bytes = 0
+
+    # Cache each index exactly once
+    cached_indices: dict[str, str] = {}
+
+    for index in indices:
+        cached_indices[index] = maybe_cache_index(index)
+
     for index in indices:
         size_bytes = os.path.getsize(index)
         atom_count = sum(len(atoms) for atoms in rule_atoms.values())
         total_io_bytes += size_bytes * atom_count
+
+        cached_index = cached_indices[index]
+
         for rule_name, s_list in search_strings.items():
             for s in s_list:
-                tasks.append((maybe_cache_index(index), rule_name, s))
+                tasks.append((cached_index, rule_name, s))
     logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
     searches_complete = 0
@@ -361,56 +359,61 @@ def _broad_phase_search(
     rule_matches: RuleFileMatches = {rule: [] for rule in rule_atoms}
     file_config: FileConfig = {}
 
-    with mp.Pool() as pool:
-        # starmap is pickle‑safe and expands tuples automatically
-        for (
-            rule_name,
-            index,
-            search_string,
-            returncode,
-            stdout,
-            stderr,
-            duration,
-        ) in pool.starmap(worker, tasks):
-            prom_bgparse_duration.labels(
-                query_hash=query_hash,
-                index_path=index,
-                rule_name=rule_name,
-            ).observe(duration)
-            # ------------------------------------------------------------
-            # Error handling
-            # ------------------------------------------------------------
-            if returncode != 0:
-                raise BiggrepException(
-                    f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
-                )
-
-            if b"<error>" in stderr:
-                error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
-                raise BiggrepException(
-                    f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
-                )
-
-            # ------------------------------------------------------------
-            # 5. Aggregate results
-            # ------------------------------------------------------------
-            new_matches, file_config = _process_bgparse_output(
-                stdout,
+    try:
+        with mp.Pool() as pool:
+            # starmap is pickle‑safe and expands tuples automatically
+            for (
                 rule_name,
-                rule_matches[rule_name],
-                file_config,
-                query_hash=query_hash,
-                index_path=index,
-            )
-            rule_matches[rule_name].extend(new_matches)
+                index,
+                search_string,
+                returncode,
+                stdout,
+                stderr,
+                duration,
+            ) in pool.starmap(worker, tasks):
+                prom_bgparse_duration.labels(
+                    query_hash=query_hash,
+                    index_path=index,
+                    rule_name=rule_name,
+                ).observe(duration)
+                # ------------------------------------------------------------
+                # Error handling
+                # ------------------------------------------------------------
+                if returncode != 0:
+                    raise BiggrepException(
+                        f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
+                    )
 
-            searches_complete += 1
-            progress_callback(
-                SearchPhaseEnum.BROAD_PHASE,
-                searches_complete,
-                search_count,
-                (rule_name, new_matches),
-            )
+                if b"<error>" in stderr:
+                    error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
+                    raise BiggrepException(
+                        f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
+                    )
+
+                # ------------------------------------------------------------
+                # 5. Aggregate results
+                # ------------------------------------------------------------
+                new_matches, file_config = _process_bgparse_output(
+                    stdout,
+                    rule_name,
+                    rule_matches[rule_name],
+                    file_config,
+                    query_hash=query_hash,
+                    index_path=index,
+                )
+                rule_matches[rule_name].extend(new_matches)
+
+                searches_complete += 1
+                progress_callback(
+                    SearchPhaseEnum.BROAD_PHASE,
+                    searches_complete,
+                    search_count,
+                    (rule_name, new_matches),
+                )
+    finally:
+        for cached_index in cached_indices.values():
+            if cached_index.startswith(RAM_DIR):
+                decrement_refcount(cached_index + ".ref")
 
     if all(len(v) == 0 for v in rule_matches.values()):
         raise NoIndexMatchesException("Search aborted due to index matches.")
@@ -615,7 +618,7 @@ def increment_refcount(ref_path: str) -> int:
     return locked_update(ref_path, lambda c: c + 1)
 
 
-def decrement_refcount(ref_path: str, ram_path: str):
+def decrement_refcount(ref_path: str):
     """Decrement ref count."""
     try:
         locked_update(
