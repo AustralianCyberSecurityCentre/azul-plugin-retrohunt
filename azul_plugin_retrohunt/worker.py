@@ -316,8 +316,6 @@ def main():
     exception_sleep = settings.redis.exception_wait
     start_http_server(settings.prometheus_port_worker)
 
-    os.makedirs("/dev/shm/retrohunt_ram", exist_ok=True)  # noqa: S108
-
     dp = dispatcher.DispatcherAPI(
         events_url=settings.events_url,
         data_url=settings.data_url,
