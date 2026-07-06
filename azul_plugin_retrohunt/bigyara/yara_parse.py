@@ -163,6 +163,15 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
                 )
 
             if len(yara_string.atoms) == 0:
+                # add debug logger
+                logger.error(
+                        "No atoms found: rule=%s string=%s modifiers=%s regex=%r",
+                        yara_rules[rule_index].name,
+                        yara_string.name,
+                        yara_string.modifiers,
+                        yara_string.re,
+                    )
+
                 raise YaraStringNoAtomException(
                     f"Failed to find any valid atoms for string {yara_string.name} in {yara_rules[rule_index].name}"
                 )
