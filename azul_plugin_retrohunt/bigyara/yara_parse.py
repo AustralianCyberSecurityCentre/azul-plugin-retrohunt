@@ -10,6 +10,7 @@ import os
 import re
 import subprocess  # noqa: S404  # nosec: B404
 import tempfile
+from dataclasses import dataclass, field
 from itertools import product
 
 from azul_plugin_retrohunt.bigyara.env import executables
@@ -57,16 +58,59 @@ class YaraRule:
     content: bytes
 
 
+@dataclass
+class RuleSearchPlan:
+    """Search plan object."""
+
+    atoms: list[bytes] = field(default_factory=list)
+
+    # OR of groups
+    groups: list[set[bytes]] = field(default_factory=list)
+
+    # condition metadata
+    condition_type: str = "unknown"
+
+    # n of them
+    required_count: int | None = None
+
+    # total strings available
+    total_count: int | None = None
+
+    raw_condition: str = ""
+
+
 # these are redefined aliases from the search module to avoid circular dependency
 RuleFileMatches = dict[str, list[str]]
 RuleAtoms = dict[str, list[bytes]]
 RuleContent = dict[str, bytes]
-RuleSearchGroups = dict[str, list[set[bytes]]]
+RuleSearchPlans = dict[str, RuleSearchPlan]
+
+
+def _parse_condition_metadata(
+    condition_text: str,
+    string_count: int,
+) -> tuple[str, int | None]:
+    """Extract simple condition metadata from a YARA condition."""
+    if re.search(r"\bany\s+of\s+them\b", condition_text, re.IGNORECASE):
+        return ("any", 1)
+
+    if re.search(r"\ball\s+of\s+them\b", condition_text, re.IGNORECASE):
+        return ("all", string_count)
+
+    match = re.search(
+        r"\b(\d+)\s+of\s+them\b",
+        condition_text,
+        re.IGNORECASE,
+    )
+    if match:
+        return ("n_of", int(match.group(1)))
+
+    return ("unknown", None)
 
 
 def parse_yara_rules(
     rule_text: str, progress_callback: ProgressCallback
-) -> tuple[RuleAtoms, RuleContent, RuleSearchGroups]:
+) -> tuple[RuleAtoms, RuleContent, RuleSearchPlans]:
     """Compile the yara rule, parsing out search atoms.
 
     Will parse the yara rule with small atoms first to determine
@@ -75,7 +119,7 @@ def parse_yara_rules(
     """
     yara_rules: list[YaraRule]
     rule_atoms: RuleAtoms = {}
-    rule_search_groups: RuleSearchGroups = {}
+    rule_search_plans: RuleSearchPlans = {}
 
     # write the yara rules to a file
     tmp_path: str
@@ -218,14 +262,19 @@ def parse_yara_rules(
         # singleton groups so all atom information is preserved.
         # -----------------------------------------------------------------
 
-        rule_search_groups[rule_name] = [set(group) for group in all_regex_groups]
+        groups = [set(group) for group in all_regex_groups]
 
-        grouped_atoms = {atom for group in rule_search_groups[rule_name] for atom in group}
+        grouped_atoms = {atom for group in groups for atom in group}
 
         for atom in new_atoms:
             if atom not in grouped_atoms:
-                rule_search_groups[rule_name].append({atom})
+                groups.append({atom})
 
+        rule_search_plans[rule_name] = RuleSearchPlan(
+            atoms=new_atoms.copy(),
+            groups=groups,
+            total_count=len(yara_rules[rule_index].strings),
+        )
         logger.info(f'Found {len(rule_atoms[rule_name])} atoms for "{rule_name}"')
 
         # -----------------------------------------------------------------
@@ -234,30 +283,63 @@ def parse_yara_rules(
         # This tells us whether there is meaningful AND structure hidden
         # inside the regex atom trees that bgparse could exploit.
         # -----------------------------------------------------------------
-        if rule_search_groups[rule_name]:
+        if rule_name in rule_search_plans:
+            plan = rule_search_plans[rule_name]
+
             logger.info(
                 'Rule "%s" atoms=%d search_groups=%d largest_group=%d',
                 rule_name,
-                len(new_atoms),
-                len(rule_search_groups[rule_name]),
-                max(len(g) for g in rule_search_groups[rule_name]),
+                len(plan.atoms),
+                len(plan.groups),
+                max((len(g) for g in plan.groups), default=0),
             )
 
             logger.debug(
                 'Rule "%s" search groups: %s',
                 rule_name,
-                [[atom.hex() for atom in group] for group in rule_search_groups[rule_name]],
+                [[atom.hex() for atom in group] for group in plan.groups],
             )
 
     rule_content: RuleContent = {}
-    condition_re = re.compile(r"rule (.+?)(?:\:.+?)?{.+?condition:(.+?)}", re.DOTALL)
+
+    condition_re = re.compile(
+        r"rule (.+?)(?:\:.+?)?{.+?condition:(.+?)}",
+        re.DOTALL,
+    )
+
     for match in re.finditer(condition_re, rule_text):
         re_rule_name = match.group(1).strip()
+        condition_text = match.group(2).strip()
+
         for match_rule_name in rule_atoms:
-            if match_rule_name == re_rule_name:
-                rule_content[match_rule_name] = match.group(0)
-    logger.info("Search groups: ", rule_search_groups)
-    return rule_atoms, rule_content, rule_search_groups
+            if match_rule_name != re_rule_name:
+                continue
+
+            rule_content[match_rule_name] = match.group(0)
+
+            if match_rule_name in rule_search_plans:
+                plan = rule_search_plans[match_rule_name]
+
+                plan.raw_condition = condition_text
+
+                condition_type, required_count = _parse_condition_metadata(
+                    condition_text,
+                    plan.total_count or 0,
+                )
+
+                plan.condition_type = condition_type
+                plan.required_count = required_count
+
+                logger.info(
+                    'Rule "%s" condition=%s required=%s total=%s',
+                    match_rule_name,
+                    plan.condition_type,
+                    plan.required_count,
+                    plan.total_count,
+                )
+
+    logger.info("Search groups: ", rule_search_plans)
+    return rule_atoms, rule_content, rule_search_plans
 
 
 def _yara_process_flags(current_rule: YaraRule, current_string: YaraString, flags: int):

@@ -189,7 +189,7 @@ def search(
 
     query_hash = hashlib.sha256(query.encode()).hexdigest()
 
-    rule_atoms, rule_content, _ = _atom_parse(query, query_type, checked_progress_callback)
+    rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search optimised")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
