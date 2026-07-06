@@ -199,10 +199,9 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
         # -----------------------------------------------------------------
         if search_group_count > 0:
             logger.info(
-                'Rule "%s" produced %d regex search groups (largest AND group=%d)',
+                'Rule "%s" search groups: %s',
                 yara_rules[rule_index].name,
-                search_group_count,
-                largest_group,
+                [[a.hex() for a in group] for group in regex_searches],
             )
 
     rule_content: RuleContent = {}
