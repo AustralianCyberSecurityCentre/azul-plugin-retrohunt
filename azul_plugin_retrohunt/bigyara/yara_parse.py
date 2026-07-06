@@ -273,7 +273,7 @@ def parse_yara_rules(
         rule_search_plans[rule_name] = RuleSearchPlan(
             atoms=new_atoms.copy(),
             groups=groups,
-            total_count=len(yara_rules[rule_index].strings),
+            string_count=len(yara_rules[rule_index].strings),
         )
         logger.info(f'Found {len(rule_atoms[rule_name])} atoms for "{rule_name}"')
 
@@ -324,7 +324,7 @@ def parse_yara_rules(
 
                 condition_type, required_count = _parse_condition_metadata(
                     condition_text,
-                    plan.total_count or 0,
+                    plan.string_count or 0,
                 )
 
                 plan.condition_type = condition_type
@@ -335,7 +335,7 @@ def parse_yara_rules(
                     match_rule_name,
                     plan.condition_type,
                     plan.required_count,
-                    plan.total_count,
+                    plan.string_count,
                 )
 
     for rule_name, plan in rule_search_plans.items():
@@ -344,7 +344,7 @@ def parse_yara_rules(
             rule_name,
             plan.condition_type,
             plan.required_count,
-            plan.total_count,
+            plan.string_count,
             [len(g) for g in plan.groups],
         )
     return rule_atoms, rule_content, rule_search_plans

@@ -346,7 +346,7 @@ def _broad_phase_search(
         total_io_bytes += size_bytes * atom_count
         for rule_name, s_list in search_strings.items():
             for s in s_list:
-                get_free_shm_bytes()
+                # get_free_shm_bytes()
                 tasks.append((index, rule_name, s))
     logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
@@ -609,9 +609,9 @@ def _narrow_phase_search(
     return final_matches
 
 
-def get_free_shm_bytes():
-    """Warm up."""
-    _ = os.statvfs("/dev/shm")  # noqa: S108
+# def get_free_shm_bytes():
+#    """Warm up."""
+#    _ = os.statvfs("/dev/shm")  # noqa: S108
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
