@@ -464,50 +464,31 @@ def _narrow_phase_search(
     # Convert rule_matches to sets for fast removal
     rule_matches_sets: dict[str, set[str]] = {rule_name: set(paths) for rule_name, paths in rule_matches.items()}
 
-    # Invert mapping: file -> rules
+    # Invert mapping: file → rules
     file_to_rules: dict[str, set[str]] = defaultdict(set)
     for rule_name, paths in rule_matches_sets.items():
-        for path in paths:
-            file_to_rules[path].add(rule_name)
+        for p in paths:
+            file_to_rules[p].add(rule_name)
 
-    if file_to_rules:
-        candidate_rule_counts = [len(v) for v in file_to_rules.values()]
-
-        logger.info(
-            "narrow phase stats: files=%d avg_rules=%.2f max_rules=%d total_candidates=%d",
-            len(candidate_rule_counts),
-            sum(candidate_rule_counts) / len(candidate_rule_counts),
-            max(candidate_rule_counts),
-            sum(candidate_rule_counts),
-        )
-
-    # Compile all YARA rules into a single ruleset
-    combined_yara = None
-
+    # Precompile YARA rules once
+    compiled_yara_rules = {}
     if queryType == QueryTypeEnum.YARA:
-        yara_sources = {}
-
         for rule_name, content in rule_content.items():
             if not content.startswith('import "pe"\n'):
-                content = 'import "pe"\n' + content
+                rule_content[rule_name] = 'import "pe"\n' + content
+            compiled_yara_rules[rule_name] = yara.compile(source=rule_content[rule_name])
 
-            yara_sources[rule_name] = content
-
-        combined_yara = yara.compile(sources=yara_sources)
-
+    # Precompute total jobs
     total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
     jobs_complete = 0
 
-    progress_callback(
-        SearchPhaseEnum.NARROW_PHASE,
-        0,
-        total_jobs,
-        None,
-    )
+    progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
 
-    def worker(file_path: str, rules_for_file: frozenset[str]):
+    # ------------------------------------------------------------
+    # Worker function (pure, no side effects)
+    # ------------------------------------------------------------
+    def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
         cfg = file_config.get(file_path)
-
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
             data = data_callback(file_path, cfg)
 
@@ -516,105 +497,73 @@ def _narrow_phase_search(
 
         if not data:
             prom_missing_files.labels(query_hash=query_hash).inc()
+            return ("missing", file_path, rules_for_file, None)
 
-            return (
-                "missing",
-                file_path,
-                rules_for_file,
-                None,
-            )
+        results = []
+        for rule_name in rules_for_file:
+            if queryType == QueryTypeEnum.YARA:
+                with prom_narrow_cpu_duration.labels(
+                    query_hash=query_hash,
+                    rule_name=rule_name,
+                ).time():
+                    matched = (
+                        len(
+                            compiled_yara_rules[rule_name].match(
+                                data=data,
+                                callback=yara_callback,
+                                which_callbacks=yara.CALLBACK_MATCHES,
+                                fast=True,
+                                timeout=60,
+                            )
+                        )
+                        > 0
+                    )
+            elif queryType == QueryTypeEnum.SURICATA:
+                matched = _run_suricata(rule_content[rule_name], file_path, data)
 
-        if queryType == QueryTypeEnum.YARA:
-            with prom_narrow_cpu_duration.labels(
-                query_hash=query_hash,
-                rule_name="combined",
-            ).time():
-                # IMPORTANT:
-                # Do not use CALLBACK_ABORT here.
-                matches = combined_yara.match(
-                    data=data,
-                    fast=True,
-                    timeout=60,
-                )
+            results.append((rule_name, matched))
 
-            matched_rules = {m.rule for m in matches}
+        return ("ok", file_path, rules_for_file, results)
 
-            return (
-                "ok",
-                file_path,
-                rules_for_file,
-                matched_rules,
-            )
-
-        if queryType == QueryTypeEnum.SURICATA:
-            matched_rules = {
-                rule_name
-                for rule_name in rules_for_file
-                if _run_suricata(
-                    rule_content[rule_name],
-                    file_path,
-                    data,
-                )
-            }
-
-            return (
-                "ok",
-                file_path,
-                rules_for_file,
-                matched_rules,
-            )
-
-        return (
-            "ok",
-            file_path,
-            rules_for_file,
-            set(),
-        )
-
-    from concurrent.futures import as_completed
-
+    # ------------------------------------------------------------
+    # Run workers in parallel
+    # ------------------------------------------------------------
     futures = []
-
     with ThreadPoolExecutor() as executor:
         for file_path, rules_for_file in file_to_rules.items():
-            futures.append(
-                executor.submit(
-                    worker,
-                    file_path,
-                    frozenset(rules_for_file),
-                )
-            )
+            futures.append(executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash))
 
-        for future in as_completed(futures):
-            status, file_path, rules_for_file, matched_rules = future.result()
+        # Process results in deterministic order
+        for f in futures:
+            status, file_path, rules_for_file, results = f.result()
 
             if status == "missing":
                 for rule_name in rules_for_file:
                     total_jobs -= 1
                     rule_matches_sets[rule_name].discard(file_path)
-
                 continue
 
-            for rule_name in rules_for_file:
+            for rule_name, matched in results:
                 jobs_complete += 1
 
-                matched = rule_name in matched_rules
-
-                if not matched:
+                if matched:
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        (rule_name, [file_path]),
+                    )
+                else:
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        (rule_name, []),
+                    )
                     rule_matches_sets[rule_name].discard(file_path)
 
-                progress_callback(
-                    SearchPhaseEnum.NARROW_PHASE,
-                    jobs_complete,
-                    total_jobs,
-                    (
-                        rule_name,
-                        [file_path] if matched else [],
-                    ),
-                )
-
+    # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
-
     for rule_name, paths in rule_matches_sets.items():
         if paths:
             final_matches[rule_name] = list(paths)

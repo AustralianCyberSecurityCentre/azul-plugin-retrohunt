@@ -107,12 +107,60 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
 
     for rule_index in range(len(yara_rules)):
         new_atoms: list[bytes] = []
+
+        # -----------------------------------------------------------------
+        # NEW: track potential bgparse AND groups for future optimisation.
+        #
+        # A search group represents:
+        #
+        #     atom1 AND atom2 AND atom3
+        #
+        # while multiple groups represent:
+        #
+        #     group1 OR group2 OR group3
+        #
+        # We don't use these yet, but we log them so we can determine
+        # whether smarter bgparse usage will actually help.
+        # -----------------------------------------------------------------
+        search_group_count = 0
+        largest_group = 0
+
         for yara_string in yara_rules[rule_index].strings:
             if "nocase" not in yara_string.modifiers and len(yara_string.re) > 0:
                 # If it is nocase or a normal string, the searches are the atoms
                 # if it is a regular expression, pull the searches from the RE tree
                 # FUTURE: this function does a heap of unnecessary work and needs to be refactored.
-                yara_string.atoms = _get_atoms_from_regex(yara_string.re, yara_string.modifiers)
+
+                # ---------------------------------------------------------
+                # NEW: inspect regex structure before flattening atoms.
+                # ---------------------------------------------------------
+                try:
+                    re_tree_root: AtomTreeNode = _parse_re_tree(yara_string.re)
+
+                    regex_searches: list[set] = _searches_from_node(re_tree_root)
+                    regex_searches = _remove_bad_atoms(regex_searches)
+                    regex_searches = _get_minimal_atoms(regex_searches)
+
+                    search_group_count += len(regex_searches)
+
+                    if regex_searches:
+                        largest_group = max(
+                            largest_group,
+                            max(len(x) for x in regex_searches),
+                        )
+
+                except Exception as e:
+                    logger.debug(
+                        "Failed to inspect regex structure for string %s in rule %s: %s",
+                        yara_string.name,
+                        yara_rules[rule_index].name,
+                        e,
+                    )
+
+                yara_string.atoms = _get_atoms_from_regex(
+                    yara_string.re,
+                    yara_string.modifiers,
+                )
 
             if len(yara_string.atoms) == 0:
                 raise YaraStringNoAtomException(
@@ -122,15 +170,31 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
             for yara_atom in yara_string.atoms:
                 if yara_atom not in new_atoms:
                     new_atoms.append(yara_atom)
+
         progress_callback(
             SearchPhaseEnum.ATOM_PARSE,
             rule_index + 1,
             len(yara_rules),
             (yara_rules[rule_index].name, new_atoms),
         )
+
         rule_atoms[yara_rules[rule_index].name] = new_atoms
 
         logger.info(f'Found {len(rule_atoms[yara_rules[rule_index].name])} atoms for "{yara_rules[rule_index].name}"')
+
+        # -----------------------------------------------------------------
+        # NEW: instrumentation only.
+        #
+        # This tells us whether there is meaningful AND structure hidden
+        # inside the regex atom trees that bgparse could exploit.
+        # -----------------------------------------------------------------
+        if search_group_count > 0:
+            logger.info(
+                'Rule "%s" produced %d regex search groups (largest AND group=%d)',
+                yara_rules[rule_index].name,
+                search_group_count,
+                largest_group,
+            )
 
     rule_content: RuleContent = {}
     condition_re = re.compile(r"rule (.+?)(?:\:.+?)?{.+?condition:(.+?)}", re.DOTALL)
