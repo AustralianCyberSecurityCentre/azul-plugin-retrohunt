@@ -189,7 +189,7 @@ def search(
 
     query_hash = hashlib.sha256(query.encode()).hexdigest()
 
-    rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
+    rule_atoms, rule_content, _ = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search optimised")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
@@ -251,7 +251,7 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
             rule_atoms[query] = [query.encode()]
             progress_callback(SearchPhaseEnum.ATOM_PARSE, 1, 1, (query, rule_atoms[query]))
     elif query_type == QueryTypeEnum.YARA:
-        rule_atoms, rule_content = parse_yara_rules(query, progress_callback)
+        rule_atoms, rule_content, _ = parse_yara_rules(query, progress_callback)
     elif query_type == QueryTypeEnum.SURICATA:
         rule_atoms, rule_content = parse_suricata_rules(query, progress_callback)
     else:
