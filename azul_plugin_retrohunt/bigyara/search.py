@@ -314,15 +314,25 @@ def _broad_phase_search(
     # ------------------------------------------------------------
     # 1. Precompute hex atoms
     # ------------------------------------------------------------
-    hex_atoms = {rule: [binascii.b2a_hex(a).upper().decode() for a in atoms] for rule, atoms in rule_atoms.items()}
+    # hex_atoms = {rule: [binascii.b2a_hex(a).upper().decode() for a in atoms] for rule, atoms in rule_atoms.items()}
 
     # ------------------------------------------------------------
     # 2. Precompute search strings
     # ------------------------------------------------------------
-    if query_type == QueryTypeEnum.SURICATA:
-        search_strings = {rule: ["-s " + " -s ".join(hex_atoms[rule]) + " "] for rule in rule_atoms}
-    else:
-        search_strings = {rule: [f"-s{h} " for h in hex_atoms[rule]] for rule in rule_atoms}
+    # if query_type == QueryTypeEnum.SURICATA:
+    # search_strings = {rule: ["-s " + " -s ".join(hex_atoms[rule]) + " "] for rule in rule_atoms}
+    # else:
+    # search_strings = {rule: [f"-s{h} " for h in hex_atoms[rule]] for rule in rule_atoms}
+
+    search_strings: dict[str, list[str]] = {}
+
+    for rule_name, plan in rule_search_plans.items():
+        search_strings[rule_name] = []
+
+        for group in plan.groups:
+            for atom in group:
+                hex_atom = binascii.b2a_hex(atom).upper().decode()
+                search_strings[rule_name].append(f"-s{hex_atom} ")
 
     # ------------------------------------------------------------
     # 3. Build flat task list
