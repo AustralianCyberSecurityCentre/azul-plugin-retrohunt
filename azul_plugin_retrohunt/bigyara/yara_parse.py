@@ -61,9 +61,12 @@ class YaraRule:
 RuleFileMatches = dict[str, list[str]]
 RuleAtoms = dict[str, list[bytes]]
 RuleContent = dict[str, bytes]
+RuleSearchGroups = dict[str, list[set[bytes]]]
 
 
-def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tuple[RuleAtoms, RuleContent]:
+def parse_yara_rules(
+    rule_text: str, progress_callback: ProgressCallback
+) -> tuple[RuleAtoms, RuleContent, RuleSearchGroups]:
     """Compile the yara rule, parsing out search atoms.
 
     Will parse the yara rule with small atoms first to determine
@@ -72,6 +75,7 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
     """
     yara_rules: list[YaraRule]
     rule_atoms: RuleAtoms = {}
+    rule_search_groups: RuleSearchGroups = {}
 
     # write the yara rules to a file
     tmp_path: str
@@ -194,9 +198,35 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
             (yara_rules[rule_index].name, new_atoms),
         )
 
-        rule_atoms[yara_rules[rule_index].name] = new_atoms
+        rule_name = yara_rules[rule_index].name
 
-        logger.info(f'Found {len(rule_atoms[yara_rules[rule_index].name])} atoms for "{yara_rules[rule_index].name}"')
+        rule_atoms[rule_name] = new_atoms
+
+        # -----------------------------------------------------------------
+        # NEW: preserve AND/OR search structure for future broad-phase
+        # optimisation.
+        #
+        # Each set represents:
+        #
+        #     atom1 AND atom2 AND atom3
+        #
+        # and the list represents:
+        #
+        #     group1 OR group2 OR group3
+        #
+        # For atoms that are not part of a regex-derived group, create
+        # singleton groups so all atom information is preserved.
+        # -----------------------------------------------------------------
+
+        rule_search_groups[rule_name] = [set(group) for group in all_regex_groups]
+
+        grouped_atoms = {atom for group in rule_search_groups[rule_name] for atom in group}
+
+        for atom in new_atoms:
+            if atom not in grouped_atoms:
+                rule_search_groups[rule_name].append({atom})
+
+        logger.info(f'Found {len(rule_atoms[rule_name])} atoms for "{rule_name}"')
 
         # -----------------------------------------------------------------
         # NEW: instrumentation only.
@@ -204,19 +234,19 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
         # This tells us whether there is meaningful AND structure hidden
         # inside the regex atom trees that bgparse could exploit.
         # -----------------------------------------------------------------
-        if all_regex_groups:
+        if rule_search_groups[rule_name]:
             logger.info(
-                'Rule "%s" group_sizes=%s search_group_count=%d largest_group=%d',
-                yara_rules[rule_index].name,
-                sorted(group_sizes, reverse=True),
-                len(all_regex_groups),
-                largest_group,
+                'Rule "%s" atoms=%d search_groups=%d largest_group=%d',
+                rule_name,
+                len(new_atoms),
+                len(rule_search_groups[rule_name]),
+                max(len(g) for g in rule_search_groups[rule_name]),
             )
 
             logger.debug(
                 'Rule "%s" search groups: %s',
-                yara_rules[rule_index].name,
-                [[a.hex() for a in group] for group in all_regex_groups],
+                rule_name,
+                [[atom.hex() for atom in group] for group in rule_search_groups[rule_name]],
             )
 
     rule_content: RuleContent = {}
@@ -226,8 +256,8 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
         for match_rule_name in rule_atoms:
             if match_rule_name == re_rule_name:
                 rule_content[match_rule_name] = match.group(0)
-
-    return rule_atoms, rule_content
+    logger.info("Search groups: ", rule_search_groups)
+    return rule_atoms, rule_content, rule_search_groups
 
 
 def _yara_process_flags(current_rule: YaraRule, current_string: YaraString, flags: int):
