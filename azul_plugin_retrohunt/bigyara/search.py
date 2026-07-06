@@ -29,7 +29,7 @@ from . import (
 )
 from .env import executables
 from .suricata_parse import parse_suricata_rules
-from .yara_parse import parse_yara_rules
+from .yara_parse import RuleSearchPlans, parse_yara_rules
 
 # FUTURE: multiprocessing has been removed from search functionality.
 #         performance should be investigated and improved where necessary.
@@ -189,13 +189,14 @@ def search(
 
     query_hash = hashlib.sha256(query.encode()).hexdigest()
 
-    rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
+    rule_atoms, rule_content, rule_search_plans = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search optimised")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
             query_type,
             indices,
             rule_atoms,
+            rule_search_plans,
             checked_progress_callback,
             query_hash=query_hash,
         )
@@ -241,9 +242,16 @@ def _get_index_files(directories: list[str], recursive: bool) -> list[str]:
     return index_files
 
 
-def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback) -> tuple[RuleAtoms, RuleContent]:
+def _atom_parse(
+    query: str, query_type: int, progress_callback: ProgressCallback
+) -> tuple[
+    RuleAtoms,
+    RuleContent,
+    RuleSearchPlans,
+]:
     rule_atoms: RuleAtoms = {}
     rule_content: RuleContent = None
+    rule_search_plans: RuleSearchPlans = {}
 
     if query_type == QueryTypeEnum.STRING:
         progress_callback(SearchPhaseEnum.ATOM_PARSE, 0, 1, None)
@@ -251,7 +259,7 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
             rule_atoms[query] = [query.encode()]
             progress_callback(SearchPhaseEnum.ATOM_PARSE, 1, 1, (query, rule_atoms[query]))
     elif query_type == QueryTypeEnum.YARA:
-        rule_atoms, rule_content, _ = parse_yara_rules(query, progress_callback)
+        rule_atoms, rule_content, rule_search_plans = parse_yara_rules(query, progress_callback)
     elif query_type == QueryTypeEnum.SURICATA:
         rule_atoms, rule_content = parse_suricata_rules(query, progress_callback)
     else:
@@ -262,7 +270,7 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
             f"No search atoms found from input - ensure that all atoms will be at least {SEARCH_ATOM_SIZE_MIN} bytes."
         )
 
-    return rule_atoms, rule_content
+    return rule_atoms, rule_content, rule_search_plans
 
 
 # FUTURE: investigate whether there is an alternative to biggrep that allows
@@ -296,12 +304,13 @@ def _broad_phase_search(
     query_type: int,
     indices: list[str],
     rule_atoms: RuleAtoms,
+    rule_search_plans: RuleSearchPlans,
     progress_callback: ProgressCallback,
     query_hash: str,
 ) -> tuple[RuleFileMatches, FileConfig]:
 
     bgparse_exec = executables["bgparse"]
-
+    logger.info("Rule search plans broad phase: %s", rule_search_plans)
     # ------------------------------------------------------------
     # 1. Precompute hex atoms
     # ------------------------------------------------------------

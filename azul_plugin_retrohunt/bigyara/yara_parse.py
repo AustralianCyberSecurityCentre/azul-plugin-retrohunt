@@ -74,7 +74,7 @@ class RuleSearchPlan:
     required_count: int | None = None
 
     # total strings available
-    total_count: int | None = None
+    string_count: int | None = None
 
     raw_condition: str = ""
 
@@ -338,7 +338,15 @@ def parse_yara_rules(
                     plan.total_count,
                 )
 
-    logger.info("Search groups: ", rule_search_plans)
+    for rule_name, plan in rule_search_plans.items():
+        logger.info(
+            'Plan "%s": condition=%s required=%s total=%s groups=%s',
+            rule_name,
+            plan.condition_type,
+            plan.required_count,
+            plan.total_count,
+            [len(g) for g in plan.groups],
+        )
     return rule_atoms, rule_content, rule_search_plans
 
 
