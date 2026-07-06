@@ -124,6 +124,9 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
         # -----------------------------------------------------------------
         search_group_count = 0
         largest_group = 0
+        # NEW: accumulate all regex groups across the entire rule.
+        all_regex_groups: list[set] = []
+        group_sizes: list[int] = []
 
         for yara_string in yara_rules[rule_index].strings:
             if "nocase" not in yara_string.modifiers and len(yara_string.re) > 0:
@@ -140,6 +143,10 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
                     regex_searches: list[set] = _searches_from_node(re_tree_root)
                     regex_searches = _remove_bad_atoms(regex_searches)
                     regex_searches = _get_minimal_atoms(regex_searches)
+
+                    # NEW: keep all groups for logging later.
+                    all_regex_groups.extend(regex_searches)
+                    group_sizes.extend(len(g) for g in regex_searches)
 
                     search_group_count += len(regex_searches)
 
@@ -197,11 +204,19 @@ def parse_yara_rules(rule_text: str, progress_callback: ProgressCallback) -> tup
         # This tells us whether there is meaningful AND structure hidden
         # inside the regex atom trees that bgparse could exploit.
         # -----------------------------------------------------------------
-        if search_group_count > 0:
+        if all_regex_groups:
             logger.info(
+                'Rule "%s" group_sizes=%s search_group_count=%d largest_group=%d',
+                yara_rules[rule_index].name,
+                sorted(group_sizes, reverse=True),
+                len(all_regex_groups),
+                largest_group,
+            )
+
+            logger.debug(
                 'Rule "%s" search groups: %s',
                 yara_rules[rule_index].name,
-                [[a.hex() for a in group] for group in regex_searches],
+                [[a.hex() for a in group] for group in all_regex_groups],
             )
 
     rule_content: RuleContent = {}
