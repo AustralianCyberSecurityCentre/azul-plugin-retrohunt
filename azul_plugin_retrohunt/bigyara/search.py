@@ -395,6 +395,7 @@ def _broad_phase_search(
             # ------------------------------------------------------------
             # 5. Aggregate results
             # ------------------------------------------------------------
+
             new_matches, file_config = _process_bgparse_output(
                 stdout,
                 rule_name,
@@ -403,6 +404,19 @@ def _broad_phase_search(
                 query_hash=query_hash,
                 index_path=index,
             )
+
+            # DEBUG: inspect a few file configs
+            logged_metadata = False
+            if not logged_metadata and file_config:
+                logged_metadata = True
+
+                sample_cfg = next(iter(file_config.values()))
+
+                logger.info(
+                    "Indexed metadata keys: %s",
+                    sorted(k.decode(errors="ignore") for k in sample_cfg),
+                )
+
             rule_matches[rule_name].extend(new_matches)
 
             searches_complete += 1
