@@ -221,8 +221,15 @@ def parse_yara_rules(
         group_sizes: list[int] = []
         string_groups: dict[str, list[int]] = {}
 
-        for yara_string in yara_rules[rule_index].strings:
-            string_groups[yara_string.name] = []
+        for string_idx, yara_string in enumerate(yara_rules[rule_index].strings):
+            string_name = yara_string.name
+
+            # Anonymous YARA strings ($ = ...)
+            # must be treated as distinct strings.
+            if string_name == "$":
+                string_name = f"$anon_{string_idx}"
+
+            string_groups[string_name] = []
             if "nocase" not in yara_string.modifiers and len(yara_string.re) > 0:
                 # If it is nocase or a normal string, the searches are the atoms
                 # if it is a regular expression, pull the searches from the RE tree
@@ -242,7 +249,7 @@ def parse_yara_rules(
                     for search in regex_searches:
                         groups.append(set(search))
 
-                        string_groups[yara_string.name].append(len(groups) - 1)
+                        string_groups[string_name].append(len(groups) - 1)
 
                     group_sizes.extend(len(g) for g in regex_searches)
 
@@ -290,7 +297,7 @@ def parse_yara_rules(
                 for yara_atom in yara_string.atoms:
                     groups.append({yara_atom})
 
-                    string_groups[yara_string.name].append(len(groups) - 1)
+                    string_groups[string_name].append(len(groups) - 1)
 
         progress_callback(
             SearchPhaseEnum.ATOM_PARSE,
