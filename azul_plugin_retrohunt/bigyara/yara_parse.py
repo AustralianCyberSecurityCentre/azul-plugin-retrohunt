@@ -62,6 +62,8 @@ class YaraRule:
 class RuleSearchPlan:
     """Search plan object."""
 
+    string_groups: dict[str, list[int]] = field(default_factory=dict)
+
     atoms: list[bytes] = field(default_factory=list)
 
     # OR of groups
@@ -75,6 +77,11 @@ class RuleSearchPlan:
 
     # total strings available
     string_count: int | None = None
+
+    # $a and $b and <complex_expression>
+    required_strings: set[str] = field(default_factory=set)
+
+    optional_strings: set[str] = field(default_factory=set)
 
     raw_condition: str = ""
 
@@ -106,6 +113,42 @@ def _parse_condition_metadata(
         return ("n_of", int(match.group(1)))
 
     return ("unknown", None)
+
+
+def _extract_required_strings(
+    condition_text: str,
+) -> set:
+    """Extract string identifiers that are definitely required.
+
+    Examples:
+    $a and $b -> {"$a", "$b"}
+
+    $a and $b and some_complex_expression -> {"$a", "$b"}
+
+    $a or $b -> set()
+
+    $cfg_blob and
+    $sleep_mask and
+    for any i in (1..#s1): ( @s1[i] < @s2[1] ) -> {"$cfg_blob", "$sleep_mask"}
+    """
+    required: set[str] = set()
+
+    parts = re.split(
+        r"\band\b",
+        condition_text,
+        flags=re.IGNORECASE,
+    )
+
+    for part in parts:
+        part = part.strip()
+
+        if re.fullmatch(
+            r"\$[A-Za-z_][A-Za-z0-9_]*",
+            part,
+        ):
+            required.add(part)
+
+    return required
 
 
 def parse_yara_rules(
@@ -173,10 +216,13 @@ def parse_yara_rules(
         search_group_count = 0
         largest_group = 0
         # NEW: accumulate all regex groups across the entire rule.
-        all_regex_groups: list[set] = []
+
+        groups: list[set[bytes]] = []
         group_sizes: list[int] = []
+        string_groups: dict[str, list[int]] = {}
 
         for yara_string in yara_rules[rule_index].strings:
+            string_groups[yara_string.name] = []
             if "nocase" not in yara_string.modifiers and len(yara_string.re) > 0:
                 # If it is nocase or a normal string, the searches are the atoms
                 # if it is a regular expression, pull the searches from the RE tree
@@ -193,7 +239,11 @@ def parse_yara_rules(
                     regex_searches = _get_minimal_atoms(regex_searches)
 
                     # NEW: keep all groups for logging later.
-                    all_regex_groups.extend(regex_searches)
+                    for search in regex_searches:
+                        groups.append(set(search))
+
+                        string_groups[yara_string.name].append(len(groups) - 1)
+
                     group_sizes.extend(len(g) for g in regex_searches)
 
                     search_group_count += len(regex_searches)
@@ -235,6 +285,13 @@ def parse_yara_rules(
                 if yara_atom not in new_atoms:
                     new_atoms.append(yara_atom)
 
+            # non-regex strings become singleton groups
+            if len(yara_string.re) == 0 or "nocase" in yara_string.modifiers:
+                for yara_atom in yara_string.atoms:
+                    groups.append({yara_atom})
+
+                    string_groups[yara_string.name].append(len(groups) - 1)
+
         progress_callback(
             SearchPhaseEnum.ATOM_PARSE,
             rule_index + 1,
@@ -262,15 +319,16 @@ def parse_yara_rules(
         # singleton groups so all atom information is preserved.
         # -----------------------------------------------------------------
 
-        groups = [set(group) for group in all_regex_groups]
+        # groups = [set(group) for group in all_regex_groups]
 
-        grouped_atoms = {atom for group in groups for atom in group}
+        # grouped_atoms = {atom for group in groups for atom in group}
 
-        for atom in new_atoms:
-            if atom not in grouped_atoms:
-                groups.append({atom})
+        # for atom in new_atoms:
+        #    if atom not in grouped_atoms:
+        #        groups.append({atom})
 
         rule_search_plans[rule_name] = RuleSearchPlan(
+            string_groups=string_groups,
             atoms=new_atoms.copy(),
             groups=groups,
             string_count=len(yara_rules[rule_index].strings),
@@ -285,6 +343,12 @@ def parse_yara_rules(
         # -----------------------------------------------------------------
         if rule_name in rule_search_plans:
             plan = rule_search_plans[rule_name]
+
+            logger.info(
+                'Rule "%s" string groups=%s',
+                rule_name,
+                plan.string_groups,
+            )
 
             logger.info(
                 'Rule "%s" atoms=%d search_groups=%d largest_group=%d',
@@ -329,6 +393,17 @@ def parse_yara_rules(
 
                 plan.condition_type = condition_type
                 plan.required_count = required_count
+
+                plan.required_strings = _extract_required_strings(
+                    condition_text,
+                )
+
+                logger.info(
+                    'Rule "%s" required strings=%s string_groups=%s',
+                    match_rule_name,
+                    sorted(plan.required_strings),
+                    plan.string_groups,
+                )
 
                 logger.info(
                     'Rule "%s" condition=%s required=%s total=%s',
