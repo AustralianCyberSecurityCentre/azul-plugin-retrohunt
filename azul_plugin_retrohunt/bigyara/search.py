@@ -7,6 +7,7 @@ import multiprocessing as mp
 import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
+from collections import Counter as CollectionsCounter
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -202,10 +203,12 @@ def search(
         )
 
     for rule_name in rule_atoms:
-        if len(rule_matches[rule_name]) > 0:
-            logger.info(f'Found {len(rule_matches[rule_name])} indexed file matches for "{rule_name}"')
+        matches = rule_matches.get(rule_name, [])
+
+        if matches:
+            logger.info(f'Found {len(matches)} indexed file matches for "{rule_name}"')
         else:
-            del rule_matches[rule_name]
+            rule_matches.pop(rule_name, None)
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
     with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
@@ -275,7 +278,14 @@ def _atom_parse(
 
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
-def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash):
+def _run_bgparse_task(
+    bgparse_exec,
+    index,
+    rule_name,
+    group_idx,
+    search_string,
+    query_hash,
+):
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
 
@@ -291,6 +301,7 @@ def _run_bgparse_task(bgparse_exec, index, rule_name, search_string, query_hash)
 
     return (
         rule_name,
+        group_idx,
         index,
         search_string,
         process.returncode,
@@ -324,15 +335,26 @@ def _broad_phase_search(
     # else:
     # search_strings = {rule: [f"-s{h} " for h in hex_atoms[rule]] for rule in rule_atoms}
 
-    search_strings: dict[str, list[str]] = {}
+    search_strings: dict[str, list[tuple[int, str]]] = {}
 
     for rule_name, plan in rule_search_plans.items():
         search_strings[rule_name] = []
 
-        for group in plan.groups:
-            for atom in group:
-                hex_atom = binascii.b2a_hex(atom).upper().decode()
-                search_strings[rule_name].append(f"-s{hex_atom} ")
+        for group_idx, group in enumerate(plan.groups):
+            hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+
+            search_strings[rule_name].append(
+                (
+                    group_idx,
+                    "".join(f"-s{h} " for h in hex_atoms),
+                )
+            )
+
+        logger.info(
+            'Rule "%s" generated %d grouped searches',
+            rule_name,
+            len(search_strings[rule_name]),
+        )
 
     # ------------------------------------------------------------
     # 3. Build flat task list
@@ -342,12 +364,23 @@ def _broad_phase_search(
     total_io_bytes = 0
     for index in indices:
         size_bytes = os.path.getsize(index)
-        atom_count = sum(len(atoms) for atoms in rule_atoms.values())
-        total_io_bytes += size_bytes * atom_count
+        # atom_count = sum(len(atoms) for atoms in rule_atoms.values())
+        search_group_count = sum(len(searches) for searches in search_strings.values())
+        total_io_bytes += size_bytes * search_group_count
         for rule_name, s_list in search_strings.items():
-            for s in s_list:
-                # get_free_shm_bytes()
-                tasks.append((index, rule_name, s))
+            for group_idx, search_string in s_list:
+                tasks.append(
+                    (
+                        index,
+                        rule_name,
+                        group_idx,
+                        search_string,
+                    )
+                )
+    logger.info(
+        "Broad phase generated %d tasks",
+        len(tasks),
+    )
     logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
     searches_complete = 0
@@ -359,13 +392,18 @@ def _broad_phase_search(
     # ------------------------------------------------------------
     worker = partial(_run_bgparse_task, bgparse_exec, query_hash=query_hash)
 
-    rule_matches: RuleFileMatches = {rule: [] for rule in rule_atoms}
+    # rule_matches: RuleFileMatches = {rule: [] for rule in rule_atoms}
     file_config: FileConfig = {}
+
+    group_matches = {
+        rule_name: {idx: set() for idx in range(len(plan.groups))} for rule_name, plan in rule_search_plans.items()
+    }
 
     with mp.Pool() as pool:
         # starmap is pickle‑safe and expands tuples automatically
         for (
             rule_name,
+            group_idx,
             index,
             search_string,
             returncode,
@@ -399,25 +437,13 @@ def _broad_phase_search(
             new_matches, file_config = _process_bgparse_output(
                 stdout,
                 rule_name,
-                rule_matches[rule_name],
+                [],
                 file_config,
                 query_hash=query_hash,
                 index_path=index,
             )
 
-            # DEBUG: inspect a few file configs
-            logged_metadata = False
-            if not logged_metadata and file_config:
-                logged_metadata = True
-
-                sample_cfg = next(iter(file_config.values()))
-
-                logger.info(
-                    "Indexed metadata keys: %s",
-                    sorted(k.decode(errors="ignore") for k in sample_cfg),
-                )
-
-            rule_matches[rule_name].extend(new_matches)
+            group_matches[rule_name][group_idx].update(new_matches)
 
             searches_complete += 1
             progress_callback(
@@ -427,10 +453,81 @@ def _broad_phase_search(
                 (rule_name, new_matches),
             )
 
-    if all(len(v) == 0 for v in rule_matches.values()):
-        raise NoIndexMatchesException("Search aborted due to index matches.")
+    # if all(len(v) == 0 for v in rule_matches.values()):
+    #    raise NoIndexMatchesException("Search aborted due to index matches.")
 
     logger.debug("All index searches completed")
+
+    rule_matches: RuleFileMatches = {}
+
+    for rule_name, plan in rule_search_plans.items():
+        groups = list(group_matches[rule_name].values())
+
+        if not groups:
+            rule_matches[rule_name] = []
+            continue
+
+        for group_idx, matches in group_matches[rule_name].items():
+            logger.info(
+                'Rule "%s" group %d produced %d candidates',
+                rule_name,
+                group_idx,
+                len(matches),
+            )
+
+        logger.info(
+            'Rule "%s": condition=%s required=%s groups=%d',
+            rule_name,
+            plan.condition_type,
+            plan.required_count,
+            len(groups),
+        )
+
+        if plan.condition_type == "all":
+            if any(len(g) == 0 for g in groups):
+                final_matches = set()
+            else:
+                final_matches = set.intersection(*groups)
+
+        elif plan.condition_type == "any":
+            final_matches = set.union(*groups)
+
+        elif plan.condition_type == "n_of":
+            logger.info(
+                'Rule "%s": requiring %d/%d groups',
+                rule_name,
+                plan.required_count,
+                plan.string_count,
+            )
+
+            counts = CollectionsCounter()
+
+            for group in groups:
+                for match in group:
+                    counts[match] += 1
+
+            final_matches = {match for match, count in counts.items() if count >= plan.required_count}
+
+        else:
+            logger.warning(
+                'Unknown condition "%s" for rule "%s"',
+                plan.condition_type,
+                rule_name,
+            )
+
+            final_matches = set.union(*groups)
+
+        logger.info(
+            'Rule "%s": %d groups -> %d candidates',
+            rule_name,
+            len(groups),
+            len(final_matches),
+        )
+
+        rule_matches[rule_name] = list(final_matches)
+
+    if all(len(v) == 0 for v in rule_matches.values()):
+        raise NoIndexMatchesException("Search aborted due to no index matches.")
 
     return (rule_matches, file_config)
 
