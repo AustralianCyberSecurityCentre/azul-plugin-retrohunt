@@ -489,6 +489,28 @@ def _broad_phase_search(
             len(string_matches),
             len(groups),
         )
+
+        required_string_sets = []
+        required_matches = None
+
+        if plan.required_strings and all(s in string_matches for s in plan.required_strings):
+            required_string_sets = [string_matches[string_name] for string_name in plan.required_strings]
+
+        if required_string_sets:
+            logger.info(
+                'Rule "%s": intersecting required strings %s',
+                rule_name,
+                sorted(plan.required_strings),
+            )
+
+            required_matches = set.intersection(*required_string_sets)
+
+            logger.info(
+                'Rule "%s": required strings reduced candidates to %d',
+                rule_name,
+                len(required_matches),
+            )
+
         if plan.condition_type == "all":
             string_sets = list(string_matches.values())
 
@@ -529,6 +551,9 @@ def _broad_phase_search(
             )
 
             final_matches = set.union(*groups)
+
+            if required_matches is not None:
+                final_matches &= required_matches
 
         logger.info(
             'Rule "%s": %d groups -> %d candidates',
