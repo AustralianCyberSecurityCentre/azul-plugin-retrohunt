@@ -461,40 +461,53 @@ def _broad_phase_search(
     rule_matches: RuleFileMatches = {}
 
     for rule_name, plan in rule_search_plans.items():
+        string_matches: dict[str, set[str]] = {}
+
+        for string_name, group_ids in plan.string_groups.items():
+            if not group_ids:
+                string_matches[string_name] = set()
+                continue
+
+            string_matches[string_name] = set.union(*(group_matches[rule_name][gid] for gid in group_ids))
+
         groups = list(group_matches[rule_name].values())
 
-        if not groups:
-            rule_matches[rule_name] = []
-            continue
-
-        for group_idx, matches in group_matches[rule_name].items():
+        for string_name, matches in string_matches.items():
             logger.info(
-                'Rule "%s" group %d produced %d candidates',
+                'Rule "%s" string %s produced %d candidates via %d groups',
                 rule_name,
-                group_idx,
+                string_name,
                 len(matches),
+                len(plan.string_groups.get(string_name, [])),
             )
 
         logger.info(
-            'Rule "%s": condition=%s required=%s groups=%d',
+            'Rule "%s": condition=%s*required=%s strings=%d groups=%d',
             rule_name,
             plan.condition_type,
             plan.required_count,
+            len(string_matches),
             len(groups),
         )
-
         if plan.condition_type == "all":
-            if any(len(g) == 0 for g in groups):
+            string_sets = list(string_matches.values())
+
+            if any(len(s) == 0 for s in string_sets):
                 final_matches = set()
             else:
-                final_matches = set.intersection(*groups)
+                final_matches = set.intersection(*string_sets)
 
         elif plan.condition_type == "any":
-            final_matches = set.union(*groups)
+            string_sets = list(string_matches.values())
+
+            if string_sets:
+                final_matches = set.union(*string_sets)
+            else:
+                final_matches = set()
 
         elif plan.condition_type == "n_of":
             logger.info(
-                'Rule "%s": requiring %d/%d groups',
+                'Rule "%s": requiring %d/%d strings',
                 rule_name,
                 plan.required_count,
                 plan.string_count,
@@ -502,8 +515,8 @@ def _broad_phase_search(
 
             counts = CollectionsCounter()
 
-            for group in groups:
-                for match in group:
+            for matches in string_matches.values():
+                for match in matches:
                     counts[match] += 1
 
             final_matches = {match for match, count in counts.items() if count >= plan.required_count}
@@ -522,6 +535,13 @@ def _broad_phase_search(
             rule_name,
             len(groups),
             len(final_matches),
+        )
+
+        logger.info(
+            'Rule "%s": reduced %d groups to %d strings',
+            rule_name,
+            len(groups),
+            len(string_matches),
         )
 
         rule_matches[rule_name] = list(final_matches)
