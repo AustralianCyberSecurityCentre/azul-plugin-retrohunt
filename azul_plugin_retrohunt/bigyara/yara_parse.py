@@ -59,8 +59,60 @@ class YaraRule:
 
 
 @dataclass
+class ConditionNode:
+    """Condition node."""
+
+    pass
+
+
+@dataclass
+class StringNode(ConditionNode):
+    """String node."""
+
+    string_name: str
+
+
+@dataclass
+class AndNode(ConditionNode):
+    """And node."""
+
+    children: list[ConditionNode]
+
+
+@dataclass
+class OrNode(ConditionNode):
+    """Or node."""
+
+    children: list[ConditionNode]
+
+
+@dataclass
+class NOfNode(ConditionNode):
+    """None of node."""
+
+    required: int
+    children: list[ConditionNode]
+
+
+@dataclass
+class AnyOfNode(ConditionNode):
+    """Any of node."""
+
+    children: list[ConditionNode]
+
+
+@dataclass
+class AllOfNode(ConditionNode):
+    """All of node."""
+
+    children: list[ConditionNode]
+
+
+@dataclass
 class RuleSearchPlan:
     """Search plan object."""
+
+    condition_ast: ConditionNode | None = None
 
     string_groups: dict[str, list[int]] = field(default_factory=dict)
 
@@ -113,6 +165,170 @@ def _parse_condition_metadata(
         return ("n_of", int(match.group(1)))
 
     return ("unknown", None)
+
+
+def _convert_condition_ast(node) -> ConditionNode:
+    """Convert Python AST into broad-phase AST."""
+    #
+    # S("$a")
+    #
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "S":
+        return StringNode(
+            string_name=node.args[0].value,
+        )
+
+    #
+    # a & b
+    #
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitAnd):
+        left = _convert_condition_ast(node.left)
+        right = _convert_condition_ast(node.right)
+
+        children = []
+
+        if isinstance(left, AndNode):
+            children.extend(left.children)
+        else:
+            children.append(left)
+
+        if isinstance(right, AndNode):
+            children.extend(right.children)
+        else:
+            children.append(right)
+
+        return AndNode(children)
+
+    #
+    # a | b
+    #
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = _convert_condition_ast(node.left)
+        right = _convert_condition_ast(node.right)
+
+        children = []
+
+        if isinstance(left, OrNode):
+            children.extend(left.children)
+        else:
+            children.append(left)
+
+        if isinstance(right, OrNode):
+            children.extend(right.children)
+        else:
+            children.append(right)
+
+        return OrNode(children)
+
+    raise ValueError(f"Unsupported AST node: {ast.dump(node)}")
+
+
+def _build_condition_ast(
+    condition_text: str,
+    string_names: set[str],
+) -> ConditionNode | None:
+    """Build a boolean AST from a YARA condition.
+
+    Currently supports:
+        $a
+        $a and $b
+        $a or $b
+        $a and ($b or $c)
+        ($a or $b) and ($c or $d)
+    Non-string expressions are ignored for now.
+    """
+    expr = condition_text
+    #
+    # Replace string identifiers with S("...")
+    #
+    for string_name in sorted(
+        string_names,
+        key=len,
+        reverse=True,
+    ):
+        expr = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(string_name)}(?![A-Za-z0-9_])",
+            f'S("{string_name}")',
+            expr,
+        )
+
+    #
+    # Convert logical operators into Python operators
+    #
+    expr = re.sub(
+        r"\band\b",
+        "&",
+        expr,
+        flags=re.IGNORECASE,
+    )
+
+    expr = re.sub(
+        r"\bor\b",
+        "|",
+        expr,
+        flags=re.IGNORECASE,
+    )
+
+    logger.info(
+        "Condition AST expression: %s",
+        expr,
+    )
+    #
+    # Parse via Python AST
+    #
+    try:
+        parsed = ast.parse(expr, mode="eval")
+        return _convert_condition_ast(parsed.body)
+    except Exception as exc:
+        logger.debug(
+            "Failed to parse condition AST: %s",
+            exc,
+        )
+        return None
+
+
+def _evaluate_condition_ast(
+    node: ConditionNode,
+    string_matches: dict[str, set[str]],
+) -> set:
+    """Evaluate broad-phase condition tree."""
+    if node is None:
+        return set()
+
+    if isinstance(node, StringNode):
+        return string_matches.get(
+            node.string_name,
+            set(),
+        )
+
+    if isinstance(node, OrNode):
+        results = [
+            _evaluate_condition_ast(
+                child,
+                string_matches,
+            )
+            for child in node.children
+        ]
+
+        if not results:
+            return set()
+
+        return set.union(*results)
+
+    if isinstance(node, AndNode):
+        results = [
+            _evaluate_condition_ast(
+                child,
+                string_matches,
+            )
+            for child in node.children
+        ]
+
+        if not results:
+            return set()
+
+        return set.intersection(*results)
+
+    raise ValueError(f"Unsupported condition node: {type(node)}")
 
 
 def _extract_required_strings(
@@ -392,6 +608,24 @@ def parse_yara_rules(
                 plan = rule_search_plans[match_rule_name]
 
                 plan.raw_condition = condition_text
+
+                try:
+                    plan.condition_ast = _build_condition_ast(
+                        condition_text,
+                        set(plan.string_groups.keys()),
+                    )
+
+                    logger.info(
+                        'Rule "%s" condition AST: %s',
+                        match_rule_name,
+                        plan.condition_ast,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        'Rule "%s" failed AST parse: %s',
+                        match_rule_name,
+                        exc,
+                    )
 
                 condition_type, required_count = _parse_condition_metadata(
                     condition_text,

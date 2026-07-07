@@ -30,7 +30,7 @@ from . import (
 )
 from .env import executables
 from .suricata_parse import parse_suricata_rules
-from .yara_parse import RuleSearchPlans, parse_yara_rules
+from .yara_parse import RuleSearchPlans, _evaluate_condition_ast, parse_yara_rules
 
 # FUTURE: multiprocessing has been removed from search functionality.
 #         performance should be investigated and improved where necessary.
@@ -510,6 +510,36 @@ def _broad_phase_search(
                 rule_name,
                 len(required_matches),
             )
+
+        if plan.condition_ast is not None:
+            final_matches = _evaluate_condition_ast(
+                plan.condition_ast,
+                string_matches,
+            )
+
+            logger.info(
+                'Rule "%s": AST evaluation reduced to %d candidates',
+                rule_name,
+                len(final_matches),
+            )
+
+            logger.info(
+                'Rule "%s": %d groups -> %d candidates (AST)',
+                rule_name,
+                len(groups),
+                len(final_matches),
+            )
+
+            logger.info(
+                'Rule "%s": reduced %d groups to %d strings',
+                rule_name,
+                len(groups),
+                len(string_matches),
+            )
+
+            rule_matches[rule_name] = list(final_matches)
+
+            continue
 
         if plan.condition_type == "all":
             string_sets = list(string_matches.values())
