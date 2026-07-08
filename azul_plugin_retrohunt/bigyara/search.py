@@ -695,7 +695,6 @@ def _narrow_phase_search(
         def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
 
             cfg = file_config.get(file_path)
-            logger.info("Filepath: %s", cfg)
             with prom_narrow_io_duration.labels(query_hash=query_hash).time():
                 data = data_callback(file_path, cfg)
 
