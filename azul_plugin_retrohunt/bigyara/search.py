@@ -11,6 +11,7 @@ from collections import Counter as CollectionsCounter
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from threading import Event
 
 import yara
 from prometheus_client import Counter, Histogram
@@ -127,6 +128,10 @@ class FileConfigReadException(Exception):
     """Could not read file config stored in index."""
 
     pass
+
+
+# used to stop all threads if user cancels hunt
+stop_event = Event()
 
 
 def search(
@@ -698,7 +703,7 @@ def _narrow_phase_search(
         # ------------------------------------------------------------
         # Worker function (pure, no side effects)
         # ------------------------------------------------------------
-        def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
+        def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str, stop_event: Event):
             logger.info("Starting new worker")
             logger.info("file_path ", file_path)
             logger.info("rules_for_file ", rules_for_file)
@@ -716,6 +721,8 @@ def _narrow_phase_search(
 
             results = []
             for rule_name in rules_for_file:
+                if stop_event.is_set():
+                    return
                 if queryType == QueryTypeEnum.YARA:
                     with prom_narrow_cpu_duration.labels(
                         query_hash=query_hash,
@@ -746,8 +753,12 @@ def _narrow_phase_search(
         futures = []
         with ThreadPoolExecutor() as executor:
             for file_path, rules_for_file in file_to_rules.items():
-                futures.append(executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash))
+                futures.append(
+                    executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash), stop_event
+                )
 
+            if stop_event.is_set():
+                return None
             # Process results in deterministic order
             for f in futures:
                 status, file_path, rules_for_file, results = f.result()
@@ -792,6 +803,11 @@ def _narrow_phase_search(
     except Exception as e:
         logger.info("Exception in narrow ", e)
         raise
+
+
+def set_stop_event():
+    """Stops threads if user cancels hunt manually."""
+    stop_event.set()
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:

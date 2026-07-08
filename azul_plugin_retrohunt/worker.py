@@ -16,7 +16,7 @@ from azul_bedrock import models_network as azm
 from prometheus_client import Counter, Summary, start_http_server
 from redis.exceptions import ResponseError
 
-from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
+from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search, stop_event
 from azul_plugin_retrohunt.retrohunt import CancelException, FatalException, RetrohuntService
 from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
 
@@ -64,6 +64,7 @@ def check_is_cancelled(job_id: str):
         return  # corrupted or missing, not considered cancelled
 
     if event.entity.status == azm.HuntState.CANCELLED:
+        stop_event()
         raise CancelException(f"Hunt {job_id} cancelled by user")
 
 
@@ -248,6 +249,8 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             update_job,
             recursive=True,
         )
+
+        check_is_cancelled(job.entity.id)
 
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
