@@ -702,7 +702,7 @@ def _narrow_phase_search(
             logger.info("Starting new worker")
             logger.info("file_path ", file_path)
             logger.info("rules_for_file ", rules_for_file)
-            
+
             cfg = file_config.get(file_path)
             with prom_narrow_io_duration.labels(query_hash=query_hash).time():
                 data = data_callback(file_path, cfg)
@@ -792,6 +792,7 @@ def _narrow_phase_search(
     except Exception as e:
         logger.info("Exception in narrow ", e)
         raise
+
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
     """Run suricata rule on data. Returns True if there is at least one match."""
