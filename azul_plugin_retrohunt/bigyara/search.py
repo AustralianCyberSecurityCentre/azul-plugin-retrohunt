@@ -294,6 +294,9 @@ def _run_bgparse_task(
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
 
+    logger.info("Processing BG Parse taks")
+    logger.info("Command to run: ", cmd)
+
     start = time.time()
 
     process = subprocess.run(  # noqa S602
@@ -369,7 +372,6 @@ def _broad_phase_search(
     total_io_bytes = 0
     for index in indices:
         size_bytes = os.path.getsize(index)
-        # atom_count = sum(len(atoms) for atoms in rule_atoms.values())
         search_group_count = sum(len(searches) for searches in search_strings.values())
         total_io_bytes += size_bytes * search_group_count
         for rule_name, s_list in search_strings.items():
@@ -397,7 +399,6 @@ def _broad_phase_search(
     # ------------------------------------------------------------
     worker = partial(_run_bgparse_task, bgparse_exec, query_hash=query_hash)
 
-    # rule_matches: RuleFileMatches = {rule: [] for rule in rule_atoms}
     file_config: FileConfig = {}
 
     group_matches = {
