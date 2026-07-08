@@ -700,11 +700,9 @@ def _narrow_phase_search(
         # Worker function (pure, no side effects)
         # ------------------------------------------------------------
         def worker(file_path: str, rules_for_file: frozenset[str], stop_event: Event, query_hash: str):
-            logger.info("Starting new worker")
-            logger.info("file_path ", file_path)
-            logger.info("rules_for_file ", rules_for_file)
 
             cfg = file_config.get(file_path)
+            logger.info("Filepath: ", cfg)
             with prom_narrow_io_duration.labels(query_hash=query_hash).time():
                 data = data_callback(file_path, cfg)
 
@@ -718,12 +716,14 @@ def _narrow_phase_search(
             results = []
             for rule_name in rules_for_file:
                 if stop_event.is_set():
+                    logger.info("Stop even set. Exiting...")
                     return
                 if queryType == QueryTypeEnum.YARA:
                     with prom_narrow_cpu_duration.labels(
                         query_hash=query_hash,
                         rule_name=rule_name,
                     ).time():
+                        logger.info("Checking match for ", rule_name)
                         matched = (
                             len(
                                 compiled_yara_rules[rule_name].match(
