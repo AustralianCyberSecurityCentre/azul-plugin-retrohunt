@@ -426,10 +426,11 @@ def main():
                 path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
                 bgi_folders.append(path_to_bgi_folder)
 
-            # Check cancellation before starting work
-            check_is_cancelled(job_id)
-
             try:
+
+                # Check cancellation before starting work
+                check_is_cancelled(job_id)
+
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
