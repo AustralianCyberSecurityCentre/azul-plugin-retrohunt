@@ -11,7 +11,6 @@ from collections import Counter as CollectionsCounter
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from threading import Event
 
 import yara
 from prometheus_client import Counter, Histogram
@@ -128,6 +127,7 @@ class FileConfigReadException(Exception):
     """Could not read file config stored in index."""
 
     pass
+
 
 def search(
     query: str,
@@ -739,9 +739,7 @@ def _narrow_phase_search(
         futures = []
         with ThreadPoolExecutor() as executor:
             for file_path, rules_for_file in file_to_rules.items():
-                futures.append(
-                    executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash)
-                )
+                futures.append(executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash))
 
             # Process results in deterministic order
             for f in futures:
@@ -787,6 +785,7 @@ def _narrow_phase_search(
     except Exception as e:
         logger.info("Exception in narrow %s", e)
         raise
+
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
     """Run suricata rule on data. Returns True if there is at least one match."""
