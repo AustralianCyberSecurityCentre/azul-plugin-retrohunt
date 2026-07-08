@@ -793,12 +793,6 @@ def _narrow_phase_search(
         logger.info("Exception in narrow ", e)
         raise
 
-
-# def get_free_shm_bytes():
-#    """Warm up."""
-#    _ = os.statvfs("/dev/shm")  # noqa: S108
-
-
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
     """Run suricata rule on data. Returns True if there is at least one match."""
     # FUTURE suricata - implement
