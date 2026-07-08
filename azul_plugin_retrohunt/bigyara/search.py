@@ -664,6 +664,11 @@ def _narrow_phase_search(
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
     try:
+        logger.info("Narrow phase starting: ")
+        logger.info("rule_matches ", rule_matches)
+        logger.info("rule_content ", rule_content)
+        logger.info("file_config ", file_config)
+        
         if queryType == QueryTypeEnum.STRING:
             return rule_matches
 
