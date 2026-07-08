@@ -295,7 +295,7 @@ def _run_bgparse_task(
     cmd = f"{bgparse_exec} {search_string}{index}"
 
     logger.info("Processing BG Parse taks")
-    logger.info("Command to run: ", cmd)
+    logger.info("Command to run: %s", cmd)
 
     start = time.time()
 
@@ -702,7 +702,7 @@ def _narrow_phase_search(
         def worker(file_path: str, rules_for_file: frozenset[str], stop_event: Event, query_hash: str):
 
             cfg = file_config.get(file_path)
-            logger.info("Filepath: ", cfg)
+            logger.info("Filepath: %s", cfg)
             with prom_narrow_io_duration.labels(query_hash=query_hash).time():
                 data = data_callback(file_path, cfg)
 
@@ -723,7 +723,7 @@ def _narrow_phase_search(
                         query_hash=query_hash,
                         rule_name=rule_name,
                     ).time():
-                        logger.info("Checking match for ", rule_name)
+                        logger.info("Checking match for %s", rule_name)
                         matched = (
                             len(
                                 compiled_yara_rules[rule_name].match(
@@ -797,7 +797,7 @@ def _narrow_phase_search(
 
         return final_matches
     except Exception as e:
-        logger.info("Exception in narrow ", e)
+        logger.info("Exception in narrow %s", e)
         raise
 
 
