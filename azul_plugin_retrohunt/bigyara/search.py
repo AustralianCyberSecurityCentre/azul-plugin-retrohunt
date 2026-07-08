@@ -668,7 +668,7 @@ def _narrow_phase_search(
         logger.info("rule_matches ", rule_matches)
         logger.info("rule_content ", rule_content)
         logger.info("file_config ", file_config)
-        
+
         if queryType == QueryTypeEnum.STRING:
             return rule_matches
 
@@ -699,6 +699,10 @@ def _narrow_phase_search(
         # Worker function (pure, no side effects)
         # ------------------------------------------------------------
         def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
+            logger.info("Starting new worker")
+            logger.info("file_path ", file_path)
+            logger.info("rules_for_file ", rules_for_file)
+            
             cfg = file_config.get(file_path)
             with prom_narrow_io_duration.labels(query_hash=query_hash).time():
                 data = data_callback(file_path, cfg)
