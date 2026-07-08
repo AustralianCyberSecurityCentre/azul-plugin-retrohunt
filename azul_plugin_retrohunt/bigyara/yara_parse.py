@@ -222,6 +222,85 @@ def _convert_condition_ast(node) -> ConditionNode:
     raise ValueError(f"Unsupported AST node: {ast.dump(node)}")
 
 
+def _expand_string_specifiers(
+    specifiers: list[str],
+    string_names: set[str],
+) -> list:
+    """Expand explicit string names and wildcard patterns."""
+    expanded: list[str] = []
+
+    for specifier in specifiers:
+        specifier = specifier.strip()
+
+        if specifier.endswith("*"):
+            prefix = specifier[:-1]
+
+            expanded.extend(sorted(name for name in string_names if name.startswith(prefix)))
+        elif specifier in string_names:
+            expanded.append(specifier)
+
+    return expanded
+
+
+def _build_special_condition_ast(
+    condition_text: str,
+    string_names: set[str],
+) -> ConditionNode | None:
+    """Handle any/all/n of (...) forms."""
+    match = re.fullmatch(
+        r"\s*(any|all|\d+)\s+of\s*(them|\(.*?\))\s*",
+        condition_text,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    quantity = match.group(1).lower()
+
+    target = match.group(2)
+
+    if target.lower() == "them":
+        strings = sorted(string_names)
+    else:
+        specifiers = [item.strip() for item in target[1:-1].split(",")]
+
+        strings = _expand_string_specifiers(
+            specifiers,
+            string_names,
+        )
+
+    if not strings:
+        logger.warning(
+            'Condition "%s" matched no strings',
+            condition_text,
+        )
+        return None
+
+    children = [StringNode(name) for name in strings]
+
+    if quantity == "any":
+        return OrNode(children)
+
+    if quantity == "all":
+        return AndNode(children)
+
+    required = int(quantity)
+
+    if required > len(children):
+        logger.warning(
+            'Condition "%s" requires %d strings but only %d exist',
+            condition_text,
+            required,
+            len(children),
+        )
+
+    return NOfNode(
+        required=required,
+        children=children,
+    )
+
+
 def _build_condition_ast(
     condition_text: str,
     string_names: set[str],
@@ -237,6 +316,17 @@ def _build_condition_ast(
     Non-string expressions are ignored for now.
     """
     expr = condition_text
+    special_ast = _build_special_condition_ast(
+        condition_text,
+        string_names,
+    )
+
+    if special_ast is not None:
+        logger.info(
+            "Special condition AST: %s",
+            special_ast,
+        )
+        return special_ast
     #
     # Replace string identifiers with S("...")
     #
@@ -287,7 +377,7 @@ def _build_condition_ast(
 
 
 def _evaluate_condition_ast(
-    node: ConditionNode,
+    node: ConditionNode | None,
     string_matches: dict[str, set[str]],
 ) -> set:
     """Evaluate broad-phase condition tree."""
@@ -327,6 +417,20 @@ def _evaluate_condition_ast(
             return set()
 
         return set.intersection(*results)
+
+    if isinstance(node, NOfNode):
+        counts: dict[str, int] = {}
+
+        for child in node.children:
+            matches = _evaluate_condition_ast(
+                child,
+                string_matches,
+            )
+
+            for path in matches:
+                counts[path] = counts.get(path, 0) + 1
+
+        return {path for path, count in counts.items() if count >= node.required}
 
     raise ValueError(f"Unsupported condition node: {type(node)}")
 
