@@ -129,11 +129,6 @@ class FileConfigReadException(Exception):
 
     pass
 
-
-# used to stop all threads if user cancels hunt
-stop_event = Event()
-
-
 def search(
     query: str,
     query_type: QueryTypeEnum | int,
@@ -294,9 +289,6 @@ def _run_bgparse_task(
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
 
-    logger.info("Processing BG Parse taks")
-    logger.info("Command to run: %s", cmd)
-
     start = time.time()
 
     process = subprocess.run(  # noqa S602
@@ -395,7 +387,7 @@ def _broad_phase_search(
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
 
     # ------------------------------------------------------------
-    # 4. Run tasks in multiprocessing pool (patched)
+    # 4. Run tasks in multiprocessing pool
     # ------------------------------------------------------------
     worker = partial(_run_bgparse_task, bgparse_exec, query_hash=query_hash)
 
@@ -439,7 +431,8 @@ def _broad_phase_search(
             # ------------------------------------------------------------
             # 5. Aggregate results
             # ------------------------------------------------------------
-
+            logger.info("Task run for command...")
+            logger.info(f"{bgparse_exec} {search_string}{index}")
             new_matches, file_config = _process_bgparse_output(
                 stdout,
                 rule_name,
@@ -699,7 +692,7 @@ def _narrow_phase_search(
         # ------------------------------------------------------------
         # Worker function (pure, no side effects)
         # ------------------------------------------------------------
-        def worker(file_path: str, rules_for_file: frozenset[str], stop_event: Event, query_hash: str):
+        def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
 
             cfg = file_config.get(file_path)
             logger.info("Filepath: %s", cfg)
@@ -715,9 +708,6 @@ def _narrow_phase_search(
 
             results = []
             for rule_name in rules_for_file:
-                if stop_event.is_set():
-                    logger.info("Stop even set. Exiting...")
-                    return
                 if queryType == QueryTypeEnum.YARA:
                     with prom_narrow_cpu_duration.labels(
                         query_hash=query_hash,
@@ -750,11 +740,9 @@ def _narrow_phase_search(
         with ThreadPoolExecutor() as executor:
             for file_path, rules_for_file in file_to_rules.items():
                 futures.append(
-                    executor.submit(worker, file_path, frozenset(rules_for_file), stop_event, query_hash=query_hash)
+                    executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash)
                 )
 
-            if stop_event.is_set():
-                return None
             # Process results in deterministic order
             for f in futures:
                 status, file_path, rules_for_file, results = f.result()
@@ -799,12 +787,6 @@ def _narrow_phase_search(
     except Exception as e:
         logger.info("Exception in narrow %s", e)
         raise
-
-
-def set_stop_event():
-    """Stops threads if user cancels hunt manually."""
-    stop_event.set()
-
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
     """Run suricata rule on data. Returns True if there is at least one match."""
