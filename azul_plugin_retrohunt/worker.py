@@ -427,7 +427,6 @@ def main():
                 bgi_folders.append(path_to_bgi_folder)
 
             try:
-
                 # Check cancellation before starting work
                 check_is_cancelled(job_id)
 
