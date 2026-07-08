@@ -258,65 +258,6 @@ def _expand_string_specifiers(
     return expanded
 
 
-def _build_special_condition_ast(
-    condition_text: str,
-    string_names: set[str],
-) -> ConditionNode | None:
-    """Handle any/all/n of (...) forms."""
-    match = re.fullmatch(
-        r"\s*(any|all|\d+)\s+of\s*(them|\(.*?\))\s*",
-        condition_text,
-        flags=re.IGNORECASE,
-    )
-
-    if not match:
-        return None
-
-    quantity = match.group(1).lower()
-
-    target = match.group(2)
-
-    if target.lower() == "them":
-        strings = sorted(string_names)
-    else:
-        specifiers = [item.strip() for item in target[1:-1].split(",")]
-
-        strings = _expand_string_specifiers(
-            specifiers,
-            string_names,
-        )
-
-    if not strings:
-        logger.warning(
-            'Condition "%s" matched no strings',
-            condition_text,
-        )
-        return None
-
-    children = [StringNode(name) for name in strings]
-
-    if quantity == "any":
-        return OrNode(children)
-
-    if quantity == "all":
-        return AndNode(children)
-
-    required = int(quantity)
-
-    if required > len(children):
-        logger.warning(
-            'Condition "%s" requires %d strings but only %d exist',
-            condition_text,
-            required,
-            len(children),
-        )
-
-    return NOfNode(
-        required=required,
-        children=children,
-    )
-
-
 def _rewrite_special_conditions(
     condition_text: str,
     string_names: set[str],
@@ -579,21 +520,6 @@ def parse_yara_rules(
 
     for rule_index in range(len(yara_rules)):
         new_atoms: list[bytes] = []
-
-        # -----------------------------------------------------------------
-        # NEW: track potential bgparse AND groups for future optimisation.
-        #
-        # A search group represents:
-        #
-        #     atom1 AND atom2 AND atom3
-        #
-        # while multiple groups represent:
-        #
-        #     group1 OR group2 OR group3
-        #
-        # We don't use these yet, but we log them so we can determine
-        # whether smarter bgparse usage will actually help.
-        # -----------------------------------------------------------------
         search_group_count = 0
         largest_group = 0
         # NEW: accumulate all regex groups across the entire rule.
@@ -691,66 +617,14 @@ def parse_yara_rules(
 
         rule_atoms[rule_name] = new_atoms
 
-        # -----------------------------------------------------------------
-        # NEW: preserve AND/OR search structure for future broad-phase
-        # optimisation.
-        #
-        # Each set represents:
-        #
-        #     atom1 AND atom2 AND atom3
-        #
-        # and the list represents:
-        #
-        #     group1 OR group2 OR group3
-        #
-        # For atoms that are not part of a regex-derived group, create
-        # singleton groups so all atom information is preserved.
-        # -----------------------------------------------------------------
-
-        # groups = [set(group) for group in all_regex_groups]
-
-        # grouped_atoms = {atom for group in groups for atom in group}
-
-        # for atom in new_atoms:
-        #    if atom not in grouped_atoms:
-        #        groups.append({atom})
-
         rule_search_plans[rule_name] = RuleSearchPlan(
             string_groups=string_groups,
             atoms=new_atoms.copy(),
             groups=groups,
             string_count=len(yara_rules[rule_index].strings),
         )
+
         logger.info(f'Found {len(rule_atoms[rule_name])} atoms for "{rule_name}"')
-
-        # -----------------------------------------------------------------
-        # NEW: instrumentation only.
-        #
-        # This tells us whether there is meaningful AND structure hidden
-        # inside the regex atom trees that bgparse could exploit.
-        # -----------------------------------------------------------------
-        if rule_name in rule_search_plans:
-            plan = rule_search_plans[rule_name]
-
-            logger.info(
-                'Rule "%s" string groups=%s',
-                rule_name,
-                plan.string_groups,
-            )
-
-            logger.info(
-                'Rule "%s" atoms=%d search_groups=%d largest_group=%d',
-                rule_name,
-                len(plan.atoms),
-                len(plan.groups),
-                max((len(g) for g in plan.groups), default=0),
-            )
-
-            logger.debug(
-                'Rule "%s" search groups: %s',
-                rule_name,
-                [[atom.hex() for atom in group] for group in plan.groups],
-            )
 
     rule_content: RuleContent = {}
 
