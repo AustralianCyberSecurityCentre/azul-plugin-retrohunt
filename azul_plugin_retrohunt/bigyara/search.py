@@ -703,7 +703,7 @@ def _narrow_phase_search(
         # ------------------------------------------------------------
         # Worker function (pure, no side effects)
         # ------------------------------------------------------------
-        def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str, stop_event: Event):
+        def worker(file_path: str, rules_for_file: frozenset[str], stop_event: Event, query_hash: str):
             logger.info("Starting new worker")
             logger.info("file_path ", file_path)
             logger.info("rules_for_file ", rules_for_file)
@@ -754,7 +754,7 @@ def _narrow_phase_search(
         with ThreadPoolExecutor() as executor:
             for file_path, rules_for_file in file_to_rules.items():
                 futures.append(
-                    executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash), stop_event
+                    executor.submit(worker, file_path, frozenset(rules_for_file), stop_event, query_hash=query_hash)
                 )
 
             if stop_event.is_set():
