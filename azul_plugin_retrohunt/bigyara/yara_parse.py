@@ -170,6 +170,22 @@ def _parse_condition_metadata(
 def _convert_condition_ast(node) -> ConditionNode:
     """Convert Python AST into broad-phase AST."""
     #
+    # N(2, ...)
+    #
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "N":
+        required = node.args[0].value
+
+        children = []
+
+        for arg in node.args[1:]:
+            children.append(_convert_condition_ast(arg))
+
+        return NOfNode(
+            required=required,
+            children=children,
+        )
+
+    #
     # S("$a")
     #
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "S":
@@ -301,6 +317,53 @@ def _build_special_condition_ast(
     )
 
 
+def _rewrite_special_conditions(
+    condition_text: str,
+    string_names: set[str],
+) -> str:
+    """Rewrite YARA any/all/n-of expressions into boolean form."""
+
+    def repl(match):
+        quantity = match.group(1).lower()
+        target = match.group(2)
+
+        if target.lower() == "them":
+            strings = sorted(string_names)
+        else:
+            specifiers = [item.strip() for item in target[1:-1].split(",")]
+
+            strings = _expand_string_specifiers(
+                specifiers,
+                string_names,
+            )
+
+        if not strings:
+            return "False"
+
+        #
+        # any of (...)
+        #
+        if quantity == "any":
+            return "(" + " or ".join(strings) + ")"
+
+        #
+        # all of (...)
+        #
+        if quantity == "all":
+            return "(" + " and ".join(strings) + ")"
+
+        required = int(quantity)
+
+        return "N(" + str(required) + "," + ",".join(strings) + ")"
+
+    return re.sub(
+        r"\b(any|all|\d+)\s+of\s*(them|\(.*?\))",
+        repl,
+        condition_text,
+        flags=re.IGNORECASE,
+    )
+
+
 def _build_condition_ast(
     condition_text: str,
     string_names: set[str],
@@ -316,17 +379,15 @@ def _build_condition_ast(
     Non-string expressions are ignored for now.
     """
     expr = condition_text
-    special_ast = _build_special_condition_ast(
-        condition_text,
+    expr = _rewrite_special_conditions(
+        expr,
         string_names,
     )
 
-    if special_ast is not None:
-        logger.info(
-            "Special condition AST: %s",
-            special_ast,
-        )
-        return special_ast
+    logger.info(
+        "Rewritten condition expression: %s",
+        expr,
+    )
     #
     # Replace string identifiers with S("...")
     #
