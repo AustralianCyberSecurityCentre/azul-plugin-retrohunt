@@ -576,8 +576,9 @@ def _broad_phase_search(
                 plan.condition_type,
                 rule_name,
             )
-
-            final_matches = set.union(*groups)
+            
+            if groups is not None:
+                final_matches = set.union(*groups)
 
             if required_matches is not None:
                 final_matches &= required_matches
