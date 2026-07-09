@@ -322,18 +322,6 @@ def _broad_phase_search(
 
     bgparse_exec = executables["bgparse"]
     logger.info("Rule search plans broad phase: %s", rule_search_plans)
-    # ------------------------------------------------------------
-    # 1. Precompute hex atoms
-    # ------------------------------------------------------------
-    # hex_atoms = {rule: [binascii.b2a_hex(a).upper().decode() for a in atoms] for rule, atoms in rule_atoms.items()}
-
-    # ------------------------------------------------------------
-    # 2. Precompute search strings
-    # ------------------------------------------------------------
-    # if query_type == QueryTypeEnum.SURICATA:
-    # search_strings = {rule: ["-s " + " -s ".join(hex_atoms[rule]) + " "] for rule in rule_atoms}
-    # else:
-    # search_strings = {rule: [f"-s{h} " for h in hex_atoms[rule]] for rule in rule_atoms}
 
     search_strings: dict[str, list[tuple[int, str]]] = {}
 
@@ -356,16 +344,9 @@ def _broad_phase_search(
             len(search_strings[rule_name]),
         )
 
-    # ------------------------------------------------------------
-    # 3. Build flat task list
-    # ------------------------------------------------------------
+    # Build flat task list
     tasks = []
-    logger.info("Broad phase index file sizes:")
-    total_io_bytes = 0
     for index in indices:
-        size_bytes = os.path.getsize(index)
-        search_group_count = sum(len(searches) for searches in search_strings.values())
-        total_io_bytes += size_bytes * search_group_count
         for rule_name, s_list in search_strings.items():
             for group_idx, search_string in s_list:
                 tasks.append(
@@ -380,15 +361,12 @@ def _broad_phase_search(
         "Broad phase generated %d tasks",
         len(tasks),
     )
-    logger.info(f"Estimated total broad-phase I/O: {total_io_bytes / (1024 * 1024 * 1024):.2f} GB")
     search_count = len(tasks)
     searches_complete = 0
 
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
 
-    # ------------------------------------------------------------
-    # 4. Run tasks in multiprocessing pool
-    # ------------------------------------------------------------
+    # Run tasks in multiprocessing pool
     worker = partial(_run_bgparse_task, bgparse_exec, query_hash=query_hash)
 
     file_config: FileConfig = {}
@@ -414,9 +392,7 @@ def _broad_phase_search(
                 index_path=index,
                 rule_name=rule_name,
             ).observe(duration)
-            # ------------------------------------------------------------
-            # Error handling
-            # ------------------------------------------------------------
+
             if returncode != 0:
                 raise BiggrepException(
                     f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
@@ -428,9 +404,7 @@ def _broad_phase_search(
                     f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
                 )
 
-            # ------------------------------------------------------------
-            # 5. Aggregate results
-            # ------------------------------------------------------------
+            # Aggregate results
             new_matches, file_config = _process_bgparse_output(
                 stdout,
                 rule_name,
@@ -450,9 +424,6 @@ def _broad_phase_search(
                 (rule_name, new_matches),
             )
 
-    # if all(len(v) == 0 for v in rule_matches.values()):
-    #    raise NoIndexMatchesException("Search aborted due to index matches.")
-
     logger.debug("All index searches completed")
 
     rule_matches: RuleFileMatches = {}
@@ -470,7 +441,7 @@ def _broad_phase_search(
         groups = list(group_matches[rule_name].values())
 
         for string_name, matches in string_matches.items():
-            logger.debug(
+            logger.info(
                 'Rule "%s" string %s produced %d candidates via %d groups',
                 rule_name,
                 string_name,
@@ -527,13 +498,6 @@ def _broad_phase_search(
                 len(final_matches),
             )
 
-            logger.info(
-                'Rule "%s": reduced %d groups to %d strings',
-                rule_name,
-                len(groups),
-                len(string_matches),
-            )
-
             rule_matches[rule_name] = list(final_matches)
 
             continue
@@ -576,7 +540,7 @@ def _broad_phase_search(
                 plan.condition_type,
                 rule_name,
             )
-            
+
             if groups is not None:
                 final_matches = set.union(*groups)
 
@@ -688,9 +652,7 @@ def _narrow_phase_search(
 
         progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
 
-        # ------------------------------------------------------------
         # Worker function (pure, no side effects)
-        # ------------------------------------------------------------
         def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
 
             cfg = file_config.get(file_path)
@@ -730,9 +692,7 @@ def _narrow_phase_search(
 
             return ("ok", file_path, rules_for_file, results)
 
-        # ------------------------------------------------------------
         # Run workers in parallel
-        # ------------------------------------------------------------
         futures = []
         with ThreadPoolExecutor() as executor:
             for file_path, rules_for_file in file_to_rules.items():

@@ -522,7 +522,7 @@ def parse_yara_rules(
         new_atoms: list[bytes] = []
         search_group_count = 0
         largest_group = 0
-        # NEW: accumulate all regex groups across the entire rule.
+        # accumulate all regex groups across the entire rule.
 
         groups: list[set[bytes]] = []
         group_sizes: list[int] = []
@@ -542,9 +542,7 @@ def parse_yara_rules(
                 # if it is a regular expression, pull the searches from the RE tree
                 # FUTURE: this function does a heap of unnecessary work and needs to be refactored.
 
-                # ---------------------------------------------------------
-                # NEW: inspect regex structure before flattening atoms.
-                # ---------------------------------------------------------
+                # inspect regex structure before flattening atoms.
                 try:
                     re_tree_root: AtomTreeNode = _parse_re_tree(yara_string.re)
 
@@ -552,7 +550,7 @@ def parse_yara_rules(
                     regex_searches = _remove_bad_atoms(regex_searches)
                     regex_searches = _get_minimal_atoms(regex_searches)
 
-                    # NEW: keep all groups for logging later.
+                    # keep all groups for logging later.
                     for search in regex_searches:
                         groups.append(set(search))
 
@@ -582,7 +580,6 @@ def parse_yara_rules(
                 )
 
             if len(yara_string.atoms) == 0:
-                # add debug logger
                 logger.error(
                     "No atoms found: rule=%s string=%s modifiers=%s regex=%r",
                     yara_rules[rule_index].name,
