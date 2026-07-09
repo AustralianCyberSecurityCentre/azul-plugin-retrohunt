@@ -554,13 +554,6 @@ def _broad_phase_search(
             len(final_matches),
         )
 
-        logger.info(
-            'Rule "%s": reduced %d groups to %d strings',
-            rule_name,
-            len(groups),
-            len(string_matches),
-        )
-
         rule_matches[rule_name] = list(final_matches)
 
     if all(len(v) == 0 for v in rule_matches.values()):
