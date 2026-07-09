@@ -431,8 +431,6 @@ def _broad_phase_search(
             # ------------------------------------------------------------
             # 5. Aggregate results
             # ------------------------------------------------------------
-            logger.info("Task run for command...")
-            logger.info(f"{bgparse_exec} {search_string}{index}")
             new_matches, file_config = _process_bgparse_output(
                 stdout,
                 rule_name,
@@ -472,7 +470,7 @@ def _broad_phase_search(
         groups = list(group_matches[rule_name].values())
 
         for string_name, matches in string_matches.items():
-            logger.info(
+            logger.debug(
                 'Rule "%s" string %s produced %d candidates via %d groups',
                 rule_name,
                 string_name,
@@ -480,7 +478,7 @@ def _broad_phase_search(
                 len(plan.string_groups.get(string_name, [])),
             )
 
-        logger.info(
+        logger.debug(
             'Rule "%s": condition=%s*required=%s strings=%d groups=%d',
             rule_name,
             plan.condition_type,
@@ -712,7 +710,6 @@ def _narrow_phase_search(
                         query_hash=query_hash,
                         rule_name=rule_name,
                     ).time():
-                        logger.info("Checking match for %s", rule_name)
                         matched = (
                             len(
                                 compiled_yara_rules[rule_name].match(

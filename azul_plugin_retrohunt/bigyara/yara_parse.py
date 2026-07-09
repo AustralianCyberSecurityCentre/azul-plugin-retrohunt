@@ -654,7 +654,7 @@ def parse_yara_rules(
                         set(plan.string_groups.keys()),
                     )
 
-                    logger.info(
+                    logger.debug(
                         'Rule "%s" condition AST: %s',
                         match_rule_name,
                         plan.condition_ast,
@@ -678,14 +678,14 @@ def parse_yara_rules(
                     condition_text,
                 )
 
-                logger.info(
+                logger.debug(
                     'Rule "%s" required strings=%s string_groups=%s',
                     match_rule_name,
                     sorted(plan.required_strings),
                     plan.string_groups,
                 )
 
-                logger.info(
+                logger.debug(
                     'Rule "%s" condition=%s required=%s total=%s',
                     match_rule_name,
                     plan.condition_type,
@@ -694,7 +694,7 @@ def parse_yara_rules(
                 )
 
     for rule_name, plan in rule_search_plans.items():
-        logger.info(
+        logger.debug(
             'Plan "%s": condition=%s required=%s total=%s groups=%s',
             rule_name,
             plan.condition_type,
