@@ -94,18 +94,18 @@ class NOfNode(ConditionNode):
     children: list[ConditionNode]
 
 
-@dataclass
-class AnyOfNode(ConditionNode):
-    """Any of node."""
+# @dataclass
+# class AnyOfNode(ConditionNode):
+#    """Any of node."""
 
-    children: list[ConditionNode]
+#    children: list[ConditionNode]
 
 
-@dataclass
-class AllOfNode(ConditionNode):
-    """All of node."""
+# @dataclass
+# class AllOfNode(ConditionNode):
+#    """All of node."""
 
-    children: list[ConditionNode]
+#    children: list[ConditionNode]
 
 
 @dataclass
@@ -143,6 +143,41 @@ RuleFileMatches = dict[str, list[str]]
 RuleAtoms = dict[str, list[bytes]]
 RuleContent = dict[str, bytes]
 RuleSearchPlans = dict[str, RuleSearchPlan]
+
+
+def extract_required_strings(node: ConditionNode) -> set[str]:
+    """Return the MINIMUM set of strings required for this condition to be TRUE."""
+    if isinstance(node, StringNode):
+        return {node.string_name}
+
+    elif isinstance(node, AndNode):
+        # ALL must be true → union
+        result = set()
+        for child in node.children:
+            result |= extract_required_strings(child)
+        return result
+
+    elif isinstance(node, OrNode):
+        # ANY can be true → pick SMALLEST branch (optimization)
+        # return min(
+        #    (extract_required_strings(child) for child in node.children),
+        #    key=len,
+        # )
+        return set()
+
+        # elif isinstance(node, NOfNode):
+        # Need N out of M → pick N smallest branches
+        # child_sets = [extract_required_strings(c) for c in node.children]
+        # child_sets.sort(key=len)
+        # result = set()
+        # for s in child_sets[: node.required]:
+        #    result |= s
+        # return
+        return set()
+    elif isinstance(node, (OrNode, NOfNode)):
+        return set()  # safe fallback
+
+    return set()
 
 
 def _parse_condition_metadata(
@@ -671,9 +706,13 @@ def parse_yara_rules(
                 plan.condition_type = condition_type
                 plan.required_count = required_count
 
-                plan.required_strings = _extract_required_strings(
-                    condition_text,
-                )
+                # plan.required_strings = _extract_required_strings(
+                #    condition_text,
+                # )
+                if plan.condition_ast is not None:
+                    plan.required_strings = extract_required_strings(plan.condition_ast)
+                else:
+                    plan.required_strings = set()
 
                 logger.debug(
                     'Rule "%s" required strings=%s string_groups=%s',
