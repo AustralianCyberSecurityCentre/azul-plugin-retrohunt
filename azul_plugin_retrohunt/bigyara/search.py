@@ -480,6 +480,85 @@ def _broad_phase_search(
     rule_matches: RuleFileMatches = {}
 
     for rule_name, plan in rule_search_plans.items():
+        #
+        # Priority:
+        #
+        #   1. required_strings
+        #   2. required_groups
+        #   3. OR every group
+        #
+        # Note that if required_strings exists but none of its groups are
+        # actually searchable, we intentionally fall through to
+        # required_groups before finally falling back to all groups.
+        #
+
+        # ---------------------------------------------------------
+        # Try required_strings first
+        # ---------------------------------------------------------
+
+        required_string_group_ids: set[int] = set()
+
+        if getattr(plan, "required_strings", None):
+            for string_name in plan.required_strings:
+                required_string_group_ids.update(plan.string_groups.get(string_name, []))
+
+        required_string_group_ids = {
+            group_idx for group_idx in required_string_group_ids if 0 <= group_idx < len(plan.groups)
+        }
+
+        if required_string_group_ids:
+            broad_phase_modes[rule_name] = "required_strings"
+            selected_group_ids = required_string_group_ids
+
+            logger.info(
+                'Rule "%s": using %d required_string groups',
+                rule_name,
+                len(selected_group_ids),
+            )
+
+        else:
+            # -----------------------------------------------------
+            # No usable required_strings.
+            # Try required_groups.
+            # -----------------------------------------------------
+
+            required_group_ids: set[int] = set()
+
+            if getattr(plan, "required_groups", None):
+                for required_group in plan.required_groups:
+                    for group_idx, actual_group in enumerate(plan.groups):
+                        if set(actual_group) == set(required_group):
+                            required_group_ids.add(group_idx)
+                            break
+
+            required_group_ids = {group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)}
+
+            if required_group_ids:
+                broad_phase_modes[rule_name] = "required_groups"
+                selected_group_ids = required_group_ids
+
+                logger.info(
+                    'Rule "%s": using %d required_groups',
+                    rule_name,
+                    len(selected_group_ids),
+                )
+
+            else:
+                # -------------------------------------------------
+                # Final fallback.
+                # Search every group and OR the results.
+                # -------------------------------------------------
+
+                broad_phase_modes[rule_name] = "fallback"
+                selected_group_ids = set(range(len(plan.groups)))
+
+                logger.info(
+                    'Rule "%s": no required_strings/groups; using all %d groups',
+                    rule_name,
+                    len(selected_group_ids),
+                )
+
+        selected_group_map[rule_name] = selected_group_ids
         mode = broad_phase_modes[rule_name]
         selected_group_ids = selected_group_map[rule_name]
 
