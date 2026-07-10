@@ -415,12 +415,13 @@ def _broad_phase_search(
                 if not selected:
                     selected = s_list
 
-                logger.info(
-                    'Rule "%s": using %d/%d required groups as anchors',
-                    rule_name,
-                    len(selected),
-                    len(s_list),
-                )
+                if index == indices[0]:  # only log once
+                    logger.info(
+                        'Rule "%s": using %d/%d required groups as anchors',
+                        rule_name,
+                        len(selected),
+                        len(s_list),
+                    )
             else:
                 selected = s_list
 
@@ -561,10 +562,28 @@ def _broad_phase_search(
             )
 
         if plan.condition_ast is not None:
-            final_matches = _evaluate_condition_ast(
-                plan.condition_ast,
-                string_matches,
-            )
+            searched_strings = set(plan.required_strings)
+
+            if not searched_strings:
+                # --- FALLBACK: OR all available string matches ---
+                if string_matches:
+                    final_matches = set.union(*string_matches.values())
+                else:
+                    final_matches = None
+            else:
+                filtered_string_matches = {k: v for k, v in string_matches.items() if k in searched_strings}
+
+                final_matches = _evaluate_condition_ast(
+                    plan.condition_ast,
+                    filtered_string_matches,
+                )
+
+            # --- SAFETY: handle UNKNOWN ---
+            if final_matches is None:
+                if groups:
+                    final_matches = set.union(*groups)
+                else:
+                    final_matches = set()
 
             logger.info(
                 'Rule "%s": AST evaluation reduced to %d candidates',
@@ -580,7 +599,6 @@ def _broad_phase_search(
             )
 
             rule_matches[rule_name] = list(final_matches)
-
             continue
 
         if plan.condition_type == "all":
