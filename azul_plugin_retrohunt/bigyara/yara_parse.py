@@ -315,6 +315,124 @@ def _previous_significant_word(text: str, index: int) -> str:
     return text[index + 1 : end].lower()
 
 
+def _strip_comments(expr: str) -> str:
+    """Remove YARA comments while preserving strings and regex literals.
+
+    Comments are replaced with whitespace so surrounding token boundaries are
+    retained. Quoted strings and regex literals used with `matches` are copied
+    through unchanged.
+    """
+    result = list(expr)
+    index = 0
+    length = len(expr)
+
+    def blank_range(start: int, stop: int) -> None:
+        for position in range(start, stop):
+            if expr[position] not in "\r\n":
+                result[position] = " "
+
+    while index < length:
+        char = expr[index]
+
+        # Double-quoted string literal: preserve it exactly.
+        if char == '"':
+            index += 1
+            escaped = False
+
+            while index < length:
+                current = expr[index]
+
+                if escaped:
+                    escaped = False
+                    index += 1
+                    continue
+
+                if current == "\\":
+                    escaped = True
+                    index += 1
+                    continue
+
+                if current == '"':
+                    index += 1
+                    break
+
+                index += 1
+
+            continue
+
+        # YARA regex literal used with the `matches` operator: preserve it.
+        if char == "/" and _previous_significant_word(expr, index) == "matches":
+            index += 1
+            escaped = False
+            in_character_class = False
+
+            while index < length:
+                current = expr[index]
+
+                if escaped:
+                    escaped = False
+                    index += 1
+                    continue
+
+                if current == "\\":
+                    escaped = True
+                    index += 1
+                    continue
+
+                if current == "[":
+                    in_character_class = True
+                    index += 1
+                    continue
+
+                if current == "]" and in_character_class:
+                    in_character_class = False
+                    index += 1
+                    continue
+
+                if current == "/" and not in_character_class:
+                    index += 1
+
+                    while index < length and expr[index].isalpha():
+                        index += 1
+
+                    break
+
+                index += 1
+
+            continue
+
+        # Line comment.
+        if char == "/" and index + 1 < length and expr[index + 1] == "/":
+            start = index
+            index += 2
+
+            while index < length and expr[index] not in "\r\n":
+                index += 1
+
+            blank_range(start, index)
+            continue
+
+        # Block comment.
+        if char == "/" and index + 1 < length and expr[index + 1] == "*":
+            start = index
+            index += 2
+
+            while index + 1 < length and not (expr[index] == "*" and expr[index + 1] == "/"):
+                index += 1
+
+            if index + 1 < length:
+                index += 2
+            else:
+                index = length
+
+            blank_range(start, index)
+            continue
+
+        index += 1
+
+    return "".join(result)
+
+
 def _mask_non_code_regions(expr: str) -> str:
     """Mask strings, regex literals, and comments while preserving positions.
 
@@ -556,6 +674,7 @@ def _parse_partial_condition(expr: str) -> ConditionNode:
     to retain the searchable ($a or $b) subtree without pretending that the
     unsupported filesize predicate was evaluated.
     """
+    expr = _strip_comments(expr).strip()
     expr = _strip_outer_parentheses(expr)
 
     if not expr:
