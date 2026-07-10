@@ -119,6 +119,8 @@ class RuleSearchPlan:
     # $a and $b and <complex_expression>
     required_strings: set[str] = field(default_factory=set)
 
+    required_groups: list[set[bytes]] = field(default_factory=list)
+
     optional_strings: set[str] = field(default_factory=set)
 
     raw_condition: str = ""
@@ -423,6 +425,43 @@ def _evaluate_condition_ast(
     raise ValueError(f"Unsupported condition node: {type(node)}")
 
 
+def _extract_required_groups(
+    node: ConditionNode | None,
+    string_groups: dict[str, list[int]],
+    groups: list[set[bytes]],
+) -> list[set[bytes]]:
+    """Return groups that are REQUIRED (i.e. must match for condition to be true)."""
+    if node is None:
+        return []
+
+    # Only top-level AND is safe
+    if isinstance(node, AndNode):
+        required = []
+
+        for child in node.children:
+            if isinstance(child, StringNode):
+                # map string -> its groups
+                for group_idx in string_groups.get(child.string_name, []):
+                    required.append(groups[group_idx])
+
+            elif isinstance(child, OrNode):
+                # OR group is required as a whole
+                or_group = set()
+
+                for sub in child.children:
+                    if isinstance(sub, StringNode):
+                        for group_idx in string_groups.get(sub.string_name, []):
+                            or_group |= groups[group_idx]
+
+                if or_group:
+                    required.append(or_group)
+
+        return required
+
+    # anything else (OR root etc) → nothing is guaranteed
+    return []
+
+
 def _required_strings_from_ast(node: ConditionNode | None) -> set[str]:
     """Return strings that are guaranteed to be present for the condition to be true."""
     if node is None:
@@ -702,6 +741,12 @@ def parse_yara_rules(
                 else:
                     # fallback to old behavior
                     plan.required_strings = _extract_required_strings(condition_text)
+
+                plan.required_groups = _extract_required_groups(
+                    plan.condition_ast,
+                    plan.string_groups,
+                    plan.groups,
+                )
 
                 logger.debug(
                     'Rule "%s" required strings=%s string_groups=%s',
