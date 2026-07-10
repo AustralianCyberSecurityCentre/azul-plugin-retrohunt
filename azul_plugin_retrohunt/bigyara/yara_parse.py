@@ -94,20 +94,6 @@ class NOfNode(ConditionNode):
     children: list[ConditionNode]
 
 
-# @dataclass
-# class AnyOfNode(ConditionNode):
-#    """Any of node."""
-
-#    children: list[ConditionNode]
-
-
-# @dataclass
-# class AllOfNode(ConditionNode):
-#    """All of node."""
-
-#    children: list[ConditionNode]
-
-
 @dataclass
 class RuleSearchPlan:
     """Search plan object."""
@@ -143,41 +129,6 @@ RuleFileMatches = dict[str, list[str]]
 RuleAtoms = dict[str, list[bytes]]
 RuleContent = dict[str, bytes]
 RuleSearchPlans = dict[str, RuleSearchPlan]
-
-
-def extract_required_strings(node: ConditionNode) -> set[str]:
-    """Return the MINIMUM set of strings required for this condition to be TRUE."""
-    if isinstance(node, StringNode):
-        return {node.string_name}
-
-    elif isinstance(node, AndNode):
-        # ALL must be true → union
-        result = set()
-        for child in node.children:
-            result |= extract_required_strings(child)
-        return result
-
-    elif isinstance(node, OrNode):
-        # ANY can be true → pick SMALLEST branch (optimization)
-        # return min(
-        #    (extract_required_strings(child) for child in node.children),
-        #    key=len,
-        # )
-        return set()
-
-        # elif isinstance(node, NOfNode):
-        # Need N out of M → pick N smallest branches
-        # child_sets = [extract_required_strings(c) for c in node.children]
-        # child_sets.sort(key=len)
-        # result = set()
-        # for s in child_sets[: node.required]:
-        #    result |= s
-        # return
-        return set()
-    elif isinstance(node, (OrNode, NOfNode)):
-        return set()  # safe fallback
-
-    return set()
 
 
 def _parse_condition_metadata(
@@ -472,6 +423,46 @@ def _evaluate_condition_ast(
     raise ValueError(f"Unsupported condition node: {type(node)}")
 
 
+def _required_strings_from_ast(node: ConditionNode | None) -> set[str]:
+    """Return strings that are guaranteed to be present for the condition to be true."""
+    if node is None:
+        return set()
+
+    if isinstance(node, StringNode):
+        return {node.string_name}
+
+    if isinstance(node, AndNode):
+        # All children must match → union of required
+        required = set()
+        for child in node.children:
+            required |= _required_strings_from_ast(child)
+        return required
+
+    if isinstance(node, OrNode):
+        # Any child can match → intersection of required
+        child_required = [_required_strings_from_ast(child) for child in node.children]
+
+        if not child_required:
+            return set()
+
+        result = child_required[0].copy()
+        for s in child_required[1:]:
+            result &= s
+        return result
+
+    if isinstance(node, NOfNode):
+        # Only safe if ALL are required (i.e. N == len(children))
+        if node.required == len(node.children):
+            required = set()
+            for child in node.children:
+                required |= _required_strings_from_ast(child)
+            return required
+
+        return set()
+
+    return set()
+
+
 def _extract_required_strings(
     condition_text: str,
 ) -> set:
@@ -706,13 +697,11 @@ def parse_yara_rules(
                 plan.condition_type = condition_type
                 plan.required_count = required_count
 
-                # plan.required_strings = _extract_required_strings(
-                #    condition_text,
-                # )
                 if plan.condition_ast is not None:
-                    plan.required_strings = extract_required_strings(plan.condition_ast)
+                    plan.required_strings = _required_strings_from_ast(plan.condition_ast)
                 else:
-                    plan.required_strings = set()
+                    # fallback to old behavior
+                    plan.required_strings = _extract_required_strings(condition_text)
 
                 logger.debug(
                     'Rule "%s" required strings=%s string_groups=%s',
