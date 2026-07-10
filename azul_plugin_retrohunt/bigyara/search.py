@@ -10,6 +10,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from itertools import product
 
 import yara
 from prometheus_client import Counter, Histogram
@@ -324,74 +325,107 @@ def _broad_phase_search(
 
     search_strings: dict[str, list[tuple[int, str]]] = {}
     broad_phase_modes: dict[str, str] = {}
-    selected_group_map: dict[str, set[int]] = {}
 
     for rule_name, plan in rule_search_plans.items():
-        selected_group_ids: set[int] = set()
-
-        # Priority 1: if required_strings exists, search only those strings.
-        # Ignore required_groups and all other strings. Narrow YARA evaluation
-        # will validate the complete condition.
-        if getattr(plan, "required_strings", None):
-            broad_phase_modes[rule_name] = "required_strings"
-
-            for string_name in plan.required_strings:
-                selected_group_ids.update(plan.string_groups.get(string_name, []))
-
-            logger.info(
-                'Rule "%s": required_strings present; ignoring required_groups and other strings',
-                rule_name,
-            )
-
-        # Priority 2: if there are no required_strings but required_groups
-        # exists, search every group independently and union the candidates.
-        elif getattr(plan, "required_groups", None):
-            broad_phase_modes[rule_name] = "required_groups"
-
-            for required_group in plan.required_groups:
-                for group_idx, actual_group in enumerate(plan.groups):
-                    if set(actual_group) == set(required_group):
-                        selected_group_ids.add(group_idx)
-                        break
-
-            logger.info(
-                'Rule "%s": no required_strings; using %d required groups',
-                rule_name,
-                len(selected_group_ids),
-            )
-
-        # Otherwise retain the existing broad-phase behaviour by searching all
-        # groups and applying the condition plan after bgparse completes.
-        else:
-            broad_phase_modes[rule_name] = "fallback"
-            selected_group_ids = set(range(len(plan.groups)))
-
-        valid_group_ids = {group_idx for group_idx in selected_group_ids if 0 <= group_idx < len(plan.groups)}
-
-        if not valid_group_ids:
-            logger.warning(
-                'Rule "%s": no valid selected groups; falling back to all groups',
-                rule_name,
-            )
-            broad_phase_modes[rule_name] = "fallback"
-            valid_group_ids = set(range(len(plan.groups)))
-
-        selected_group_map[rule_name] = valid_group_ids
         search_strings[rule_name] = []
 
-        # One bgparse task per selected group. This is essential for required
-        # alternatives such as ($a or $b), because their result sets must be
-        # unioned rather than combined into one AND-style bgparse command.
-        for group_idx in sorted(valid_group_ids):
-            group = plan.groups[group_idx]
-            hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+        required_string_group_options: list[list[int]] = []
+        required_strings_usable = bool(getattr(plan, "required_strings", None))
 
-            search_strings[rule_name].append(
-                (
-                    group_idx,
-                    "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+        if required_strings_usable:
+            for string_name in sorted(plan.required_strings):
+                valid_group_ids = [
+                    group_idx
+                    for group_idx in plan.string_groups.get(string_name, [])
+                    if 0 <= group_idx < len(plan.groups)
+                ]
+
+                if not valid_group_ids:
+                    required_strings_usable = False
+                    logger.warning(
+                        'Rule "%s": required string %s has no usable atom groups',
+                        rule_name,
+                        string_name,
+                    )
+                    break
+
+                required_string_group_options.append(valid_group_ids)
+
+        if required_strings_usable and required_string_group_options:
+            broad_phase_modes[rule_name] = "required_strings"
+
+            for combination_index, group_combination in enumerate(product(*required_string_group_options)):
+                combined_atoms: list[bytes] = []
+
+                for group_idx in group_combination:
+                    combined_atoms.extend(plan.groups[group_idx])
+
+                unique_atoms = list(dict.fromkeys(combined_atoms))
+                hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in unique_atoms]
+
+                search_id = -(combination_index + 1)
+                search_strings[rule_name].append(
+                    (
+                        search_id,
+                        "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                    )
                 )
+
+            logger.info(
+                'Rule "%s": required_strings present; generated %d combined AND bgparse searches covering %d required strings',
+                rule_name,
+                len(search_strings[rule_name]),
+                len(plan.required_strings),
             )
+
+        else:
+            required_group_ids: set[int] = set()
+
+            if getattr(plan, "required_groups", None):
+                for required_group in plan.required_groups:
+                    for group_idx, actual_group in enumerate(plan.groups):
+                        if set(actual_group) == set(required_group):
+                            required_group_ids.add(group_idx)
+                            break
+
+            required_group_ids = {group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)}
+
+            if required_group_ids:
+                broad_phase_modes[rule_name] = "required_groups"
+
+                for group_idx in sorted(required_group_ids):
+                    group = plan.groups[group_idx]
+                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                    search_strings[rule_name].append(
+                        (
+                            group_idx,
+                            "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                        )
+                    )
+
+                logger.info(
+                    'Rule "%s": no usable required_strings; generated %d required_group searches',
+                    rule_name,
+                    len(search_strings[rule_name]),
+                )
+
+            else:
+                broad_phase_modes[rule_name] = "fallback"
+
+                for group_idx, group in enumerate(plan.groups):
+                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                    search_strings[rule_name].append(
+                        (
+                            group_idx,
+                            "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                        )
+                    )
+
+                logger.info(
+                    'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
+                    rule_name,
+                    len(search_strings[rule_name]),
+                )
 
         logger.info(
             'Rule "%s": mode=%s, generated %d bgparse searches',
@@ -400,38 +434,28 @@ def _broad_phase_search(
             len(search_strings[rule_name]),
         )
 
-    # Build flat task list. search_strings already contains only the searches
-    # appropriate for each rule's selected broad-phase mode.
     tasks = []
     for index in indices:
         for rule_name, grouped_searches in search_strings.items():
-            for group_idx, search_string in grouped_searches:
-                tasks.append(
-                    (
-                        index,
-                        rule_name,
-                        group_idx,
-                        search_string,
-                    )
-                )
+            for search_id, search_string in grouped_searches:
+                tasks.append((index, rule_name, search_id, search_string))
 
     logger.info("Broad phase generated %d tasks", len(tasks))
     search_count = len(tasks)
     searches_complete = 0
-
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
 
     worker = partial(_run_bgparse_task, bgparse_exec, query_hash=query_hash)
-
     file_config: FileConfig = {}
-    group_matches = {
-        rule_name: {idx: set() for idx in range(len(plan.groups))} for rule_name, plan in rule_search_plans.items()
+    search_matches: dict[str, dict[int, set[str]]] = {
+        rule_name: {search_id: set() for search_id, _ in grouped_searches}
+        for rule_name, grouped_searches in search_strings.items()
     }
 
     with mp.Pool() as pool:
         for (
             rule_name,
-            group_idx,
+            search_id,
             index,
             search_string,
             returncode,
@@ -465,8 +489,7 @@ def _broad_phase_search(
                 index_path=index,
             )
 
-            group_matches[rule_name][group_idx].update(new_matches)
-
+            search_matches[rule_name][search_id].update(new_matches)
             searches_complete += 1
             progress_callback(
                 SearchPhaseEnum.BROAD_PHASE,
@@ -476,168 +499,27 @@ def _broad_phase_search(
             )
 
     logger.debug("All index searches completed")
-
     rule_matches: RuleFileMatches = {}
 
-    for rule_name, plan in rule_search_plans.items():
-        #
-        # Priority:
-        #
-        #   1. required_strings
-        #   2. required_groups
-        #   3. OR every group
-        #
-        # Note that if required_strings exists but none of its groups are
-        # actually searchable, we intentionally fall through to
-        # required_groups before finally falling back to all groups.
-        #
-
-        # ---------------------------------------------------------
-        # Try required_strings first
-        # ---------------------------------------------------------
-
-        required_string_group_ids: set[int] = set()
-
-        if getattr(plan, "required_strings", None):
-            for string_name in plan.required_strings:
-                required_string_group_ids.update(plan.string_groups.get(string_name, []))
-
-        required_string_group_ids = {
-            group_idx for group_idx in required_string_group_ids if 0 <= group_idx < len(plan.groups)
-        }
-
-        if required_string_group_ids:
-            broad_phase_modes[rule_name] = "required_strings"
-            selected_group_ids = required_string_group_ids
-
-            logger.info(
-                'Rule "%s": using %d required_string groups',
-                rule_name,
-                len(selected_group_ids),
-            )
-
-        else:
-            # -----------------------------------------------------
-            # No usable required_strings.
-            # Try required_groups.
-            # -----------------------------------------------------
-
-            required_group_ids: set[int] = set()
-
-            if getattr(plan, "required_groups", None):
-                for required_group in plan.required_groups:
-                    for group_idx, actual_group in enumerate(plan.groups):
-                        if set(actual_group) == set(required_group):
-                            required_group_ids.add(group_idx)
-                            break
-
-            required_group_ids = {group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)}
-
-            if required_group_ids:
-                broad_phase_modes[rule_name] = "required_groups"
-                selected_group_ids = required_group_ids
-
-                logger.info(
-                    'Rule "%s": using %d required_groups',
-                    rule_name,
-                    len(selected_group_ids),
-                )
-
-            else:
-                # -------------------------------------------------
-                # Final fallback.
-                # Search every group and OR the results.
-                # -------------------------------------------------
-
-                broad_phase_modes[rule_name] = "fallback"
-                selected_group_ids = set(range(len(plan.groups)))
-
-                logger.info(
-                    'Rule "%s": no required_strings/groups; using all %d groups',
-                    rule_name,
-                    len(selected_group_ids),
-                )
-
-        selected_group_map[rule_name] = selected_group_ids
+    for rule_name, _plan in rule_search_plans.items():
         mode = broad_phase_modes[rule_name]
-        selected_group_ids = selected_group_map[rule_name]
+        result_sets = list(search_matches[rule_name].values())
+        final_matches = set.union(*result_sets) if result_sets else set()
 
         if mode == "required_strings":
-            # Reconstruct each required string's candidate set by unioning all
-            # atom groups belonging to that string. Multiple required strings
-            # are mandatory, so intersect their candidate sets.
-            required_string_sets: list[set[str]] = []
-
-            for string_name in plan.required_strings:
-                group_ids = plan.string_groups.get(string_name, [])
-                per_string_sets = [
-                    group_matches[rule_name][group_idx]
-                    for group_idx in group_ids
-                    if group_idx in group_matches[rule_name]
-                ]
-
-                if per_string_sets:
-                    string_candidates = set.union(*per_string_sets)
-                else:
-                    string_candidates = set()
-
-                required_string_sets.append(string_candidates)
-
-                logger.info(
-                    'Rule "%s" required string %s produced %d candidates',
-                    rule_name,
-                    string_name,
-                    len(string_candidates),
-                )
-
-            if required_string_sets:
-                final_matches = set.intersection(*required_string_sets)
-            else:
-                final_matches = set()
-
             logger.info(
-                'Rule "%s": required_strings broad phase produced %d candidates',
+                'Rule "%s": %d combined required-string searches produced %d candidates',
                 rule_name,
+                len(result_sets),
                 len(final_matches),
             )
-
         elif mode == "required_groups":
-            # required_groups represents searchable alternatives such as
-            # ($a or $b). Any one alternative is enough to become a candidate;
-            # the complete YARA condition is checked in the narrow phase.
-            required_group_sets = [
-                group_matches[rule_name][group_idx]
-                for group_idx in selected_group_ids
-                if group_idx in group_matches[rule_name]
-            ]
-
-            if required_group_sets:
-                final_matches = set.union(*required_group_sets)
-            else:
-                final_matches = set()
-
             logger.info(
                 'Rule "%s": required_groups OR broad phase produced %d candidates',
                 rule_name,
                 len(final_matches),
             )
-
         else:
-            # No required_strings or required_groups were identified.
-            # Search all available atom groups and OR every result together.
-            # Narrow YARA evaluation is responsible for checking the complete
-            # condition and removing false positives.
-            all_group_sets = [
-                group_matches[rule_name][group_idx]
-                for group_idx in selected_group_ids
-                if group_idx in group_matches[rule_name]
-            ]
-
-            if all_group_sets:
-                final_matches = set.union(*all_group_sets)
-            else:
-                final_matches = set()
-
             logger.info(
                 'Rule "%s": fallback OR over all groups produced %d candidates',
                 rule_name,
