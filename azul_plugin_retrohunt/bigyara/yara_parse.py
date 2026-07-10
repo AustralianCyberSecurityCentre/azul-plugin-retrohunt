@@ -66,6 +66,13 @@ class ConditionNode:
 
 
 @dataclass
+class UnknownNode(ConditionNode):
+    """Condition fragment that is not understood by the broad-phase parser."""
+
+    raw_text: str = ""
+
+
+@dataclass
 class StringNode(ConditionNode):
     """String node."""
 
@@ -293,23 +300,305 @@ def _rewrite_special_conditions(
     )
 
 
+def _previous_significant_word(text: str, index: int) -> str:
+    """Return the word immediately before index, ignoring whitespace."""
+    index -= 1
+
+    while index >= 0 and text[index].isspace():
+        index -= 1
+
+    end = index + 1
+
+    while index >= 0 and (text[index].isalnum() or text[index] == "_"):
+        index -= 1
+
+    return text[index + 1 : end].lower()
+
+
+def _mask_non_code_regions(expr: str) -> str:
+    """Mask strings, regex literals, and comments while preserving positions.
+
+    Every masked character is replaced with a space, except newlines, which are
+    retained. Keeping the same string length allows the boolean splitters to use
+    indexes from the masked text against the original expression.
+
+    Supported protected regions:
+        "quoted strings"
+        /regular expressions/
+        // line comments
+        /* block comments */
+
+    A slash begins a regex literal only when it follows the YARA `matches`
+    keyword. Other slashes are left untouched so arithmetic division is not
+    mistaken for a regex.
+    """
+    masked = list(expr)
+    index = 0
+    length = len(expr)
+
+    def mask_range(start: int, stop: int) -> None:
+        for position in range(start, stop):
+            if expr[position] not in "\r\n":
+                masked[position] = " "
+
+    while index < length:
+        char = expr[index]
+
+        # Line comment.
+        if char == "/" and index + 1 < length and expr[index + 1] == "/":
+            start = index
+            index += 2
+
+            while index < length and expr[index] not in "\r\n":
+                index += 1
+
+            mask_range(start, index)
+            continue
+
+        # Block comment.
+        if char == "/" and index + 1 < length and expr[index + 1] == "*":
+            start = index
+            index += 2
+
+            while index + 1 < length and not (expr[index] == "*" and expr[index + 1] == "/"):
+                index += 1
+
+            if index + 1 < length:
+                index += 2
+            else:
+                index = length
+
+            mask_range(start, index)
+            continue
+
+        # Double-quoted string literal.
+        if char == '"':
+            start = index
+            index += 1
+            escaped = False
+
+            while index < length:
+                current = expr[index]
+
+                if escaped:
+                    escaped = False
+                    index += 1
+                    continue
+
+                if current == "\\":
+                    escaped = True
+                    index += 1
+                    continue
+
+                if current == '"':
+                    index += 1
+                    break
+
+                index += 1
+
+            mask_range(start, index)
+            continue
+
+        # YARA regex literal used with the `matches` operator.
+        if char == "/" and _previous_significant_word(expr, index) == "matches":
+            start = index
+            index += 1
+            escaped = False
+            in_character_class = False
+
+            while index < length:
+                current = expr[index]
+
+                if escaped:
+                    escaped = False
+                    index += 1
+                    continue
+
+                if current == "\\":
+                    escaped = True
+                    index += 1
+                    continue
+
+                if current == "[":
+                    in_character_class = True
+                    index += 1
+                    continue
+
+                if current == "]" and in_character_class:
+                    in_character_class = False
+                    index += 1
+                    continue
+
+                if current == "/" and not in_character_class:
+                    index += 1
+
+                    # Consume optional regex modifiers.
+                    while index < length and expr[index].isalpha():
+                        index += 1
+
+                    break
+
+                index += 1
+
+            mask_range(start, index)
+            continue
+
+        index += 1
+
+    return "".join(masked)
+
+
+def _strip_outer_parentheses(expr: str) -> str:
+    """Strip balanced parentheses that wrap the complete expression.
+
+    Parentheses inside strings, regex literals, and comments are ignored.
+    """
+    expr = expr.strip()
+
+    while expr.startswith("(") and expr.endswith(")"):
+        masked = _mask_non_code_regions(expr)
+        depth = 0
+        wraps_entire_expression = True
+
+        for index, char in enumerate(masked):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+
+                if depth == 0 and index != len(masked) - 1:
+                    wraps_entire_expression = False
+                    break
+
+            if depth < 0:
+                wraps_entire_expression = False
+                break
+
+        if not wraps_entire_expression or depth != 0:
+            break
+
+        expr = expr[1:-1].strip()
+
+    return expr
+
+
+def _split_top_level_boolean(expr: str, operator: str) -> list[str]:
+    """Split on a top-level boolean keyword outside protected regions."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    index = 0
+    operator_lower = operator.lower()
+    masked = _mask_non_code_regions(expr)
+    masked_lower = masked.lower()
+
+    while index < len(masked):
+        char = masked[index]
+
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+
+        if char == ")":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+
+        if depth == 0 and masked_lower.startswith(operator_lower, index):
+            before = masked[index - 1] if index > 0 else " "
+            after_index = index + len(operator)
+            after = masked[after_index] if after_index < len(masked) else " "
+
+            if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                parts.append(expr[start:index].strip())
+                start = after_index
+                index = after_index
+                continue
+
+        index += 1
+
+    if parts:
+        parts.append(expr[start:].strip())
+        return parts
+
+    return [expr.strip()]
+
+
+def _split_top_level_commas(expr: str) -> list[str]:
+    """Split top-level commas outside strings, regexes, and comments."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    masked = _mask_non_code_regions(expr)
+
+    for index, char in enumerate(masked):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            parts.append(expr[start:index].strip())
+            start = index + 1
+
+    parts.append(expr[start:].strip())
+    return parts
+
+
+def _parse_partial_condition(expr: str) -> ConditionNode:
+    """Parse the boolean/string portions of a YARA condition conservatively.
+
+    Unsupported predicates become UnknownNode instances. This allows a condition
+    such as:
+
+        filesize > 2MB and ($a or $b)
+
+    to retain the searchable ($a or $b) subtree without pretending that the
+    unsupported filesize predicate was evaluated.
+    """
+    expr = _strip_outer_parentheses(expr)
+
+    if not expr:
+        return UnknownNode(raw_text=expr)
+
+    # OR has lower precedence than AND, so split OR first.
+    or_parts = _split_top_level_boolean(expr, "or")
+    if len(or_parts) > 1:
+        return OrNode(children=[_parse_partial_condition(part) for part in or_parts])
+
+    and_parts = _split_top_level_boolean(expr, "and")
+    if len(and_parts) > 1:
+        return AndNode(children=[_parse_partial_condition(part) for part in and_parts])
+
+    n_of_match = re.fullmatch(
+        r"N\s*\(\s*(\d+)\s*,(.*)\)",
+        expr,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if n_of_match:
+        required = int(n_of_match.group(1))
+        child_text = n_of_match.group(2)
+        children = [_parse_partial_condition(part) for part in _split_top_level_commas(child_text) if part.strip()]
+        return NOfNode(required=required, children=children)
+
+    if re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", expr):
+        return StringNode(string_name=expr)
+
+    return UnknownNode(raw_text=expr)
+
+
 def _build_condition_ast(
     condition_text: str,
     string_names: set[str],
 ) -> ConditionNode | None:
-    """Build a boolean AST from a YARA condition.
+    """Build a conservative partial AST from a YARA condition.
 
-    Currently supports:
-        $a
-        $a and $b
-        $a or $b
-        $a and ($b or $c)
-        ($a or $b) and ($c or $d)
-    Non-string expressions are ignored for now.
+    Boolean string expressions are retained. Unsupported YARA predicates are
+    represented as UnknownNode objects instead of causing the complete parse
+    to fail.
     """
-    expr = condition_text
     expr = _rewrite_special_conditions(
-        expr,
+        condition_text,
         string_names,
     )
 
@@ -317,50 +606,19 @@ def _build_condition_ast(
         "Rewritten condition expression: %s",
         expr,
     )
-    #
-    # Replace string identifiers with S("...")
-    #
-    for string_name in sorted(
-        string_names,
-        key=len,
-        reverse=True,
-    ):
-        expr = re.sub(
-            rf"(?<![A-Za-z0-9_]){re.escape(string_name)}(?![A-Za-z0-9_])",
-            f'S("{string_name}")',
-            expr,
+
+    try:
+        condition_ast = _parse_partial_condition(expr)
+
+        logger.info(
+            "Partial condition AST: %s",
+            condition_ast,
         )
 
-    #
-    # Convert logical operators into Python operators
-    #
-    expr = re.sub(
-        r"\band\b",
-        "&",
-        expr,
-        flags=re.IGNORECASE,
-    )
-
-    expr = re.sub(
-        r"\bor\b",
-        "|",
-        expr,
-        flags=re.IGNORECASE,
-    )
-
-    logger.info(
-        "Condition AST expression: %s",
-        expr,
-    )
-    #
-    # Parse via Python AST
-    #
-    try:
-        parsed = ast.parse(expr, mode="eval")
-        return _convert_condition_ast(parsed.body)
+        return condition_ast
     except Exception as exc:
         logger.debug(
-            "Failed to parse condition AST: %s",
+            "Failed to parse partial condition AST: %s",
             exc,
         )
         return None
@@ -372,6 +630,9 @@ def _evaluate_condition_ast(
 ) -> set:
     """Evaluate broad-phase condition tree."""
     if node is None:
+        return set()
+
+    if isinstance(node, UnknownNode):
         return set()
 
     if isinstance(node, StringNode):
@@ -430,41 +691,50 @@ def _extract_required_groups(
     string_groups: dict[str, list[int]],
     groups: list[set[bytes]],
 ) -> list[set[bytes]]:
-    """Return groups that are REQUIRED (i.e. must match for condition to be true)."""
-    if node is None:
+    """Return searchable groups from required top-level OR branches.
+
+    For a condition such as:
+
+        filesize > 2MB and ($a or $b)
+
+    the unsupported filesize predicate is ignored for broad-phase planning and
+    the individual atom groups belonging to $a and $b are returned. The search
+    layer then runs each group independently and ORs their candidate results.
+
+    Only OR expressions that are direct children of a top-level AND are used.
+    This is conservative: an OR at the root is not guaranteed to be required.
+    """
+    if not isinstance(node, AndNode):
         return []
 
-    # Only top-level AND is safe
-    if isinstance(node, AndNode):
-        required = []
+    required_groups: list[set[bytes]] = []
+    seen_group_ids: set[int] = set()
 
-        for child in node.children:
-            if isinstance(child, StringNode):
-                # map string -> its groups
-                for group_idx in string_groups.get(child.string_name, []):
-                    required.append(groups[group_idx])
+    for child in node.children:
+        if not isinstance(child, OrNode):
+            continue
 
-            elif isinstance(child, OrNode):
-                # OR group is required as a whole
-                or_group = set()
+        for sub in child.children:
+            if not isinstance(sub, StringNode):
+                continue
 
-                for sub in child.children:
-                    if isinstance(sub, StringNode):
-                        for group_idx in string_groups.get(sub.string_name, []):
-                            or_group |= groups[group_idx]
+            for group_idx in string_groups.get(sub.string_name, []):
+                if group_idx in seen_group_ids:
+                    continue
 
-                if or_group:
-                    required.append(or_group)
+                if 0 <= group_idx < len(groups):
+                    required_groups.append(groups[group_idx])
+                    seen_group_ids.add(group_idx)
 
-        return required
-
-    # anything else (OR root etc) → nothing is guaranteed
-    return []
+    return required_groups
 
 
 def _required_strings_from_ast(node: ConditionNode | None) -> set[str]:
     """Return strings that are guaranteed to be present for the condition to be true."""
     if node is None:
+        return set()
+
+    if isinstance(node, UnknownNode):
         return set()
 
     if isinstance(node, StringNode):
