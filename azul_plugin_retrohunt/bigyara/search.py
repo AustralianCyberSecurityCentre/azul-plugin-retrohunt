@@ -325,18 +325,75 @@ def _broad_phase_search(
 
     search_strings: dict[str, list[tuple[int, str]]] = {}
 
+    required_group_map: dict[str, set[int]] = {}
+
     for rule_name, plan in rule_search_plans.items():
+        # --- build required group map ---
+        required_group_ids = set()
+        for s in getattr(plan, "required_strings", []):
+            required_group_ids.update(plan.string_groups.get(s, []))
+
+        required_group_map[rule_name] = required_group_ids
+
+        # --- build search strings ---
         search_strings[rule_name] = []
 
-        for group_idx, group in enumerate(plan.groups):
+        required_groups = required_group_ids
+
+        # merge required groups into ONE query
+        # merge required groups into ONE query
+        if required_groups:
+            # pick ONE anchor group (deterministic choice is better)
+            valid_required_groups = [g for g in required_groups if g < len(plan.groups)]
+
+            if not valid_required_groups:
+                logger.warning('No valid required groups for rule "%s", falling back', rule_name)
+                required_groups = set()
+            else:
+                gid = min(valid_required_groups, key=lambda g: len(plan.groups[g]))
+
+            if gid >= len(plan.groups):
+                logger.warning('Invalid group id %d for rule "%s" — falling back to all groups', gid, rule_name)
+
+                for group_idx, group in enumerate(plan.groups):
+                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+
+                    search_strings[rule_name].append(
+                        (
+                            group_idx,
+                            "".join(f"-s{h} " for h in hex_atoms),
+                        )
+                    )
+                continue
+
+            group = plan.groups[gid]
+
             hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
 
             search_strings[rule_name].append(
                 (
-                    group_idx,
+                    gid,
                     "".join(f"-s{h} " for h in hex_atoms),
                 )
             )
+
+            logger.info(
+                'Rule "%s": using required group %d as anchor (out of %d)',
+                rule_name,
+                gid,
+                len(required_groups),
+            )
+        else:
+            # fallback: build all groups
+            for group_idx, group in enumerate(plan.groups):
+                hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+
+                search_strings[rule_name].append(
+                    (
+                        group_idx,
+                        "".join(f"-s{h} " for h in hex_atoms),
+                    )
+                )
 
         logger.info(
             'Rule "%s" generated %d grouped searches',
@@ -348,7 +405,26 @@ def _broad_phase_search(
     tasks = []
     for index in indices:
         for rule_name, s_list in search_strings.items():
-            for group_idx, search_string in s_list:
+            required_groups = required_group_map.get(rule_name, set())
+
+            # If we have required groups → ONLY run those
+            if required_groups:
+                selected = [(gid, s) for gid, s in s_list if gid in required_groups]
+
+                # fallback safety: if filtering removed everything
+                if not selected:
+                    selected = s_list
+
+                logger.info(
+                    'Rule "%s": using %d/%d required groups as anchors',
+                    rule_name,
+                    len(selected),
+                    len(s_list),
+                )
+            else:
+                selected = s_list
+
+            for group_idx, search_string in selected:
                 tasks.append(
                     (
                         index,
@@ -472,6 +548,11 @@ def _broad_phase_search(
             )
 
             required_matches = set.intersection(*required_string_sets)
+
+            if required_matches is not None and not required_matches:
+                logger.info('Rule "%s": required strings eliminated all candidates early', rule_name)
+                rule_matches[rule_name] = []
+                continue
 
             logger.info(
                 'Rule "%s": required strings reduced candidates to %d',
