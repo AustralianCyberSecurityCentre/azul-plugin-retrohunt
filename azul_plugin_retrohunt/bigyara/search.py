@@ -603,13 +603,43 @@ def _narrow_phase_search(
             for p in paths:
                 file_to_rules[p].add(rule_name)
 
-        # Precompile YARA rules once
+        # Precompile individual YARA rules once. These remain the safe fallback
+        # for single-rule candidate files and for any candidate group that cannot
+        # be compiled into a combined ruleset.
         compiled_yara_rules = {}
+        prepared_yara_content = {}
+        combined_yara_rules = {}
+        combined_yara_namespaces = {}
         if queryType == QueryTypeEnum.YARA:
             for rule_name, content in list(rule_content.items()):
                 if not content.startswith('import "pe"\n'):
                     content = 'import "pe"\n' + content
+                prepared_yara_content[rule_name] = content
                 compiled_yara_rules[rule_name] = yara.compile(source=content)
+
+            # Compile one ruleset for each distinct multi-rule candidate group.
+            # This allows YARA to traverse a file once for all relevant rules,
+            # while retaining the existing per-rule matcher as a safe fallback.
+            distinct_rule_groups = {
+                frozenset(rules_for_file) for rules_for_file in file_to_rules.values() if len(rules_for_file) > 1
+            }
+
+            for rules_for_file in distinct_rule_groups:
+                namespace_to_rule = {
+                    f"candidate_{idx}": rule_name for idx, rule_name in enumerate(sorted(rules_for_file))
+                }
+                sources = {
+                    namespace: prepared_yara_content[rule_name] for namespace, rule_name in namespace_to_rule.items()
+                }
+
+                try:
+                    combined_yara_rules[rules_for_file] = yara.compile(sources=sources)
+                    combined_yara_namespaces[rules_for_file] = namespace_to_rule
+                except Exception:
+                    logger.warning(
+                        "Could not compile combined YARA candidate group; falling back to per-rule scans",
+                        exc_info=True,
+                    )
 
         # Precompute total jobs
         total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
@@ -632,28 +662,51 @@ def _narrow_phase_search(
                 return ("missing", file_path, rules_for_file, None)
 
             results = []
-            for rule_name in rules_for_file:
-                if queryType == QueryTypeEnum.YARA:
-                    with prom_narrow_cpu_duration.labels(
-                        query_hash=query_hash,
-                        rule_name=rule_name,
-                    ).time():
-                        matched = (
-                            len(
-                                compiled_yara_rules[rule_name].match(
-                                    data=data,
-                                    callback=yara_callback,
-                                    which_callbacks=yara.CALLBACK_MATCHES,
-                                    fast=True,
-                                    timeout=60,
-                                )
-                            )
-                            > 0
-                        )
-                elif queryType == QueryTypeEnum.SURICATA:
-                    matched = _run_suricata(rule_content[rule_name], file_path, data)
+            if queryType == QueryTypeEnum.YARA and rules_for_file in combined_yara_rules:
+                # Do not use the aborting callback here: a combined scan must
+                # collect every matching candidate rule, not stop at the first.
+                with prom_narrow_cpu_duration.labels(
+                    query_hash=query_hash,
+                    rule_name="__combined__",
+                ).time():
+                    yara_matches = combined_yara_rules[rules_for_file].match(
+                        data=data,
+                        fast=True,
+                        timeout=60,
+                    )
 
-                results.append((rule_name, matched))
+                namespace_to_rule = combined_yara_namespaces[rules_for_file]
+                matched_rules = {
+                    namespace_to_rule[match.namespace]
+                    for match in yara_matches
+                    if match.namespace in namespace_to_rule
+                }
+                results.extend((rule_name, rule_name in matched_rules) for rule_name in rules_for_file)
+            else:
+                # Existing behaviour for single-rule files, Suricata, and the
+                # conservative fallback if a combined ruleset failed to compile.
+                for rule_name in rules_for_file:
+                    if queryType == QueryTypeEnum.YARA:
+                        with prom_narrow_cpu_duration.labels(
+                            query_hash=query_hash,
+                            rule_name=rule_name,
+                        ).time():
+                            matched = (
+                                len(
+                                    compiled_yara_rules[rule_name].match(
+                                        data=data,
+                                        callback=yara_callback,
+                                        which_callbacks=yara.CALLBACK_MATCHES,
+                                        fast=True,
+                                        timeout=60,
+                                    )
+                                )
+                                > 0
+                            )
+                    elif queryType == QueryTypeEnum.SURICATA:
+                        matched = _run_suricata(rule_content[rule_name], file_path, data)
+
+                    results.append((rule_name, matched))
 
             return ("ok", file_path, rules_for_file, results)
 
