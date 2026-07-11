@@ -603,62 +603,13 @@ def _narrow_phase_search(
             for p in paths:
                 file_to_rules[p].add(rule_name)
 
-        # Precompile individual YARA rules once. These remain the safe fallback
-        # for single-rule candidate files and for any candidate group that cannot
-        # be compiled into a combined ruleset.
+        # Precompile YARA rules once
         compiled_yara_rules = {}
-        prepared_yara_content = {}
-        combined_yara_rules = {}
-        combined_yara_namespaces = {}
         if queryType == QueryTypeEnum.YARA:
             for rule_name, content in list(rule_content.items()):
                 if not content.startswith('import "pe"\n'):
                     content = 'import "pe"\n' + content
-                prepared_yara_content[rule_name] = content
                 compiled_yara_rules[rule_name] = yara.compile(source=content)
-
-            # Compile one ruleset for each distinct multi-rule candidate group.
-            # This allows YARA to traverse a file once for all relevant rules,
-            # while retaining the existing per-rule matcher as a safe fallback.
-            distinct_rule_groups = {
-                frozenset(rules_for_file) for rules_for_file in file_to_rules.values() if len(rules_for_file) > 1
-            }
-
-            combined_compile_failures = 0
-            for rules_for_file in distinct_rule_groups:
-                namespace_to_rule = {
-                    f"candidate_{idx}": rule_name for idx, rule_name in enumerate(sorted(rules_for_file))
-                }
-                sources = {
-                    namespace: prepared_yara_content[rule_name] for namespace, rule_name in namespace_to_rule.items()
-                }
-
-                try:
-                    combined_yara_rules[rules_for_file] = yara.compile(sources=sources)
-                    combined_yara_namespaces[rules_for_file] = namespace_to_rule
-                    logger.debug(
-                        "Narrow YARA: compiled combined candidate group with %d rules: %s",
-                        len(rules_for_file),
-                        ", ".join(sorted(rules_for_file)),
-                    )
-                except Exception:
-                    combined_compile_failures += 1
-                    logger.warning(
-                        "Could not compile combined YARA candidate group with %d rules; "
-                        "falling back to per-rule scans",
-                        len(rules_for_file),
-                        exc_info=True,
-                    )
-
-            logger.info(
-                "Narrow YARA setup: %d files, %d rule-file jobs, %d distinct multi-rule groups, "
-                "%d combined groups compiled, %d combined compile fallbacks",
-                len(file_to_rules),
-                sum(len(paths) for paths in rule_matches_sets.values()),
-                len(distinct_rule_groups),
-                len(combined_yara_rules),
-                combined_compile_failures,
-            )
 
         # Precompute total jobs
         total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
@@ -681,82 +632,32 @@ def _narrow_phase_search(
                 return ("missing", file_path, rules_for_file, None)
 
             results = []
-            if queryType == QueryTypeEnum.YARA and rules_for_file in combined_yara_rules:
-                # Do not use the aborting callback here: a combined scan must
-                # collect every matching candidate rule, not stop at the first.
-                with prom_narrow_cpu_duration.labels(
-                    query_hash=query_hash,
-                    rule_name="__combined__",
-                ).time():
-                    yara_matches = combined_yara_rules[rules_for_file].match(
-                        data=data,
-                        fast=True,
-                        timeout=60,
-                    )
-
-                namespace_to_rule = combined_yara_namespaces[rules_for_file]
-                matched_rules = {
-                    namespace_to_rule[match.namespace]
-                    for match in yara_matches
-                    if match.namespace in namespace_to_rule
-                }
-                results.extend((rule_name, rule_name in matched_rules) for rule_name in rules_for_file)
-                scan_mode = "combined"
-                logger.debug(
-                    "Narrow YARA combined scan: file=%s candidates=%d matched=%d",
-                    file_path,
-                    len(rules_for_file),
-                    len(matched_rules),
-                )
-            else:
-                # Existing behaviour for single-rule files, Suricata, and the
-                # conservative fallback if a combined ruleset failed to compile.
-                for rule_name in rules_for_file:
-                    if queryType == QueryTypeEnum.YARA:
-                        with prom_narrow_cpu_duration.labels(
-                            query_hash=query_hash,
-                            rule_name=rule_name,
-                        ).time():
-                            matched = (
-                                len(
-                                    compiled_yara_rules[rule_name].match(
-                                        data=data,
-                                        callback=yara_callback,
-                                        which_callbacks=yara.CALLBACK_MATCHES,
-                                        fast=True,
-                                        timeout=60,
-                                    )
-                                )
-                                > 0
-                            )
-                    elif queryType == QueryTypeEnum.SURICATA:
-                        matched = _run_suricata(rule_content[rule_name], file_path, data)
-
-                    results.append((rule_name, matched))
-
+            for rule_name in rules_for_file:
                 if queryType == QueryTypeEnum.YARA:
-                    scan_mode = "single" if len(rules_for_file) == 1 else "fallback"
-                    logger.debug(
-                        "Narrow YARA %s scan: file=%s candidates=%d matched=%d",
-                        scan_mode,
-                        file_path,
-                        len(rules_for_file),
-                        sum(1 for _rule_name, matched in results if matched),
-                    )
-                else:
-                    scan_mode = "suricata"
+                    with prom_narrow_cpu_duration.labels(
+                        query_hash=query_hash,
+                        rule_name=rule_name,
+                    ).time():
+                        matched = (
+                            len(
+                                compiled_yara_rules[rule_name].match(
+                                    data=data,
+                                    callback=yara_callback,
+                                    which_callbacks=yara.CALLBACK_MATCHES,
+                                    fast=True,
+                                    timeout=60,
+                                )
+                            )
+                            > 0
+                        )
+                elif queryType == QueryTypeEnum.SURICATA:
+                    matched = _run_suricata(rule_content[rule_name], file_path, data)
 
-            return ("ok", file_path, rules_for_file, results, scan_mode)
+                results.append((rule_name, matched))
+
+            return ("ok", file_path, rules_for_file, results)
 
         # Run workers in parallel
-        combined_scan_files = 0
-        combined_candidate_jobs = 0
-        combined_matched_jobs = 0
-        single_scan_files = 0
-        fallback_scan_files = 0
-        fallback_candidate_jobs = 0
-        missing_files = 0
-
         futures = []
         with ThreadPoolExecutor() as executor:
             for file_path, rules_for_file in file_to_rules.items():
@@ -764,27 +665,13 @@ def _narrow_phase_search(
 
             # Process results in deterministic order
             for f in futures:
-                worker_result = f.result()
-                status, file_path, rules_for_file, results = worker_result[:4]
+                status, file_path, rules_for_file, results = f.result()
 
                 if status == "missing":
-                    missing_files += 1
                     for rule_name in rules_for_file:
                         total_jobs -= 1
                         rule_matches_sets[rule_name].discard(file_path)
                     continue
-
-                scan_mode = worker_result[4]
-                matched_count = sum(1 for _rule_name, matched in results if matched)
-                if scan_mode == "combined":
-                    combined_scan_files += 1
-                    combined_candidate_jobs += len(rules_for_file)
-                    combined_matched_jobs += matched_count
-                elif scan_mode == "single":
-                    single_scan_files += 1
-                elif scan_mode == "fallback":
-                    fallback_scan_files += 1
-                    fallback_candidate_jobs += len(rules_for_file)
 
                 for rule_name, matched in results:
                     jobs_complete += 1
@@ -804,20 +691,6 @@ def _narrow_phase_search(
                             (rule_name, []),
                         )
                         rule_matches_sets[rule_name].discard(file_path)
-
-        if queryType == QueryTypeEnum.YARA:
-            logger.info(
-                "Narrow YARA verification: combined_scans=%d, combined_candidate_jobs=%d, "
-                "combined_matches=%d, single_rule_scans=%d, fallback_scans=%d, "
-                "fallback_candidate_jobs=%d, missing_files=%d",
-                combined_scan_files,
-                combined_candidate_jobs,
-                combined_matched_jobs,
-                single_scan_files,
-                fallback_scan_files,
-                fallback_candidate_jobs,
-                missing_files,
-            )
 
         # Convert back to lists and remove empty rules
         final_matches: RuleFileMatches = {}
