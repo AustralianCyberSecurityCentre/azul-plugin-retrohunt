@@ -624,6 +624,7 @@ def _narrow_phase_search(
                 frozenset(rules_for_file) for rules_for_file in file_to_rules.values() if len(rules_for_file) > 1
             }
 
+            combined_compile_failures = 0
             for rules_for_file in distinct_rule_groups:
                 namespace_to_rule = {
                     f"candidate_{idx}": rule_name for idx, rule_name in enumerate(sorted(rules_for_file))
@@ -635,11 +636,29 @@ def _narrow_phase_search(
                 try:
                     combined_yara_rules[rules_for_file] = yara.compile(sources=sources)
                     combined_yara_namespaces[rules_for_file] = namespace_to_rule
+                    logger.debug(
+                        "Narrow YARA: compiled combined candidate group with %d rules: %s",
+                        len(rules_for_file),
+                        ", ".join(sorted(rules_for_file)),
+                    )
                 except Exception:
+                    combined_compile_failures += 1
                     logger.warning(
-                        "Could not compile combined YARA candidate group; falling back to per-rule scans",
+                        "Could not compile combined YARA candidate group with %d rules; "
+                        "falling back to per-rule scans",
+                        len(rules_for_file),
                         exc_info=True,
                     )
+
+            logger.info(
+                "Narrow YARA setup: %d files, %d rule-file jobs, %d distinct multi-rule groups, "
+                "%d combined groups compiled, %d combined compile fallbacks",
+                len(file_to_rules),
+                sum(len(paths) for paths in rule_matches_sets.values()),
+                len(distinct_rule_groups),
+                len(combined_yara_rules),
+                combined_compile_failures,
+            )
 
         # Precompute total jobs
         total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
@@ -682,6 +701,13 @@ def _narrow_phase_search(
                     if match.namespace in namespace_to_rule
                 }
                 results.extend((rule_name, rule_name in matched_rules) for rule_name in rules_for_file)
+                scan_mode = "combined"
+                logger.debug(
+                    "Narrow YARA combined scan: file=%s candidates=%d matched=%d",
+                    file_path,
+                    len(rules_for_file),
+                    len(matched_rules),
+                )
             else:
                 # Existing behaviour for single-rule files, Suricata, and the
                 # conservative fallback if a combined ruleset failed to compile.
@@ -708,9 +734,29 @@ def _narrow_phase_search(
 
                     results.append((rule_name, matched))
 
-            return ("ok", file_path, rules_for_file, results)
+                if queryType == QueryTypeEnum.YARA:
+                    scan_mode = "single" if len(rules_for_file) == 1 else "fallback"
+                    logger.debug(
+                        "Narrow YARA %s scan: file=%s candidates=%d matched=%d",
+                        scan_mode,
+                        file_path,
+                        len(rules_for_file),
+                        sum(1 for _rule_name, matched in results if matched),
+                    )
+                else:
+                    scan_mode = "suricata"
+
+            return ("ok", file_path, rules_for_file, results, scan_mode)
 
         # Run workers in parallel
+        combined_scan_files = 0
+        combined_candidate_jobs = 0
+        combined_matched_jobs = 0
+        single_scan_files = 0
+        fallback_scan_files = 0
+        fallback_candidate_jobs = 0
+        missing_files = 0
+
         futures = []
         with ThreadPoolExecutor() as executor:
             for file_path, rules_for_file in file_to_rules.items():
@@ -718,13 +764,27 @@ def _narrow_phase_search(
 
             # Process results in deterministic order
             for f in futures:
-                status, file_path, rules_for_file, results = f.result()
+                worker_result = f.result()
+                status, file_path, rules_for_file, results = worker_result[:4]
 
                 if status == "missing":
+                    missing_files += 1
                     for rule_name in rules_for_file:
                         total_jobs -= 1
                         rule_matches_sets[rule_name].discard(file_path)
                     continue
+
+                scan_mode = worker_result[4]
+                matched_count = sum(1 for _rule_name, matched in results if matched)
+                if scan_mode == "combined":
+                    combined_scan_files += 1
+                    combined_candidate_jobs += len(rules_for_file)
+                    combined_matched_jobs += matched_count
+                elif scan_mode == "single":
+                    single_scan_files += 1
+                elif scan_mode == "fallback":
+                    fallback_scan_files += 1
+                    fallback_candidate_jobs += len(rules_for_file)
 
                 for rule_name, matched in results:
                     jobs_complete += 1
@@ -744,6 +804,20 @@ def _narrow_phase_search(
                             (rule_name, []),
                         )
                         rule_matches_sets[rule_name].discard(file_path)
+
+        if queryType == QueryTypeEnum.YARA:
+            logger.info(
+                "Narrow YARA verification: combined_scans=%d, combined_candidate_jobs=%d, "
+                "combined_matches=%d, single_rule_scans=%d, fallback_scans=%d, "
+                "fallback_candidate_jobs=%d, missing_files=%d",
+                combined_scan_files,
+                combined_candidate_jobs,
+                combined_matched_jobs,
+                single_scan_files,
+                fallback_scan_files,
+                fallback_candidate_jobs,
+                missing_files,
+            )
 
         # Convert back to lists and remove empty rules
         final_matches: RuleFileMatches = {}
