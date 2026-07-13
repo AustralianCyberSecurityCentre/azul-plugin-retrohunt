@@ -660,7 +660,7 @@ def _narrow_phase_search(
 
     # Run workers in parallel
     futures = []
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         for file_path, rules_for_file in file_to_rules.items():
             futures.append(executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash))
 
