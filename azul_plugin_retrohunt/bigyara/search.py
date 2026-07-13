@@ -403,6 +403,7 @@ def _broad_phase_search(
                             "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
                         )
                     )
+                    logger.info(f'appended command {search_strings[rule_name]}')
                 logger.info(f"Required groups converted to search parameter: {search_strings}")
                 logger.info(
                     'Rule "%s": no usable required_strings; generated %d required_group searches',
