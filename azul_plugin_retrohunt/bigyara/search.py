@@ -8,7 +8,7 @@ import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import partial
 from itertools import product
 from threading import Event
@@ -666,46 +666,77 @@ def _narrow_phase_search(
         return ("ok", file_path, rules_for_file, results)
 
     # Run workers in parallel
-    futures = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        for file_path, rules_for_file in file_to_rules.items():
-            futures.append(
-                executor.submit(worker, file_path, frozenset(rules_for_file), stop_event, query_hash=query_hash)
+    max_workers = 10
+    max_in_flight = max_workers * 4
+
+    items = iter(file_to_rules.items())
+    pending = set()
+
+    def submit_next(executor) -> bool:
+        try:
+            file_path, rules_for_file = next(items)
+        except StopIteration:
+            return False
+
+        pending.add(
+            executor.submit(
+                worker,
+                file_path,
+                frozenset(rules_for_file),
+                stop_event,
+                query_hash=query_hash,
+            )
+        )
+        return True
+
+    def process_result(result):
+        nonlocal jobs_complete, total_jobs
+
+        if isinstance(result, str):
+            logger.info(result)
+            return
+
+        status, file_path, rules_for_file, results = result
+
+        if status == "missing":
+            for rule_name in rules_for_file:
+                total_jobs -= 1
+                rule_matches_sets[rule_name].discard(file_path)
+            return
+
+        for rule_name, matched in results:
+            jobs_complete += 1
+
+            progress_callback(
+                SearchPhaseEnum.NARROW_PHASE,
+                jobs_complete,
+                total_jobs,
+                (rule_name, [file_path] if matched else []),
             )
 
-        # Process results in deterministic order
-        for f in futures:
+            if not matched:
+                rule_matches_sets[rule_name].discard(file_path)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        while len(pending) < max_in_flight and submit_next(executor):
+            pass
+
+        while pending:
             if stop_event.is_set():
+                for future in pending:
+                    future.cancel()
                 break
-            if "Exception occured" in f.result():
-                logger.info(f"Exception occured in threadpool worker {f.result()}")
-                continue
-            status, file_path, rules_for_file, results = f.result()
 
-            if status == "missing":
-                for rule_name in rules_for_file:
-                    total_jobs -= 1
-                    rule_matches_sets[rule_name].discard(file_path)
-                continue
+            completed, pending = wait(
+                pending,
+                return_when=FIRST_COMPLETED,
+            )
 
-            for rule_name, matched in results:
-                jobs_complete += 1
+            for future in completed:
+                process_result(future.result())
 
-                if matched:
-                    progress_callback(
-                        SearchPhaseEnum.NARROW_PHASE,
-                        jobs_complete,
-                        total_jobs,
-                        (rule_name, [file_path]),
-                    )
-                else:
-                    progress_callback(
-                        SearchPhaseEnum.NARROW_PHASE,
-                        jobs_complete,
-                        total_jobs,
-                        (rule_name, []),
-                    )
-                    rule_matches_sets[rule_name].discard(file_path)
+            while len(pending) < max_in_flight and submit_next(executor):
+                pass
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
