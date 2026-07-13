@@ -249,8 +249,6 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             recursive=True,
         )
 
-        check_is_cancelled(job.entity.id)
-
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
         prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
@@ -406,6 +404,7 @@ def main():
             job = azm.RetrohuntEvent(**json.loads(event_json))
 
             job_id = job.entity.id
+            logger.info(f"Got new job from redis: {job_id} {job.entity.status}")
             # these will be cleaned up by the cronjob later
             logger.info(f"Picked up new job. Status: {job.entity.status} {job.entity.error}")
             if job.entity.status in {azm.HuntState.FAILED}:
@@ -433,6 +432,7 @@ def main():
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
+                logger.info(f"Acknowledging job {rs.RETROHUNT_JOB} {rs.RETROHUNT_GROUP} {msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
             except CancelException:
                 logger.info(f"Cleaning up cancelled hunt {job_id}")
