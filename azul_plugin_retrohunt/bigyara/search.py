@@ -11,6 +11,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import product
+from threading import Event
 
 import yara
 from prometheus_client import Counter, Histogram
@@ -37,6 +38,8 @@ from .yara_parse import RuleSearchPlans, parse_yara_rules
 #         in particular, subprocesses called in for loops should be done asynchronously,
 #         in batches according to available core count.
 
+stop_event = Event()
+mp_pool = mp.Pool()
 logger = logging.getLogger("bigyara.search")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
@@ -454,7 +457,7 @@ def _broad_phase_search(
         for rule_name, grouped_searches in search_strings.items()
     }
 
-    with mp.Pool() as pool:
+    with mp_pool:
         for (
             rule_name,
             search_id,
@@ -464,7 +467,7 @@ def _broad_phase_search(
             stdout,
             stderr,
             duration,
-        ) in pool.starmap(worker, tasks):
+        ) in mp_pool.starmap(worker, tasks):
             prom_bgparse_duration.labels(
                 query_hash=query_hash,
                 index_path=index,
@@ -619,7 +622,7 @@ def _narrow_phase_search(
     progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
 
     # Worker function (pure, no side effects)
-    def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
+    def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
 
         try:
             cfg = file_config.get(file_path)
@@ -635,6 +638,8 @@ def _narrow_phase_search(
 
             results = []
             for rule_name in rules_for_file:
+                if stop_event.is_set():
+                    break
                 if queryType == QueryTypeEnum.YARA:
                     with prom_narrow_cpu_duration.labels(
                         query_hash=query_hash,
@@ -665,10 +670,14 @@ def _narrow_phase_search(
     futures = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         for file_path, rules_for_file in file_to_rules.items():
-            futures.append(executor.submit(worker, file_path, frozenset(rules_for_file), query_hash=query_hash))
+            futures.append(
+                executor.submit(worker, file_path, frozenset(rules_for_file), stop_event, query_hash=query_hash)
+            )
 
         # Process results in deterministic order
         for f in futures:
+            if stop_event.is_set():
+                break
             if "Exception occured" in f.result():
                 logger.info(f"Exception occured in threadpool worker {f.result()}")
                 continue
@@ -711,6 +720,18 @@ def _narrow_phase_search(
         logger.info("No rules matched after Narrowing.")
 
     return final_matches
+
+
+def trigger_stop_event():
+    """Set stop event for threads if user cancels manually."""
+    stop_event.set()
+    mp_pool.terminate()
+    mp_pool.join()
+
+
+def clear_stop_event():
+    """Clear the stop event flag."""
+    stop_event.clear()
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:

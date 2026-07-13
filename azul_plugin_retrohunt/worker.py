@@ -16,7 +16,13 @@ from azul_bedrock import models_network as azm
 from prometheus_client import Counter, Summary, start_http_server
 from redis.exceptions import ResponseError
 
-from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
+from azul_plugin_retrohunt.bigyara.search import (
+    QueryTypeEnum,
+    SearchPhaseEnum,
+    clear_stop_event,
+    search,
+    trigger_stop_event,
+)
 from azul_plugin_retrohunt.retrohunt import CancelException, FatalException, RetrohuntService
 from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
 
@@ -64,6 +70,7 @@ def check_is_cancelled(job_id: str):
         return  # corrupted or missing, not considered cancelled
 
     if event.entity.status == azm.HuntState.CANCELLED:
+        trigger_stop_event()
         raise CancelException(f"Hunt {job_id} cancelled by user")
 
 
@@ -438,6 +445,7 @@ def main():
                 logger.info(f"Cleaning up cancelled hunt {job_id}")
                 rs.redis.delete(job_id)
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+                clear_stop_event()
                 continue
             finally:
                 stop_event.set()
