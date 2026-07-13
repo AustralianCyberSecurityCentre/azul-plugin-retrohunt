@@ -409,7 +409,7 @@ def main():
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
-
+            logger.info(f"Entity JSON {event_json}")
             job_id = job.entity.id
             logger.info(f"Got new job from redis: {job_id} {job.entity.status}")
             # these will be cleaned up by the cronjob later

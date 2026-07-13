@@ -39,7 +39,6 @@ from .yara_parse import RuleSearchPlans, parse_yara_rules
 #         in batches according to available core count.
 
 stop_event = Event()
-mp_pool = mp.Pool()
 logger = logging.getLogger("bigyara.search")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
@@ -457,7 +456,7 @@ def _broad_phase_search(
         for rule_name, grouped_searches in search_strings.items()
     }
 
-    with mp_pool:
+    with mp.Pool() as pool:
         for (
             rule_name,
             search_id,
@@ -467,7 +466,7 @@ def _broad_phase_search(
             stdout,
             stderr,
             duration,
-        ) in mp_pool.starmap(worker, tasks):
+        ) in pool.starmap(worker, tasks):
             prom_bgparse_duration.labels(
                 query_hash=query_hash,
                 index_path=index,
@@ -725,8 +724,6 @@ def _narrow_phase_search(
 def trigger_stop_event():
     """Set stop event for threads if user cancels manually."""
     stop_event.set()
-    mp_pool.terminate()
-    mp_pool.join()
 
 
 def clear_stop_event():
