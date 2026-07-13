@@ -695,7 +695,7 @@ def _narrow_phase_search(
 
     # Keep only a bounded number of tasks queued. On cancellation, queued
     # futures are cancelled and no more work is submitted.
-    max_workers = 10
+    max_workers = 20
     max_in_flight = max_workers * 4
 
     items = iter(file_to_rules.items())
