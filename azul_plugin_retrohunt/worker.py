@@ -407,6 +407,7 @@ def main():
 
             job_id = job.entity.id
             # these will be cleaned up by the cronjob later
+            logger.info(f"Picked up new job. Status: {job.entity.status} {job.entity.error}")
             if job.entity.status in {azm.HuntState.FAILED}:
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
