@@ -178,6 +178,8 @@ def search(
         if data_callback:
             try:
                 data = data_callback(path, config)
+            except CancelException:
+                raise
             except Exception as e:
                 raise DataCallbackException("Exception in data callback") from e
         else:
@@ -456,7 +458,22 @@ def _broad_phase_search(
         for rule_name, grouped_searches in search_strings.items()
     }
 
-    with mp.Pool() as pool:
+    pool = mp.Pool()
+    try:
+        result_iterator = pool.starmap_async(worker, tasks)
+
+        while not result_iterator.ready():
+            # This callback checks Redis for an externally requested cancellation.
+            progress_callback(
+                SearchPhaseEnum.BROAD_PHASE,
+                searches_complete,
+                search_count,
+                None,
+            )
+            time.sleep(0.5)
+
+        results = result_iterator.get()
+
         for (
             rule_name,
             search_id,
@@ -466,7 +483,7 @@ def _broad_phase_search(
             stdout,
             stderr,
             duration,
-        ) in pool.starmap(worker, tasks):
+        ) in results:
             prom_bgparse_duration.labels(
                 query_hash=query_hash,
                 index_path=index,
@@ -501,6 +518,16 @@ def _broad_phase_search(
                 search_count,
                 (rule_name, new_matches),
             )
+
+        pool.close()
+    except CancelException:
+        pool.terminate()
+        raise
+    except Exception:
+        pool.terminate()
+        raise
+    finally:
+        pool.join()
 
     logger.debug("All index searches completed")
     rule_matches: RuleFileMatches = {}
@@ -620,52 +647,58 @@ def _narrow_phase_search(
 
     progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
 
-    # Worker function (pure, no side effects)
+    # Worker function. Exceptions are intentionally allowed to propagate
+    # through Future.result(), especially CancelException.
     def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
+        if stop_event.is_set():
+            raise CancelException("Narrow phase cancelled")
 
-        try:
-            cfg = file_config.get(file_path)
-            with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-                data = data_callback(file_path, cfg)
+        cfg = file_config.get(file_path)
+        with prom_narrow_io_duration.labels(query_hash=query_hash).time():
+            data = data_callback(file_path, cfg)
 
-            if data:
-                prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
+        # Cancellation may have been requested while the dispatcher call was in progress.
+        if stop_event.is_set():
+            raise CancelException("Narrow phase cancelled")
 
-            if not data:
-                prom_missing_files.labels(query_hash=query_hash).inc()
-                return ("missing", file_path, rules_for_file, None)
+        if data:
+            prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
 
-            results = []
-            for rule_name in rules_for_file:
-                if stop_event.is_set():
-                    break
-                if queryType == QueryTypeEnum.YARA:
-                    with prom_narrow_cpu_duration.labels(
-                        query_hash=query_hash,
-                        rule_name=rule_name,
-                    ).time():
-                        matched = (
-                            len(
-                                compiled_yara_rules[rule_name].match(
-                                    data=data,
-                                    callback=yara_callback,
-                                    which_callbacks=yara.CALLBACK_MATCHES,
-                                    fast=True,
-                                    timeout=60,
-                                )
+        if not data:
+            prom_missing_files.labels(query_hash=query_hash).inc()
+            return ("missing", file_path, rules_for_file, None)
+
+        results = []
+        for rule_name in rules_for_file:
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled")
+
+            if queryType == QueryTypeEnum.YARA:
+                with prom_narrow_cpu_duration.labels(
+                    query_hash=query_hash,
+                    rule_name=rule_name,
+                ).time():
+                    matched = (
+                        len(
+                            compiled_yara_rules[rule_name].match(
+                                data=data,
+                                callback=yara_callback,
+                                which_callbacks=yara.CALLBACK_MATCHES,
+                                fast=True,
+                                timeout=60,
                             )
-                            > 0
                         )
-                elif queryType == QueryTypeEnum.SURICATA:
-                    matched = _run_suricata(rule_content[rule_name], file_path, data)
+                        > 0
+                    )
+            elif queryType == QueryTypeEnum.SURICATA:
+                matched = _run_suricata(rule_content[rule_name], file_path, data)
 
-                results.append((rule_name, matched))
-        except Exception as e:
-            return f"Exception occured in threadpool worker {e}"
+            results.append((rule_name, matched))
 
         return ("ok", file_path, rules_for_file, results)
 
-    # Run workers in parallel
+    # Keep only a bounded number of tasks queued. On cancellation, queued
+    # futures are cancelled and no more work is submitted.
     max_workers = 10
     max_in_flight = max_workers * 4
 
@@ -673,6 +706,9 @@ def _narrow_phase_search(
     pending = set()
 
     def submit_next(executor) -> bool:
+        if stop_event.is_set():
+            return False
+
         try:
             file_path, rules_for_file = next(items)
         except StopIteration:
@@ -691,10 +727,6 @@ def _narrow_phase_search(
 
     def process_result(result):
         nonlocal jobs_complete, total_jobs
-
-        if isinstance(result, str):
-            logger.info(result)
-            return
 
         status, file_path, rules_for_file, results = result
 
@@ -717,26 +749,55 @@ def _narrow_phase_search(
             if not matched:
                 rule_matches_sets[rule_name].discard(file_path)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
         while len(pending) < max_in_flight and submit_next(executor):
             pass
 
         while pending:
             if stop_event.is_set():
-                for future in pending:
-                    future.cancel()
-                break
+                raise CancelException("Narrow phase cancelled")
 
-            completed, pending = wait(
+            # Poll rather than blocking indefinitely so an API cancellation is
+            # noticed even while all workers are inside dispatcher/YARA calls.
+            completed, _ = wait(
                 pending,
+                timeout=0.5,
                 return_when=FIRST_COMPLETED,
             )
 
+            if not completed:
+                progress_callback(
+                    SearchPhaseEnum.NARROW_PHASE,
+                    jobs_complete,
+                    total_jobs,
+                    None,
+                )
+                continue
+
+            pending.difference_update(completed)
+
             for future in completed:
+                # CancelException raised in a worker is re-raised here.
                 process_result(future.result())
 
             while len(pending) < max_in_flight and submit_next(executor):
                 pass
+
+    except CancelException:
+        stop_event.set()
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    except Exception:
+        stop_event.set()
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
