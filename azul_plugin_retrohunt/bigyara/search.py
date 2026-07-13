@@ -621,40 +621,43 @@ def _narrow_phase_search(
     # Worker function (pure, no side effects)
     def worker(file_path: str, rules_for_file: frozenset[str], query_hash: str):
 
-        cfg = file_config.get(file_path)
-        with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-            data = data_callback(file_path, cfg)
+        try:
+            cfg = file_config.get(file_path)
+            with prom_narrow_io_duration.labels(query_hash=query_hash).time():
+                data = data_callback(file_path, cfg)
 
-        if data:
-            prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
+            if data:
+                prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
 
-        if not data:
-            prom_missing_files.labels(query_hash=query_hash).inc()
-            return ("missing", file_path, rules_for_file, None)
+            if not data:
+                prom_missing_files.labels(query_hash=query_hash).inc()
+                return ("missing", file_path, rules_for_file, None)
 
-        results = []
-        for rule_name in rules_for_file:
-            if queryType == QueryTypeEnum.YARA:
-                with prom_narrow_cpu_duration.labels(
-                    query_hash=query_hash,
-                    rule_name=rule_name,
-                ).time():
-                    matched = (
-                        len(
-                            compiled_yara_rules[rule_name].match(
-                                data=data,
-                                callback=yara_callback,
-                                which_callbacks=yara.CALLBACK_MATCHES,
-                                fast=True,
-                                timeout=60,
+            results = []
+            for rule_name in rules_for_file:
+                if queryType == QueryTypeEnum.YARA:
+                    with prom_narrow_cpu_duration.labels(
+                        query_hash=query_hash,
+                        rule_name=rule_name,
+                    ).time():
+                        matched = (
+                            len(
+                                compiled_yara_rules[rule_name].match(
+                                    data=data,
+                                    callback=yara_callback,
+                                    which_callbacks=yara.CALLBACK_MATCHES,
+                                    fast=True,
+                                    timeout=60,
+                                )
                             )
+                            > 0
                         )
-                        > 0
-                    )
-            elif queryType == QueryTypeEnum.SURICATA:
-                matched = _run_suricata(rule_content[rule_name], file_path, data)
+                elif queryType == QueryTypeEnum.SURICATA:
+                    matched = _run_suricata(rule_content[rule_name], file_path, data)
 
-            results.append((rule_name, matched))
+                results.append((rule_name, matched))
+        except Exception as e:
+            return f"Exception occured in threadpool worker {e}"
 
         return ("ok", file_path, rules_for_file, results)
 
@@ -666,6 +669,9 @@ def _narrow_phase_search(
 
         # Process results in deterministic order
         for f in futures:
+            if "Exception occured" in f.result():
+                logger.info(f"Exception occured in threadpool worker {f.result()}")
+                continue
             status, file_path, rules_for_file, results = f.result()
 
             if status == "missing":
