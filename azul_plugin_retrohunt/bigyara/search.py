@@ -748,7 +748,7 @@ def _narrow_phase_search(
 
     logging.info(f"ThreadPoolExecutor starting with {os.cpu_count()} max workers.")
     executor = ThreadPoolExecutor()
-    
+
     try:
         while len(pending) < max_in_flight and submit_next(executor):
             pass
