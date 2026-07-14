@@ -447,15 +447,12 @@ def main():
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
-            logger.info(f"Entity JSON {event_json}")
             job_id = job.entity.id
-            logger.info(f"Got new job from redis: {job_id} {job.entity.status}")
+
             # these will be cleaned up by the cronjob later
-            logger.info(f"Picked up new job. Status: {job.entity.status} {job.entity.error}")
             if job.entity.status in {
                 azm.HuntState.COMPLETED,
                 azm.HuntState.FAILED,
-                azm.HuntState.CANCELLED,
             }:
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 rs.redis.delete(f"retrohunt:{job_id}:lock")

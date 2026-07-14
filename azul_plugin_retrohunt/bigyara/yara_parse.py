@@ -1128,7 +1128,7 @@ def parse_yara_rules(
                 if plan.condition_ast is not None:
                     plan.required_strings = _required_strings_from_ast(plan.condition_ast)
                 else:
-                    # fallback to old behavior
+                    # fallback to required strings if ast plan doesn't exist
                     plan.required_strings = _extract_required_strings(condition_text)
 
                 plan.required_groups = _extract_required_groups(

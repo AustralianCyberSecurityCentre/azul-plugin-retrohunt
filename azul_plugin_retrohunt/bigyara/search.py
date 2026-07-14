@@ -288,7 +288,6 @@ def _run_bgparse_task(
     rule_name,
     group_idx,
     search_string,
-    query_hash,
 ):
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
@@ -447,7 +446,7 @@ def _broad_phase_search(
     searches_complete = 0
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
 
-    worker = partial(_run_bgparse_task, bgparse_exec, query_hash=query_hash)
+    worker = partial(_run_bgparse_task, bgparse_exec)
     file_config: FileConfig = {}
     search_matches: dict[str, dict[int, set[str]]] = {
         rule_name: {search_id: set() for search_id, _ in grouped_searches}
