@@ -747,7 +747,7 @@ def _narrow_phase_search(
                 rule_matches_sets[rule_name].discard(file_path)
 
     executor = ThreadPoolExecutor()
-    logging.info(f'ThreadPoolExecutor started with {os.cpu_count()} max workers')
+    logging.info(f"ThreadPoolExecutor started with {os.cpu_count()} max workers")
     try:
         while len(pending) < max_in_flight and submit_next(executor):
             pass
