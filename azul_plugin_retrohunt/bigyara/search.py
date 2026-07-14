@@ -17,6 +17,7 @@ import yara
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
+from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 from . import (
     SEARCH_ATOM_SIZE_MIN,
@@ -694,7 +695,8 @@ def _narrow_phase_search(
 
     # Keep only a bounded number of tasks queued. On cancellation, queued
     # futures are cancelled and no more work is submitted.
-    max_workers = 20
+    settings = RetrohuntSettings()
+    max_workers = settings.retrohunt_search.max_pool_workers
     max_in_flight = max_workers * 4
 
     items = iter(file_to_rules.items())
