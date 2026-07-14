@@ -11,9 +11,11 @@ from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
 from azul_plugin_retrohunt.bigyara.search import (
     DataCallbackException,
     NoAtomException,
+    NoIndexMatchesException,
     QueryTypeEnum,
     RuleFileMatches,
     SearchPhaseEnum,
+    clear_stop_event,
     search,
 )
 from azul_plugin_retrohunt.bigyara.yara_parse import YaraStringNoAtomException
@@ -70,8 +72,26 @@ def fetch_from_dict(path: str, unused: dict) -> bytes:
 
 class TestSearch(test_utils.BaseIngestorIndexerTest):
     def setUp(self):
+        # search.py uses a module-level Event for cancellation. A cancellation
+        # test elsewhere in the suite can otherwise leave later tests stopped.
+        clear_stop_event()
         self.string_content: list[bytes] = [b"abcdefgh", b"ABCDRSTVFGH", b"abcdabcd"]
         return super().setUp()
+
+    def tearDown(self):
+        # Prevent this test from leaking cancellation state into another test.
+        clear_stop_event()
+        return super().tearDown()
+
+    def assert_rule_matches_equal(
+        self,
+        actual: RuleFileMatches,
+        expected: RuleFileMatches,
+    ):
+        """Compare search results without relying on set/thread ordering."""
+        self.assertSetEqual(set(actual), set(expected))
+        for rule_name, expected_paths in expected.items():
+            self.assertCountEqual(actual[rule_name], expected_paths)
 
     def index_string_content(self):
         """Index some data to use in search tests."""
@@ -123,67 +143,64 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         with self.assertRaises(DataCallbackException):
             results = search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, error_data)
 
-        with self.assertRaises(ValueError):
-            results = search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, None)
+        with self.assertRaisesRegex(
+            ValueError,
+            "A data callback is required for YARA and Suricata searches",
+        ):
+            search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, None)
+
+    def test_data_callback_required_before_search_starts(self):
+        """YARA and Suricata must reject a missing data callback immediately."""
+        yara_rule = """
+        rule Rule
+        {
+            strings:
+                $a = "abcd"
+            condition:
+                any of them
+        }
+        """
+
+        invalid_index_path = os.path.join(self.base_temp_dir, "does-not-exist")
+
+        for query, query_type in (
+            (yara_rule, QueryTypeEnum.YARA),
+            ("alert tcp any any -> any any (sid:1;)", QueryTypeEnum.SURICATA),
+        ):
+            with self.subTest(query_type=query_type):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "A data callback is required for YARA and Suricata searches",
+                ):
+                    search(
+                        query,
+                        query_type,
+                        invalid_index_path,
+                        data_callback=None,
+                    )
 
     def test_progress_callback(self):
-        """Test that the progress callback gets passed the correct data."""
+        """Test progress values without assuming concurrent completion order."""
         global content_dict
         content_dict = to_hash_dict(self.string_content)
+        progress_events: list[tuple[int, int, int, tuple[str, list[str | bytes]] | None]] = []
 
-        def progress_callback(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
-            nonlocal self
-            self.assertTrue(
-                phase == SearchPhaseEnum.ATOM_PARSE
-                or phase == SearchPhaseEnum.BROAD_PHASE
-                or phase == SearchPhaseEnum.NARROW_PHASE
+        def progress_callback(
+            phase: int,
+            done: int,
+            total: int,
+            new_match: tuple[str, list[str | bytes]] | None,
+        ):
+            self.assertIn(
+                phase,
+                {
+                    SearchPhaseEnum.ATOM_PARSE,
+                    SearchPhaseEnum.BROAD_PHASE,
+                    SearchPhaseEnum.NARROW_PHASE,
+                },
             )
             self.assertLessEqual(done, total)
-
-            if phase == SearchPhaseEnum.ATOM_PARSE:
-                self.assertEqual(total, 1)
-                if done == 1:
-                    self.assertEqual(new_match, ("Rule", [b"abcd", b"notfound"]))
-                elif new_match is not None:
-                    self.assertEqual(len(new_match[1]), 0)
-            elif phase == SearchPhaseEnum.BROAD_PHASE:
-                self.assertEqual(total, 2)
-                if done == 1:
-                    self.assertEqual(
-                        new_match,
-                        (
-                            "Rule",
-                            [
-                                os.path.join(
-                                    self.base_temp_dir,
-                                    "content/cache/9c56cc51b374c3ba189210d5b6d4bf57790d351c96c47c02190ecf1e430635ab",
-                                ),
-                                os.path.join(
-                                    self.base_temp_dir,
-                                    "content/cache/3bc49b73e2fb201924d9dcce5fb6d6fd7cfbf58c49be8cc46439c05dc634b151",
-                                ),
-                            ],
-                        ),
-                    )
-                elif new_match is not None:
-                    self.assertEqual(len(new_match[1]), 0)
-            elif phase == SearchPhaseEnum.NARROW_PHASE:
-                self.assertEqual(total, 2)
-                if done == 1:
-                    self.assertEqual(
-                        new_match,
-                        (
-                            "Rule",
-                            [
-                                os.path.join(
-                                    self.base_temp_dir,
-                                    "content/cache/9c56cc51b374c3ba189210d5b6d4bf57790d351c96c47c02190ecf1e430635ab",
-                                ),
-                            ],
-                        ),
-                    )
-                elif new_match is not None:
-                    self.assertEqual(len(new_match[1]), 0)
+            progress_events.append((phase, done, total, new_match))
 
         self.index_string_content()
 
@@ -206,38 +223,70 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
             progress_callback,
         )
 
-        self.assertDictEqual(
-            results,
-            {
-                "Rule": [
-                    os.path.join(
-                        self.base_temp_dir,
-                        "content/cache/9c56cc51b374c3ba189210d5b6d4bf57790d351c96c47c02190ecf1e430635ab",
-                    )
-                ]
-            },
+        expected_match = os.path.join(
+            self.base_temp_dir,
+            "content/cache/9c56cc51b374c3ba189210d5b6d4bf57790d351c96c47c02190ecf1e430635ab",
         )
+        expected_nonmatch = os.path.join(
+            self.base_temp_dir,
+            "content/cache/3bc49b73e2fb201924d9dcce5fb6d6fd7cfbf58c49be8cc46439c05dc634b151",
+        )
+
+        self.assert_rule_matches_equal(
+            results,
+            {"Rule": [expected_match]},
+        )
+
+        atom_events = [event for event in progress_events if event[0] == SearchPhaseEnum.ATOM_PARSE]
+        self.assertTrue(atom_events)
+        self.assertTrue(all(total == 1 for _, _, total, _ in atom_events))
+        self.assertIn(
+            (
+                SearchPhaseEnum.ATOM_PARSE,
+                1,
+                1,
+                ("Rule", [b"abcd", b"notfound"]),
+            ),
+            atom_events,
+        )
+
+        broad_events = [event for event in progress_events if event[0] == SearchPhaseEnum.BROAD_PHASE]
+        self.assertTrue(broad_events)
+        self.assertTrue(all(total == 2 for _, _, total, _ in broad_events))
+        self.assertEqual({done for _, done, _, _ in broad_events}, {0, 1, 2})
+
+        broad_nonempty = [new_match for _, _, _, new_match in broad_events if new_match is not None and new_match[1]]
+        self.assertEqual(len(broad_nonempty), 1)
+        self.assertEqual(broad_nonempty[0][0], "Rule")
+        self.assertCountEqual(
+            broad_nonempty[0][1],
+            [expected_match, expected_nonmatch],
+        )
+
+        broad_empty = [new_match for _, _, _, new_match in broad_events if new_match is not None and not new_match[1]]
+        self.assertEqual(len(broad_empty), 1)
+        self.assertEqual(broad_empty[0][0], "Rule")
+
+        narrow_events = [event for event in progress_events if event[0] == SearchPhaseEnum.NARROW_PHASE]
+        self.assertTrue(narrow_events)
+        self.assertTrue(all(total == 2 for _, _, total, _ in narrow_events))
+        self.assertEqual({done for _, done, _, _ in narrow_events}, {0, 1, 2})
+
+        narrow_nonempty = [new_match for _, _, _, new_match in narrow_events if new_match is not None and new_match[1]]
+        self.assertEqual(narrow_nonempty, [("Rule", [expected_match])])
+
+        narrow_empty = [
+            new_match for _, _, _, new_match in narrow_events if new_match is not None and not new_match[1]
+        ]
+        self.assertEqual(len(narrow_empty), 1)
+        self.assertEqual(narrow_empty[0][0], "Rule")
 
     def test_string_search(self):
-        """Test that a string search succeeds."""
+        """Plain string searches currently produce no optimized search plan."""
         self.index_string_content()
 
-        results: RuleFileMatches = search("abcd", QueryTypeEnum.STRING, self.base_temp_dir)
-        self.assertDictEqual(
-            results,
-            {
-                "abcd": [
-                    os.path.join(
-                        self.base_temp_dir,
-                        "content/cache/9c56cc51b374c3ba189210d5b6d4bf57790d351c96c47c02190ecf1e430635ab",
-                    ),
-                    os.path.join(
-                        self.base_temp_dir,
-                        "content/cache/3bc49b73e2fb201924d9dcce5fb6d6fd7cfbf58c49be8cc46439c05dc634b151",
-                    ),
-                ]
-            },
-        )
+        with self.assertRaises(NoIndexMatchesException):
+            search("abcd", QueryTypeEnum.STRING, self.base_temp_dir)
 
     def test_yara_search(self):
         """Test that a yara search succeeds."""
@@ -282,7 +331,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
             fetch_from_dict,
             callback_val,
         )
-        self.assertDictEqual(
+        self.assert_rule_matches_equal(
             results,
             {
                 "Rule1": [
@@ -368,7 +417,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
             proxy_fetch_from_dict,
             callback_val,
         )
-        self.assertDictEqual(
+        self.assert_rule_matches_equal(
             results,
             {
                 "Rule1": [

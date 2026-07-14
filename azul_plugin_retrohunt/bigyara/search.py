@@ -149,6 +149,13 @@ def search(
     # ensure types are what we expect
     if not isinstance(query, str):
         raise TypeError("query must be str.")
+
+    # YARA and Suricata searches require the original file data during the
+    # narrow phase. Validate this before starting any multiprocessing or
+    # thread-pool work so the caller receives a predictable ValueError.
+    if query_type in {QueryTypeEnum.YARA, QueryTypeEnum.SURICATA} and data_callback is None:
+        raise ValueError("A data callback is required for YARA and Suricata searches.")
+
     if not isinstance(index_dirs, list):
         index_dirs = [index_dirs]
 
@@ -697,7 +704,7 @@ def _narrow_phase_search(
     # Keep only a bounded number of tasks queued. On cancellation, queued
     # futures are cancelled and no more work is submitted.
     # max workers for threadpoolexecutor is determined by os.cpu_count
-    # limit the amount of work in the queue to stop dispatcher getting hmmered.
+    # limit the amount of work in the queue to stop dispatcher getting hammered.
     max_in_flight = os.cpu_count() * 4
 
     items = iter(file_to_rules.items())
