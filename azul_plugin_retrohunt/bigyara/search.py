@@ -648,7 +648,7 @@ def _narrow_phase_search(
     # through Future.result(), especially CancelException.
     def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
         if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled")
+            raise CancelException("NNarrow phase cancelled by user.")
 
         cfg = file_config.get(file_path)
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
@@ -656,7 +656,7 @@ def _narrow_phase_search(
 
         # Cancellation may have been requested while the dispatcher call was in progress.
         if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled")
+            raise CancelException("Narrow phase cancelled by user.")
 
         if data:
             prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
@@ -668,7 +668,7 @@ def _narrow_phase_search(
         results = []
         for rule_name in rules_for_file:
             if stop_event.is_set():
-                raise CancelException("Narrow phase cancelled")
+                raise CancelException("Narrow phase cancelled by user.")
 
             if queryType == QueryTypeEnum.YARA:
                 with prom_narrow_cpu_duration.labels(
@@ -697,6 +697,7 @@ def _narrow_phase_search(
     # Keep only a bounded number of tasks queued. On cancellation, queued
     # futures are cancelled and no more work is submitted.
     # max workers for threadpoolexecutor is determined by os.cpu_count
+    # limit the amount of work in the queue to stop dispatcher getting hmmered.
     max_in_flight = os.cpu_count() * 4
 
     items = iter(file_to_rules.items())
