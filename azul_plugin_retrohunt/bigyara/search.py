@@ -17,7 +17,6 @@ import yara
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
-from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 from . import (
     SEARCH_ATOM_SIZE_MIN,
@@ -201,7 +200,6 @@ def search(
         rule_matches, file_config = _broad_phase_search(
             query_type,
             indices,
-            rule_atoms,
             rule_search_plans,
             checked_progress_callback,
             query_hash=query_hash,
@@ -318,11 +316,14 @@ def _run_bgparse_task(
 def _broad_phase_search(
     query_type: int,
     indices: list[str],
-    rule_atoms: RuleAtoms,
     rule_search_plans: RuleSearchPlans,
     progress_callback: ProgressCallback,
     query_hash: str,
 ) -> tuple[RuleFileMatches, FileConfig]:
+
+    if query_type == QueryTypeEnum.SURICATA:
+        # not supporting Suricata yet
+        return
 
     bgparse_exec = executables["bgparse"]
     logger.info("Rule search plans broad phase: %s", rule_search_plans)
@@ -695,9 +696,8 @@ def _narrow_phase_search(
 
     # Keep only a bounded number of tasks queued. On cancellation, queued
     # futures are cancelled and no more work is submitted.
-    settings = RetrohuntSettings()
-    max_workers = settings.retrohunt_search.max_pool_workers
-    max_in_flight = max_workers * 4
+    # max workers for threadpoolexecutor is determined by os.cpu_count
+    max_in_flight = os.cpu_count() * 4
 
     items = iter(file_to_rules.items())
     pending = set()
@@ -746,7 +746,7 @@ def _narrow_phase_search(
             if not matched:
                 rule_matches_sets[rule_name].discard(file_path)
 
-    executor = ThreadPoolExecutor(max_workers=max_workers)
+    executor = ThreadPoolExecutor()
     try:
         while len(pending) < max_in_flight and submit_next(executor):
             pass

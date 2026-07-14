@@ -18,12 +18,6 @@ class RetrohuntSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="plugin_", extra="ignore")
 
-    class SearchSettings(BaseSettings):
-        """Nested configuration for Retrohunt search settings."""
-
-        # maximum number of workers in ThreadPoolExecutor for narrow search parallelisation
-        max_pool_workers: int = Field(10, alias="MAX_POOL_WORKERS")
-
     class Indexer(BaseModel):
         """Nested configuration for indexers."""
 
@@ -69,7 +63,6 @@ class RetrohuntSettings(BaseSettings):
             populate_by_name=True,
         )
 
-    retrohunt_search: SearchSettings = Field(default_factory=lambda: RetrohuntSettings.SearchSettings())
     redis: RedisSettings = Field(default_factory=lambda: RetrohuntSettings.RedisSettings())
     # should be common for all indexers/ingestors.
     root_path: str = tempfile.gettempdir()
