@@ -754,7 +754,7 @@ def _narrow_phase_search(
 
         while pending:
             if stop_event.is_set():
-                raise CancelException("Narrow phase cancelled")
+                raise CancelException("Narrow phase cancelled by user.")
 
             # Poll rather than blocking indefinitely so an API cancellation is
             # noticed even while all workers are inside dispatcher/YARA calls.
