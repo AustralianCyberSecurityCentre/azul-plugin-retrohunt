@@ -437,13 +437,6 @@ def _broad_phase_search(
                     len(search_strings[rule_name]),
                 )
 
-        logger.info(
-            'Rule "%s": mode=%s, generated %d bgparse searches',
-            rule_name,
-            broad_phase_modes[rule_name],
-            len(search_strings[rule_name]),
-        )
-
     tasks = []
     for index in indices:
         for rule_name, grouped_searches in search_strings.items():
@@ -461,7 +454,7 @@ def _broad_phase_search(
         rule_name: {search_id: set() for search_id, _ in grouped_searches}
         for rule_name, grouped_searches in search_strings.items()
     }
-
+    total_bgparse_time = 0
     pool = mp.Pool()
     try:
         result_iterator = pool.starmap_async(worker, tasks)
@@ -488,12 +481,7 @@ def _broad_phase_search(
             stderr,
             duration,
         ) in results:
-            prom_bgparse_duration.labels(
-                query_hash=query_hash,
-                index_path=index,
-                rule_name=rule_name,
-            ).observe(duration)
-            logger.info(f"BigGrep took {duration} seconds to parse")
+            total_bgparse_time += duration
             if returncode != 0:
                 raise BiggrepException(
                     f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
@@ -522,6 +510,12 @@ def _broad_phase_search(
                 search_count,
                 (rule_name, new_matches),
             )
+
+        prom_bgparse_duration.labels(
+            query_hash=query_hash,
+            index_path=index,
+            rule_name=rule_name,
+        ).observe(total_bgparse_time)
 
         pool.close()
     except CancelException:
