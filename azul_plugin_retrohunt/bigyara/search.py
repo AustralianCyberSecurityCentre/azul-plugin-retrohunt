@@ -298,15 +298,11 @@ def _run_bgparse_task(
     """Worker function executed in subprocess pool."""
     cmd = f"{bgparse_exec} {search_string}{index}"
 
-    start = time.time()
-
     process = subprocess.run(  # noqa S602
         cmd,
         shell=True,
         capture_output=True,
     )
-
-    duration = time.time() - start
 
     return (
         rule_name,
@@ -316,7 +312,6 @@ def _run_bgparse_task(
         process.returncode,
         process.stdout,
         process.stderr,
-        duration,
     )
 
 
@@ -454,7 +449,8 @@ def _broad_phase_search(
         rule_name: {search_id: set() for search_id, _ in grouped_searches}
         for rule_name, grouped_searches in search_strings.items()
     }
-    total_bgparse_time = 0
+
+    start = time.time()
 
     pool = mp.Pool()
     try:
@@ -480,9 +476,7 @@ def _broad_phase_search(
             returncode,
             stdout,
             stderr,
-            duration,
         ) in results:
-            total_bgparse_time += duration
             if returncode != 0:
                 raise BiggrepException(
                     f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
@@ -512,11 +506,13 @@ def _broad_phase_search(
                 (rule_name, new_matches),
             )
 
+        duration = time.time() - start
+
         prom_bgparse_duration.labels(
             query_hash=query_hash,
-        ).observe(total_bgparse_time)
+        ).observe(duration)
 
-        logger.info(f"Total BigGrep parse time: {total_bgparse_time}")
+        logger.info(f"Total BigGrep parse time: {duration}")
         pool.close()
     except CancelException:
         pool.terminate()
