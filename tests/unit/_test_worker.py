@@ -286,7 +286,8 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             wraps=update_progress_wrapper,
         ) as progress_wrapped:
             log_capture = r_worker.capture_logs(logging.INFO)
-            r_worker.hunt(self.base_temp_dir, copy.deepcopy(SUBMISSION), log_capture)
+            worker_id = "1"
+            r_worker.hunt(self.base_temp_dir, copy.deepcopy(SUBMISSION), log_capture, worker_id)
             progress_wrapped.assert_called()
 
     @patch("azul_plugin_retrohunt.retrohunt.redis.Redis")
@@ -401,7 +402,8 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                     index_dirs = [self.ingestor.cache_directory]
 
                     # Run the hunt
-                    r_worker.hunt(index_dirs, job, None)
+                    worker_id = "1"
+                    r_worker.hunt(index_dirs, job, None, worker_id)
 
                     update_mock.assert_called()
 

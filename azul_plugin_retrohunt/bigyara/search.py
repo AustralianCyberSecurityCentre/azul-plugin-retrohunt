@@ -8,7 +8,7 @@ import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import product
 from threading import Event
@@ -692,107 +692,59 @@ def _narrow_phase_search(
 
         return ("ok", file_path, rules_for_file, results)
 
-    # Keep only a bounded number of tasks queued to prevent dispatcher from getting hammered.
     # On cancellation, queued futures are cancelled and no more work is submitted.
-    max_in_flight = 20
-
-    items = iter(file_to_rules.items())
-    pending = set()
-
-    def submit_next(executor) -> bool:
-        if stop_event.is_set():
-            return False
-
+    futures = []
+    with ThreadPoolExecutor() as executor:
         try:
-            file_path, rules_for_file = next(items)
-        except StopIteration:
-            return False
-
-        pending.add(
-            executor.submit(
-                worker,
-                file_path,
-                frozenset(rules_for_file),
-                stop_event,
-                query_hash=query_hash,
-            )
-        )
-        return True
-
-    def process_result(result):
-        nonlocal jobs_complete, total_jobs
-
-        status, file_path, rules_for_file, results = result
-
-        if status == "missing":
-            for rule_name in rules_for_file:
-                total_jobs -= 1
-                rule_matches_sets[rule_name].discard(file_path)
-            return
-
-        for rule_name, matched in results:
-            jobs_complete += 1
-
-            progress_callback(
-                SearchPhaseEnum.NARROW_PHASE,
-                jobs_complete,
-                total_jobs,
-                (rule_name, [file_path] if matched else []),
-            )
-
-            if not matched:
-                rule_matches_sets[rule_name].discard(file_path)
-
-    executor = ThreadPoolExecutor()
-
-    try:
-        while len(pending) < max_in_flight and submit_next(executor):
-            pass
-
-        while pending:
-            if stop_event.is_set():
-                raise CancelException("Narrow phase cancelled by user.")
-
-            # Poll rather than blocking indefinitely so an API cancellation is
-            # noticed even while all workers are inside dispatcher/YARA calls.
-            completed, _ = wait(
-                pending,
-                timeout=0.5,
-                return_when=FIRST_COMPLETED,
-            )
-
-            if not completed:
-                progress_callback(
-                    SearchPhaseEnum.NARROW_PHASE,
-                    jobs_complete,
-                    total_jobs,
-                    None,
+            for file_path, rules_for_file in file_to_rules.items():
+                futures.append(
+                    executor.submit(worker, file_path, frozenset(rules_for_file), stop_event, query_hash=query_hash)
                 )
-                continue
+                # Process results in deterministic order
+                for f in futures:
+                    if stop_event.is_set():
+                        raise CancelException("Narrow phase cancelled by user.")
 
-            pending.difference_update(completed)
+                    status, file_path, rules_for_file, results = f.result()
 
-            for future in completed:
-                # CancelException raised in a worker is re-raised here.
-                process_result(future.result())
+                    if status == "missing":
+                        for rule_name in rules_for_file:
+                            total_jobs -= 1
+                            rule_matches_sets[rule_name].discard(file_path)
+                        continue
 
-            while len(pending) < max_in_flight and submit_next(executor):
-                pass
+                    for rule_name, matched in results:
+                        jobs_complete += 1
 
-    except CancelException:
-        stop_event.set()
-        for future in pending:
-            future.cancel()
-        executor.shutdown(wait=True, cancel_futures=True)
-        raise
-    except Exception:
-        stop_event.set()
-        for future in pending:
-            future.cancel()
-        executor.shutdown(wait=True, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
+                        if matched:
+                            progress_callback(
+                                SearchPhaseEnum.NARROW_PHASE,
+                                jobs_complete,
+                                total_jobs,
+                                (rule_name, [file_path]),
+                            )
+                        else:
+                            progress_callback(
+                                SearchPhaseEnum.NARROW_PHASE,
+                                jobs_complete,
+                                total_jobs,
+                                (rule_name, []),
+                            )
+                            rule_matches_sets[rule_name].discard(file_path)
+        except CancelException:
+            stop_event.set()
+            for f in futures:
+                f.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        except Exception:
+            stop_event.set()
+            for f in futures:
+                f.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}

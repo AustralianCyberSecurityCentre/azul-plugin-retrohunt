@@ -136,18 +136,19 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
 
         results: RuleFileMatches
 
+        worker_id = "1"
         # all broad phase matches should be skipped since data cannot be retrieved
-        results = search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, no_data)
+        results = search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, worker_id, no_data)
         self.assertEqual(results, {})
 
         with self.assertRaises(DataCallbackException):
-            results = search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, error_data)
+            results = search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, worker_id, error_data)
 
         with self.assertRaisesRegex(
             ValueError,
             "A data callback is required for YARA and Suricata searches",
         ):
-            search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, None)
+            search(yara_rule, QueryTypeEnum.YARA, self.base_temp_dir, worker_id, None)
 
     def test_data_callback_required_before_search_starts(self):
         """YARA and Suricata must reject a missing data callback immediately."""
@@ -162,7 +163,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         """
 
         invalid_index_path = os.path.join(self.base_temp_dir, "does-not-exist")
-
+        worker_id = "1"
         for query, query_type in (
             (yara_rule, QueryTypeEnum.YARA),
             ("alert tcp any any -> any any (sid:1;)", QueryTypeEnum.SURICATA),
@@ -176,6 +177,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
                         query,
                         query_type,
                         invalid_index_path,
+                        worker_id,
                         data_callback=None,
                     )
 
@@ -214,11 +216,12 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
                 #a == 1 or $b
         }
         """
-
+        worker_id = "1"
         results: RuleFileMatches = search(
             yara_rule,
             QueryTypeEnum.YARA,
             self.base_temp_dir,
+            worker_id,
             fetch_from_dict,
             progress_callback,
         )
@@ -284,9 +287,9 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
     def test_string_search(self):
         """Plain string searches currently produce no optimized search plan."""
         self.index_string_content()
-
+        worker_id = "1"
         with self.assertRaises(NoIndexMatchesException):
-            search("abcd", QueryTypeEnum.STRING, self.base_temp_dir)
+            search("abcd", QueryTypeEnum.STRING, self.base_temp_dir, worker_id)
 
     def test_yara_search(self):
         """Test that a yara search succeeds."""
@@ -323,11 +326,12 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         content_dict = to_hash_dict(self.string_content)
 
         self.index_data(list(content_dict.values()))
-
+        worker_id = "1"
         results: RuleFileMatches = search(
             yara_rules,
             QueryTypeEnum.YARA,
             self.base_temp_dir,
+            worker_id,
             fetch_from_dict,
             callback_val,
         )
@@ -367,7 +371,9 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         """
         # no atoms long enough
         with self.assertRaises(YaraStringNoAtomException):
-            results: RuleFileMatches = search(yara_rules, QueryTypeEnum.YARA, self.base_temp_dir, fetch_from_dict)
+            results: RuleFileMatches = search(
+                yara_rules, QueryTypeEnum.YARA, self.base_temp_dir, worker_id, fetch_from_dict
+            )
 
     def test_yara_search_skipping_one_file(self):
         """Test that a yara search succeeds but also skip one file and ensure the progress callback works."""
@@ -410,10 +416,12 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
                 return None
             return fetch_from_dict(path, unused)
 
+        worker_id = "1"
         results: RuleFileMatches = search(
             yara_rules,
             QueryTypeEnum.YARA,
             self.base_temp_dir,
+            worker_id,
             proxy_fetch_from_dict,
             callback_val,
         )
@@ -439,7 +447,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
                 ],
             },
         )
-
+        print("This is results ", results)
         self.assertEqual(global_total_complete, 2)
         self.assertEqual(global_total, 2)
 
