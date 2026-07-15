@@ -516,7 +516,7 @@ def _broad_phase_search(
             index_path=index,
             rule_name=rule_name,
         ).observe(total_bgparse_time)
-        logger.info(f'Total BigGrep parse time: {total_bgparse_time}')
+        logger.info(f"Total BigGrep parse time: {total_bgparse_time}")
         pool.close()
     except CancelException:
         pool.terminate()
