@@ -163,7 +163,7 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
     return job
 
 
-def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
+def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO, worker_id: str):
     """Execute the given retrohunt."""
     match_metadata: MatchMetadata = {}
     last_update: pendulum.DateTime | None = None
@@ -285,6 +285,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             search_query,
             search_enum_type,
             index_dirs,
+            worker_id,
             get_data_from_azul,
             update_job,
             recursive=True,
@@ -480,7 +481,7 @@ def main():
                 check_is_cancelled(job_id)
 
                 with prom_worker_runtime.time():
-                    hunt(bgi_folders, job, logs)
+                    hunt(bgi_folders, job, logs, worker_id)
                 # Acknowledge the message
                 logger.info(f"Acknowledging job {rs.RETROHUNT_JOB} {rs.RETROHUNT_GROUP} {msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
