@@ -704,7 +704,8 @@ def _narrow_phase_search(
     # Keep only a bounded number of tasks queued to prevent dispatcher from getting hammered.
     # On cancellation, queued futures are cancelled and no more work is submitted.
     # max workers for threadpoolexecutor is determined by os.cpu_count
-    max_in_flight = 100
+    max_workers = 10
+    max_in_flight = 4 * max_workers
 
     items = iter(file_to_rules.items())
     pending = set()
@@ -754,7 +755,7 @@ def _narrow_phase_search(
                 rule_matches_sets[rule_name].discard(file_path)
 
     logging.info(f"ThreadPoolExecutor starting with {os.cpu_count()} max workers.")
-    executor = ThreadPoolExecutor()
+    executor = ThreadPoolExecutor(max_workers=max_workers)
 
     try:
         while len(pending) < max_in_flight and submit_next(executor):
