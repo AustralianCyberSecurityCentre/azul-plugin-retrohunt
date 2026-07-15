@@ -515,6 +515,7 @@ def _broad_phase_search(
 
         logger.info(f"Total BigGrep parse time: {duration}")
         pool.close()
+        pool.join()
     except CancelException:
         pool.terminate()
         raise
