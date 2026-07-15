@@ -8,9 +8,9 @@ import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import product
+from multiprocessing.pool import ThreadPool
 from threading import Event
 
 import yara
@@ -644,7 +644,7 @@ def _narrow_phase_search(
     progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
 
     # Worker function. Exceptions are intentionally allowed to propagate
-    # through Future.result(), especially CancelException.
+    # through the thread pool result iterator, especially CancelException.
     def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
         if stop_event.is_set():
             raise CancelException("Narrow phase cancelled by user.")
@@ -693,59 +693,58 @@ def _narrow_phase_search(
 
         return ("ok", file_path, rules_for_file, results)
 
-    # On cancellation, queued futures are cancelled and no more work is submitted.
-    futures = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        try:
-            for file_path, rules_for_file in file_to_rules.items():
-                futures.append(
-                    executor.submit(worker, file_path, frozenset(rules_for_file), stop_event, query_hash=query_hash)
-                )
-            # Process results in deterministic order
-            for f in futures:
-                if stop_event.is_set():
-                    raise CancelException("Narrow phase cancelled by user.")
+    def worker_task(task: tuple[str, set[str]]):
+        file_path, rules_for_file = task
+        return worker(file_path, frozenset(rules_for_file), stop_event, query_hash)
 
-                status, file_path, rules_for_file, results = f.result()
+    # Stream completed results from a fixed-size thread pool instead of
+    # retaining one Future object for every narrow-phase candidate.
+    pool = ThreadPool(processes=10)
+    try:
+        for status, file_path, rules_for_file, results in pool.imap_unordered(
+            worker_task,
+            file_to_rules.items(),
+            chunksize=1,
+        ):
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled by user.")
 
-                if status == "missing":
-                    for rule_name in rules_for_file:
-                        total_jobs -= 1
-                        rule_matches_sets[rule_name].discard(file_path)
-                    continue
+            if status == "missing":
+                for rule_name in rules_for_file:
+                    total_jobs -= 1
+                    rule_matches_sets[rule_name].discard(file_path)
+                continue
 
-                for rule_name, matched in results:
-                    jobs_complete += 1
+            for rule_name, matched in results:
+                jobs_complete += 1
 
-                    if matched:
-                        progress_callback(
-                            SearchPhaseEnum.NARROW_PHASE,
-                            jobs_complete,
-                            total_jobs,
-                            (rule_name, [file_path]),
-                        )
-                    else:
-                        progress_callback(
-                            SearchPhaseEnum.NARROW_PHASE,
-                            jobs_complete,
-                            total_jobs,
-                            (rule_name, []),
-                        )
-                        rule_matches_sets[rule_name].discard(file_path)
-        except CancelException:
-            stop_event.set()
-            for f in futures:
-                f.cancel()
-            executor.shutdown(wait=True, cancel_futures=True)
-            raise
-        except Exception:
-            stop_event.set()
-            for f in futures:
-                f.cancel()
-            executor.shutdown(wait=True, cancel_futures=True)
-            raise
-        else:
-            executor.shutdown(wait=True)
+                if matched:
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        (rule_name, [file_path]),
+                    )
+                else:
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        (rule_name, []),
+                    )
+                    rule_matches_sets[rule_name].discard(file_path)
+    except CancelException:
+        stop_event.set()
+        pool.terminate()
+        raise
+    except Exception:
+        stop_event.set()
+        pool.terminate()
+        raise
+    else:
+        pool.close()
+    finally:
+        pool.join()
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
