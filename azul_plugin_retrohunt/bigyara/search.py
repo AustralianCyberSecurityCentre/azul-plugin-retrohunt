@@ -701,37 +701,37 @@ def _narrow_phase_search(
                 futures.append(
                     executor.submit(worker, file_path, frozenset(rules_for_file), stop_event, query_hash=query_hash)
                 )
-                # Process results in deterministic order
-                for f in futures:
-                    if stop_event.is_set():
-                        raise CancelException("Narrow phase cancelled by user.")
+            # Process results in deterministic order
+            for f in futures:
+                if stop_event.is_set():
+                    raise CancelException("Narrow phase cancelled by user.")
 
-                    status, file_path, rules_for_file, results = f.result()
+                status, file_path, rules_for_file, results = f.result()
 
-                    if status == "missing":
-                        for rule_name in rules_for_file:
-                            total_jobs -= 1
-                            rule_matches_sets[rule_name].discard(file_path)
-                        continue
+                if status == "missing":
+                    for rule_name in rules_for_file:
+                        total_jobs -= 1
+                        rule_matches_sets[rule_name].discard(file_path)
+                    continue
 
-                    for rule_name, matched in results:
-                        jobs_complete += 1
+                for rule_name, matched in results:
+                    jobs_complete += 1
 
-                        if matched:
-                            progress_callback(
-                                SearchPhaseEnum.NARROW_PHASE,
-                                jobs_complete,
-                                total_jobs,
-                                (rule_name, [file_path]),
-                            )
-                        else:
-                            progress_callback(
-                                SearchPhaseEnum.NARROW_PHASE,
-                                jobs_complete,
-                                total_jobs,
-                                (rule_name, []),
-                            )
-                            rule_matches_sets[rule_name].discard(file_path)
+                    if matched:
+                        progress_callback(
+                            SearchPhaseEnum.NARROW_PHASE,
+                            jobs_complete,
+                            total_jobs,
+                            (rule_name, [file_path]),
+                        )
+                    else:
+                        progress_callback(
+                            SearchPhaseEnum.NARROW_PHASE,
+                            jobs_complete,
+                            total_jobs,
+                            (rule_name, []),
+                        )
+                        rule_matches_sets[rule_name].discard(file_path)
         except CancelException:
             stop_event.set()
             for f in futures:
