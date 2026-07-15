@@ -58,7 +58,7 @@ prom_narrow_phase_duration = Histogram(
 prom_bgparse_duration = Histogram(
     "retrohunt_bgparse_duration_seconds",
     "Time spent executing bgparse during broad phase.",
-    ["query_hash", "index_path", "rule_name"],
+    ["query_hash"],
     buckets=_DURATION_BUCKETS,
 )
 # PVC/index potential issues
@@ -455,6 +455,7 @@ def _broad_phase_search(
         for rule_name, grouped_searches in search_strings.items()
     }
     total_bgparse_time = 0
+
     pool = mp.Pool()
     try:
         result_iterator = pool.starmap_async(worker, tasks)
@@ -513,9 +514,8 @@ def _broad_phase_search(
 
         prom_bgparse_duration.labels(
             query_hash=query_hash,
-            index_path=index,
-            rule_name=rule_name,
         ).observe(total_bgparse_time)
+
         logger.info(f"Total BigGrep parse time: {total_bgparse_time}")
         pool.close()
     except CancelException:
@@ -697,8 +697,7 @@ def _narrow_phase_search(
 
     # Keep only a bounded number of tasks queued to prevent dispatcher from getting hammered.
     # On cancellation, queued futures are cancelled and no more work is submitted.
-    max_workers = 5
-    max_in_flight = 4 * max_workers
+    max_in_flight = 20
 
     items = iter(file_to_rules.items())
     pending = set()
@@ -747,7 +746,7 @@ def _narrow_phase_search(
             if not matched:
                 rule_matches_sets[rule_name].discard(file_path)
 
-    executor = ThreadPoolExecutor(max_workers=max_workers)
+    executor = ThreadPoolExecutor()
 
     try:
         while len(pending) < max_in_flight and submit_next(executor):
