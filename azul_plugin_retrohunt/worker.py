@@ -1,5 +1,6 @@
 """A simple synchronous worker for running BigYara retrohunts."""
 
+import gc
 import json
 import logging
 import os
@@ -294,6 +295,8 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO, worker_
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
         prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
+        # try manual garbage collection
+        gc.collect()
         logger.debug(job.entity)
     except CancelException as ex:
         trigger_stop_event()
