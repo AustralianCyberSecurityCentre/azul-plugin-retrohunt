@@ -695,7 +695,7 @@ def _narrow_phase_search(
 
     # On cancellation, queued futures are cancelled and no more work is submitted.
     futures = []
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         try:
             for file_path, rules_for_file in file_to_rules.items():
                 futures.append(
