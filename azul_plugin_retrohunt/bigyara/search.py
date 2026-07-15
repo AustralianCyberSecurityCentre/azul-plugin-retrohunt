@@ -493,7 +493,7 @@ def _broad_phase_search(
                 index_path=index,
                 rule_name=rule_name,
             ).observe(duration)
-            logger.info(f'BigGrep took {duration} seconds to parse')
+            logger.info(f"BigGrep took {duration} seconds to parse")
             if returncode != 0:
                 raise BiggrepException(
                     f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
@@ -703,7 +703,6 @@ def _narrow_phase_search(
 
     # Keep only a bounded number of tasks queued to prevent dispatcher from getting hammered.
     # On cancellation, queued futures are cancelled and no more work is submitted.
-    # max workers for threadpoolexecutor is determined by os.cpu_count
     max_workers = 10
     max_in_flight = 4 * max_workers
 
