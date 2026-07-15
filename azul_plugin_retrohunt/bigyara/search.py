@@ -655,7 +655,7 @@ def _narrow_phase_search(
     # through Future.result(), especially CancelException.
     def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
         if stop_event.is_set():
-            raise CancelException("NNarrow phase cancelled by user.")
+            raise CancelException("Narrow phase cancelled by user.")
 
         cfg = file_config.get(file_path)
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
@@ -701,11 +701,10 @@ def _narrow_phase_search(
 
         return ("ok", file_path, rules_for_file, results)
 
-    # Keep only a bounded number of tasks queued. On cancellation, queued
-    # futures are cancelled and no more work is submitted.
+    # Keep only a bounded number of tasks queued to prevent dispatcher from getting hammered.
+    # On cancellation, queued futures are cancelled and no more work is submitted.
     # max workers for threadpoolexecutor is determined by os.cpu_count
-    # limit the amount of work in the queue to stop dispatcher getting hammered.
-    max_in_flight = os.cpu_count() * 4
+    max_in_flight = 100
 
     items = iter(file_to_rules.items())
     pending = set()
