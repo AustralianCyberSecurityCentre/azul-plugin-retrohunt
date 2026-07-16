@@ -17,7 +17,6 @@ import yara
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
-from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 from . import (
     SEARCH_ATOM_SIZE_MIN,
@@ -709,8 +708,8 @@ def _narrow_phase_search(
     )
 
     # Stream completed results from a fixed-size thread pool.
-    settings = RetrohuntSettings()
-    processes = settings.search_settings.narrow_search_processes
+    # settings = RetrohuntSettings()
+    processes = calculate_narrow_search_threads()
     logger.info("Initiating narrow search with %d threads", processes)
     pool = ThreadPool(processes=processes)
     try:
@@ -797,6 +796,72 @@ def trigger_stop_event():
 def clear_stop_event():
     """Clear the stop event flag."""
     stop_event.clear()
+
+
+def calculate_narrow_search_threads() -> int:
+    """Calculate a safe narrow-search thread count from the container limit."""
+    _MIB_PER_GIB = 1024
+
+    # Derived from:
+    #   5 threads  -> 14.4 GB peak
+    #   10 threads -> 18.8 GB peak
+    #
+    # Incremental usage:
+    #   (18.8 - 14.4) / 5 = approximately 0.88 GB per thread
+    #
+    # Rounded upward to 1 GiB per thread.
+    _NARROW_BASELINE_MEMORY_MIB = 10 * _MIB_PER_GIB
+    _NARROW_MEMORY_PER_THREAD_MIB = 1 * _MIB_PER_GIB
+    _NARROW_MEMORY_RESERVE_MIB = 2 * _MIB_PER_GIB
+    _NARROW_ABSOLUTE_THREAD_CAP = 10
+
+    raw_memory_limit = os.getenv("CONTAINER_MEMORY_LIMIT_MI")
+
+    if raw_memory_limit is None:
+        logger.warning("CONTAINER_MEMORY_LIMIT_MI is not set; defaulting narrow search to 1 thread.")
+        return 1
+
+    try:
+        memory_limit_mib = int(raw_memory_limit)
+    except ValueError:
+        logger.warning(
+            "Invalid CONTAINER_MEMORY_LIMIT_MI=%r; defaulting narrow search to 1 thread.",
+            raw_memory_limit,
+        )
+        return 1
+
+    memory_available_for_threads_mib = memory_limit_mib - _NARROW_BASELINE_MEMORY_MIB - _NARROW_MEMORY_RESERVE_MIB
+
+    if memory_available_for_threads_mib < _NARROW_MEMORY_PER_THREAD_MIB:
+        logger.warning(
+            "Container memory limit of %d MiB is below the measured safe "
+            "narrow-search requirement. Defaulting to 1 thread. "
+            "Estimated baseline=%d MiB, reserve=%d MiB.",
+            memory_limit_mib,
+            _NARROW_BASELINE_MEMORY_MIB,
+            _NARROW_MEMORY_RESERVE_MIB,
+        )
+        return 1
+
+    memory_allowed_threads = memory_available_for_threads_mib // _NARROW_MEMORY_PER_THREAD_MIB
+
+    threads = max(
+        1,
+        min(memory_allowed_threads, _NARROW_ABSOLUTE_THREAD_CAP),
+    )
+
+    logger.info(
+        "Calculated narrow search threads: %d "
+        "(container limit=%d MiB, baseline=%d MiB, "
+        "reserve=%d MiB, per-thread=%d MiB)",
+        threads,
+        memory_limit_mib,
+        _NARROW_BASELINE_MEMORY_MIB,
+        _NARROW_MEMORY_RESERVE_MIB,
+        _NARROW_MEMORY_PER_THREAD_MIB,
+    )
+
+    return threads
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
