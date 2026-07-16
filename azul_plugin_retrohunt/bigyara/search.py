@@ -1,6 +1,8 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
+import ctypes
+import gc
 import hashlib
 import logging
 import multiprocessing as mp
@@ -40,6 +42,7 @@ from .yara_parse import RuleSearchPlans, parse_yara_rules
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
+_LIBC = ctypes.CDLL("libc.so.6")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -733,6 +736,20 @@ def _narrow_phase_search(
                 )
                 next_progress_percent += 5
 
+                rss_before_mib = _read_process_rss_mib()
+
+                gc.collect()
+                _LIBC.malloc_trim(0)
+
+                rss_after_mib = _read_process_rss_mib()
+
+                logger.info(
+                    "Narrow memory trim at %d%%: RSS before=%d MiB, RSS after=%d MiB",
+                    next_progress_percent,
+                    rss_before_mib,
+                    rss_after_mib,
+                )
+
             if status == "missing":
                 for rule_name in rules_for_file:
                     total_jobs -= 1
@@ -862,6 +879,18 @@ def calculate_narrow_search_threads() -> int:
     )
 
     return threads
+
+
+def _read_process_rss_mib() -> int:
+    try:
+        with open("/proc/self/status", encoding="utf-8") as status_file:
+            for line in status_file:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError):
+        logger.exception("Unable to read process RSS")
+
+    return 0
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
