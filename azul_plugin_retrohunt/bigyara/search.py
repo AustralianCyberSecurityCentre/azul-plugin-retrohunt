@@ -138,7 +138,6 @@ def search(
     query: str,
     query_type: QueryTypeEnum | int,
     index_dirs: str | list[str],
-    worker_id: str,
     data_callback: DataCallback = None,
     progress_callback: ProgressCallback = None,
     recursive: bool = True,
@@ -203,7 +202,7 @@ def search(
         if data_callback:
             logger.debug("Data callback is not used for string searches.")
 
-    query_hash = hashlib.sha256(worker_id.encode()).hexdigest()
+    query_hash = hashlib.sha256(query.encode()).hexdigest()
 
     rule_atoms, rule_content, rule_search_plans = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search optimised")
@@ -713,6 +712,7 @@ def _narrow_phase_search(
     # Stream completed results from a fixed-size thread pool.
     # settings = RetrohuntSettings()
     processes = calculate_narrow_search_threads()
+    processes = 10
     logger.info("Initiating narrow search with %d threads", processes)
     pool = ThreadPool(processes=processes)
     try:
