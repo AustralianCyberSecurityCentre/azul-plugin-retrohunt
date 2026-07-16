@@ -69,7 +69,7 @@ class RetrohuntSettings(BaseSettings):
         )
 
     redis: RedisSettings = Field(default_factory=lambda: RetrohuntSettings.RedisSettings())
-    search_settings: SearhSettings = Field(default_factory=lambda: RetrohuntSettings.Searh_Settings())
+    search_settings: SearhSettings = Field(default_factory=lambda: RetrohuntSettings.SearhSettings())
     # should be common for all indexers/ingestors.
     root_path: str = tempfile.gettempdir()
     indexers: dict[str, Indexer] = dict()
