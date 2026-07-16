@@ -18,6 +18,11 @@ class RetrohuntSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="plugin_", extra="ignore")
 
+    class SearhSettings(BaseSettings):
+        """Settings for the BigGrep and Narrow phase search."""
+
+        narrow_search_processes: int = Field(3, alies="NARROW_SEARCH_PROCESSES")
+
     class Indexer(BaseModel):
         """Nested configuration for indexers."""
 
@@ -64,6 +69,7 @@ class RetrohuntSettings(BaseSettings):
         )
 
     redis: RedisSettings = Field(default_factory=lambda: RetrohuntSettings.RedisSettings())
+    search_settings: SearhSettings = Field(default_factory=lambda: RetrohuntSettings.Searh_Settings())
     # should be common for all indexers/ingestors.
     root_path: str = tempfile.gettempdir()
     indexers: dict[str, Indexer] = dict()

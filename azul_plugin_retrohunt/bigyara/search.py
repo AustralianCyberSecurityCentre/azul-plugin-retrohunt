@@ -17,6 +17,7 @@ import yara
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
+from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 from . import (
     SEARCH_ATOM_SIZE_MIN,
@@ -637,12 +638,6 @@ def _narrow_phase_search(
                 content = 'import "pe"\n' + content
             compiled_yara_rules[rule_name] = yara.compile(source=content)
 
-    # Precompute total jobs
-    total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
-    jobs_complete = 0
-
-    progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
-
     # Worker function. Exceptions are intentionally allowed to propagate
     # through the thread pool result iterator, especially CancelException.
     def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
@@ -697,8 +692,27 @@ def _narrow_phase_search(
         file_path, rules_for_file = task
         return worker(file_path, frozenset(rules_for_file), stop_event, query_hash)
 
-    # Stream completed results from a fixed-size thread pool
-    pool = ThreadPool(processes=10)
+    # Precompute progress totals.
+    total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
+    jobs_complete = 0
+
+    total_files = len(file_to_rules)
+    files_complete = 0
+    next_progress_percent = 5
+
+    progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
+
+    logger.info(
+        "Narrow search starting: %d unique files to process across %d rule/file jobs",
+        total_files,
+        total_jobs,
+    )
+
+    # Stream completed results from a fixed-size thread pool.
+    settings = RetrohuntSettings()
+    processes = settings.search_settings.narrow_search_processes
+    logger.info("Initiating narrow search with %d threads", processes)
+    pool = ThreadPool(processes=processes)
     try:
         for status, file_path, rules_for_file, results in pool.imap_unordered(
             worker_task,
@@ -707,6 +721,18 @@ def _narrow_phase_search(
         ):
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
+
+            files_complete += 1
+            current_percent = (files_complete * 100) // total_files if total_files else 100
+
+            while current_percent >= next_progress_percent:
+                logger.info(
+                    "Narrow search %d%% complete: %d/%d files processed",
+                    next_progress_percent,
+                    files_complete,
+                    total_files,
+                )
+                next_progress_percent += 5
 
             if status == "missing":
                 for rule_name in rules_for_file:
@@ -717,20 +743,19 @@ def _narrow_phase_search(
             for rule_name, matched in results:
                 jobs_complete += 1
 
-                if matched:
-                    progress_callback(
-                        SearchPhaseEnum.NARROW_PHASE,
-                        jobs_complete,
-                        total_jobs,
-                        (rule_name, [file_path]),
-                    )
-                else:
-                    progress_callback(
-                        SearchPhaseEnum.NARROW_PHASE,
-                        jobs_complete,
-                        total_jobs,
-                        (rule_name, []),
-                    )
+                completed_item = (
+                    rule_name,
+                    [file_path] if matched else [],
+                )
+
+                progress_callback(
+                    SearchPhaseEnum.NARROW_PHASE,
+                    jobs_complete,
+                    total_jobs,
+                    completed_item,
+                )
+
+                if not matched:
                     rule_matches_sets[rule_name].discard(file_path)
     except CancelException:
         stop_event.set()
@@ -752,7 +777,12 @@ def _narrow_phase_search(
             final_matches[rule_name] = list(paths)
 
     if final_matches:
-        logger.info(f"Found {len(final_matches)} confirmed matches for provided yara rules.")
+        confirmed_file_matches = sum(len(paths) for paths in final_matches.values())
+        logger.info(
+            "Found %d confirmed file matches across %d YARA rules.",
+            confirmed_file_matches,
+            len(final_matches),
+        )
     else:
         logger.info("No rules matched after Narrowing.")
 
