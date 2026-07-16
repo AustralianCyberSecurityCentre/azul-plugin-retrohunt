@@ -698,7 +698,7 @@ def _narrow_phase_search(
         return worker(file_path, frozenset(rules_for_file), stop_event, query_hash)
 
     # Stream completed results from a fixed-size thread pool
-    pool = ThreadPool(processes=2)
+    pool = ThreadPool(processes=10)
     try:
         for status, file_path, rules_for_file, results in pool.imap_unordered(
             worker_task,
