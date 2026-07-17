@@ -41,7 +41,7 @@ DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
 
 dp: dispatcher.DispatcherAPI = None
-
+worker_id: str = None
 # hash => metadata
 MatchMetadata = dict[str, dict[bytes, bytes]]
 
@@ -353,9 +353,16 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
     return thread
 
 
+def get_worker_id():
+    """Return the worker id for this worker."""
+    global worker_id
+    return worker_id
+
+
 def main():
     """Start the retrohunt worker."""
     global dp
+    global worker_id
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
