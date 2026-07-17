@@ -1,4 +1,4 @@
-"""A simple synchronous worker for running BigYara retrohunts."""
+"""A worker for running BigYara retrohunts with asynchronous narrow-phase retrieval."""
 
 import ctypes
 import gc
@@ -230,9 +230,8 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             job = _update_progress(job, logs)
             last_update = now
 
-    def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
+    async def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes | None:
         check_is_cancelled(job.entity.id)
-        data: bytes = None
         match_hash: str = match_path.split("/")[-1]
 
         configd = {x.decode(): y.decode() for x, y in config.items()}
@@ -244,17 +243,24 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             logger.error(f"Failed to retrieve metadata label and/or source for {match_hash}: {configd}")
             return None
 
-        try:
-            response = dp.get_binary(source=source, label=label, sha256=match_hash)
-        except dispatcher.DispatcherApiException:
-            pass
-        else:
-            data = response.content
-            match_metadata[match_path] = config
+        data = bytearray()
 
-        # The API may have cancelled the hunt while get_binary was blocked.
+        try:
+            binary_stream = await dp.async_get_binary(
+                source=source,
+                label=label,
+                sha256=match_hash,
+            )
+            async for chunk in binary_stream:
+                data.extend(chunk)
+        except dispatcher.DispatcherApiException:
+            return None
+
+        match_metadata[match_path] = config
+
+        # The API may have cancelled the hunt while the streamed download was in progress.
         check_is_cancelled(job.entity.id)
-        return data
+        return bytes(data)
 
     try:
         # add path info to job
