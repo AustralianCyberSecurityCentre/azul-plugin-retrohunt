@@ -1,20 +1,18 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
-import asyncio
 import binascii
 import ctypes
 import gc
 import hashlib
-import inspect
 import logging
 import multiprocessing as mp
 import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import product
+from multiprocessing.pool import ThreadPool
 from threading import Event
 
 import yara
@@ -43,15 +41,6 @@ from .yara_parse import RuleSearchPlans, parse_yara_rules
 #         in batches according to available core count.
 
 stop_event = Event()
-_narrow_event_loop: asyncio.AbstractEventLoop | None = None
-
-# Hybrid narrow-phase pipeline limits. Downloads are asynchronous, while YARA
-# scans run in a small dedicated thread pool so retrieval can continue during
-# CPU-bound matching without allowing unbounded downloaded data to accumulate.
-NARROW_ASYNC_DOWNLOADS = 8
-NARROW_YARA_SCAN_THREADS = 2
-NARROW_DOWNLOADED_QUEUE_SIZE = 2
-
 logger = logging.getLogger("bigyara.search")
 _LIBC = ctypes.CDLL("libc.so.6")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
@@ -193,19 +182,18 @@ def search(
             except Exception as e:
                 raise ProgressCallbackException("Exception in progress callback") from e
 
-    async def checked_data_callback(path: str, config: dict[bytes, bytes]) -> bytes | None:
-        if not data_callback:
+    def checked_data_callback(path: str, config: dict[bytes, bytes]) -> bytes:
+        data: bytes = None
+
+        if data_callback:
+            try:
+                data = data_callback(path, config)
+            except CancelException:
+                raise
+            except Exception as e:
+                raise DataCallbackException("Exception in data callback") from e
+        else:
             raise ValueError("Invalid data callback")
-
-        try:
-            data = data_callback(path, config)
-            if inspect.isawaitable(data):
-                data = await data
-        except CancelException:
-            raise
-        except Exception as e:
-            raise DataCallbackException("Exception in data callback") from e
-
         return data
 
     if query_type == QueryTypeEnum.STRING:
@@ -621,16 +609,6 @@ def yara_callback(_data):
     return yara.CALLBACK_ABORT
 
 
-def _get_narrow_event_loop() -> asyncio.AbstractEventLoop:
-    """Return the worker process's persistent narrow-phase event loop."""
-    global _narrow_event_loop
-
-    if _narrow_event_loop is None or _narrow_event_loop.is_closed():
-        _narrow_event_loop = asyncio.new_event_loop()
-
-    return _narrow_event_loop
-
-
 def _narrow_phase_search(
     queryType: QueryTypeEnum,
     rule_matches: RuleFileMatches,
@@ -640,95 +618,85 @@ def _narrow_phase_search(
     progress_callback: ProgressCallback,
     query_hash: str,
 ) -> RuleFileMatches:
-    """Run the asynchronous narrow phase from the synchronous search API."""
+    """Narrow phase search using whichever tool is relevant to the search type."""
     if queryType == QueryTypeEnum.STRING:
         return rule_matches
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        loop = _get_narrow_event_loop()
-        return loop.run_until_complete(
-            _narrow_phase_search_async(
-                queryType,
-                rule_matches,
-                rule_content,
-                file_config,
-                data_callback,
-                progress_callback,
-                query_hash,
-            )
-        )
-
-    raise RuntimeError("search() cannot start its narrow-phase event loop while another event loop is running.")
-
-
-async def _narrow_phase_search_async(
-    queryType: QueryTypeEnum,
-    rule_matches: RuleFileMatches,
-    rule_content: RuleContent,
-    file_config: FileConfig,
-    data_callback: DataCallback,
-    progress_callback: ProgressCallback,
-    query_hash: str,
-) -> RuleFileMatches:
-    """Narrow files with async downloads and bounded threaded matching."""
-    # Convert rule_matches to sets for fast removal.
+    # Convert rule_matches to sets for fast removal
     rule_matches_sets: dict[str, set[str]] = {rule_name: set(paths) for rule_name, paths in rule_matches.items()}
 
-    # Invert mapping: file -> rules. Each binary is downloaded only once even
-    # when several rules selected it during the broad phase.
+    # Invert mapping: file → rules
     file_to_rules: dict[str, set[str]] = defaultdict(set)
     for rule_name, paths in rule_matches_sets.items():
-        for path in paths:
-            file_to_rules[path].add(rule_name)
+        for p in paths:
+            file_to_rules[p].add(rule_name)
 
-    # Precompile YARA rules once and share them with the two scan threads, as
-    # the previous threaded implementation already did.
+    # Precompile YARA rules once
     compiled_yara_rules = {}
     if queryType == QueryTypeEnum.YARA:
-        for rule_name, content in list(rule_content.items()):
+        for rule_name, content in rule_content.items():
             if not content.startswith('import "pe"\n'):
                 content = 'import "pe"\n' + content
             compiled_yara_rules[rule_name] = yara.compile(source=content)
 
-    def scan_file(
-        file_path: str,
-        rules_for_file: frozenset[str],
-        data: bytes,
-    ) -> list[tuple[str, bool]]:
-        """Run all relevant tool scans for one downloaded file."""
-        results: list[tuple[str, bool]] = []
+    # Bind metric children once instead of performing label lookups per file.
+    io_duration_metric = prom_narrow_io_duration.labels(query_hash=query_hash)
+    io_bytes_metric = prom_narrow_io_bytes.labels(query_hash=query_hash)
+    missing_files_metric = prom_missing_files.labels(query_hash=query_hash)
+    cpu_duration_metrics = {
+        rule_name: prom_narrow_cpu_duration.labels(
+            query_hash=query_hash,
+            rule_name=rule_name,
+        )
+        for rule_name in rule_matches_sets
+    }
 
+    # Worker function. Exceptions are intentionally allowed to propagate
+    # through the thread pool result iterator, especially CancelException.
+    def worker(file_path: str, rules_for_file: set[str]):
+        if stop_event.is_set():
+            raise CancelException("Narrow phase cancelled by user.")
+
+        cfg = file_config.get(file_path)
+        with io_duration_metric.time():
+            data = data_callback(file_path, cfg)
+
+        # Cancellation may have been requested while the dispatcher call was in progress.
+        if stop_event.is_set():
+            raise CancelException("Narrow phase cancelled by user.")
+
+        if data:
+            io_bytes_metric.inc(len(data))
+        else:
+            missing_files_metric.inc()
+            return ("missing", file_path, rules_for_file, None)
+
+        results = []
         for rule_name in rules_for_file:
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
 
             if queryType == QueryTypeEnum.YARA:
-                with prom_narrow_cpu_duration.labels(
-                    query_hash=query_hash,
-                    rule_name=rule_name,
-                ).time():
-                    matched = (
-                        len(
-                            compiled_yara_rules[rule_name].match(
-                                data=data,
-                                callback=yara_callback,
-                                which_callbacks=yara.CALLBACK_MATCHES,
-                                fast=True,
-                                timeout=60,
-                            )
+                with cpu_duration_metrics[rule_name].time():
+                    matched = bool(
+                        compiled_yara_rules[rule_name].match(
+                            data=data,
+                            callback=yara_callback,
+                            which_callbacks=yara.CALLBACK_MATCHES,
+                            fast=True,
+                            timeout=60,
                         )
-                        > 0
                     )
             elif queryType == QueryTypeEnum.SURICATA:
                 matched = _run_suricata(rule_content[rule_name], file_path, data)
-            else:
-                raise ValueError("Invalid query type for narrow phase")
 
             results.append((rule_name, matched))
 
-        return results
+        return ("ok", file_path, rules_for_file, results)
+
+    def worker_task(task: tuple[str, set[str]]):
+        file_path, rules_for_file = task
+        return worker(file_path, rules_for_file)
 
     # Precompute progress totals.
     total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
@@ -745,214 +713,84 @@ async def _narrow_phase_search_async(
         total_files,
         total_jobs,
     )
-    logger.info(
-        "Initiating hybrid narrow search with %d async downloads, %d YARA scan threads and a %d-file downloaded queue",
-        NARROW_ASYNC_DOWNLOADS,
-        NARROW_YARA_SCAN_THREADS,
-        NARROW_DOWNLOADED_QUEUE_SIZE,
-    )
 
-    # The queue contains only complete downloads waiting for a scan thread.
-    # Its small maxsize provides backpressure when matching is slower than I/O.
-    downloaded_queue: asyncio.Queue[tuple[str, frozenset[str], bytes | None] | None] = asyncio.Queue(
-        maxsize=NARROW_DOWNLOADED_QUEUE_SIZE
-    )
-
-    # A shared iterator avoids creating one task per candidate on 100k+ hunts.
-    # Calls to next() happen without an await, so access is serialized by the
-    # event loop and no additional lock is needed.
-    task_iterator = iter(file_to_rules.items())
-
-    async def download_worker(worker_number: int):
-        """Fetch files asynchronously and enqueue complete binary buffers."""
-        while True:
-            if stop_event.is_set():
-                raise CancelException("Narrow phase cancelled by user.")
-
-            try:
-                file_path, rules_for_file = next(task_iterator)
-            except StopIteration:
-                return
-
-            frozen_rules = frozenset(rules_for_file)
-            cfg = file_config.get(file_path)
-
-            with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-                data = await data_callback(file_path, cfg)
-
-            # Cancellation may have been requested while the dispatcher stream
-            # was active.
-            if stop_event.is_set():
-                raise CancelException("Narrow phase cancelled by user.")
-
-            if data:
-                prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
-            else:
-                prom_missing_files.labels(query_hash=query_hash).inc()
-
-            # This await applies backpressure when both scan threads and the
-            # bounded queue are occupied. Each downloader retains at most its
-            # current file while waiting.
-            await downloaded_queue.put((file_path, frozen_rules, data))
-            logger.debug(
-                "Async download worker %d queued %s",
-                worker_number,
-                file_path,
-            )
-
-    def record_file_complete(
-        file_path: str,
-        rules_for_file: frozenset[str],
-        results: list[tuple[str, bool]] | None,
-    ):
-        """Apply one scanned or missing-file result on the event-loop thread."""
-        nonlocal files_complete, jobs_complete, next_progress_percent, total_jobs
-
-        files_complete += 1
-        current_percent = (files_complete * 100) // total_files if total_files else 100
-
-        while current_percent >= next_progress_percent:
-            logged_percent = next_progress_percent
-            logger.info(
-                "Narrow search %d%% complete: %d/%d files processed",
-                logged_percent,
-                files_complete,
-                total_files,
-            )
-            next_progress_percent += 5
-
-            rss_before_mib = _read_process_rss_mib()
-
-            gc.collect()
-            _LIBC.malloc_trim(0)
-
-            rss_after_mib = _read_process_rss_mib()
-
-            logger.info(
-                "Narrow memory trim at %d%%: RSS before=%d MiB, RSS after=%d MiB",
-                logged_percent,
-                rss_before_mib,
-                rss_after_mib,
-            )
-
-        if results is None:
-            for rule_name in rules_for_file:
-                total_jobs -= 1
-                rule_matches_sets[rule_name].discard(file_path)
-            return
-
-        for rule_name, matched in results:
-            jobs_complete += 1
-
-            completed_item = (
-                rule_name,
-                [file_path] if matched else [],
-            )
-
-            progress_callback(
-                SearchPhaseEnum.NARROW_PHASE,
-                jobs_complete,
-                total_jobs,
-                completed_item,
-            )
-
-            if not matched:
-                rule_matches_sets[rule_name].discard(file_path)
-
-    loop = asyncio.get_running_loop()
-    scan_executor = ThreadPoolExecutor(
-        max_workers=NARROW_YARA_SCAN_THREADS,
-        thread_name_prefix="retrohunt-yara",
-    )
-
-    async def scan_worker(worker_number: int):
-        """Drain downloaded files and run matching in the scan thread pool."""
-        while True:
-            item = await downloaded_queue.get()
-            try:
-                if item is None:
-                    return
-
-                file_path, rules_for_file, data = item
-
-                if stop_event.is_set():
-                    raise CancelException("Narrow phase cancelled by user.")
-
-                if not data:
-                    record_file_complete(file_path, rules_for_file, None)
-                    continue
-
-                results = await loop.run_in_executor(
-                    scan_executor,
-                    scan_file,
-                    file_path,
-                    rules_for_file,
-                    data,
-                )
-
-                # Release the complete binary before callbacks and the next
-                # queue read. This keeps the number of retained buffers bounded.
-                data = None
-
-                if stop_event.is_set():
-                    raise CancelException("Narrow phase cancelled by user.")
-
-                record_file_complete(file_path, rules_for_file, results)
-                logger.debug(
-                    "YARA scan worker %d processed %s",
-                    worker_number,
-                    file_path,
-                )
-            finally:
-                # Drop the queue item's reference to the downloaded binary even
-                # when matching or a callback raises.
-                item = None
-                downloaded_queue.task_done()
-
-    download_tasks = [
-        asyncio.create_task(
-            download_worker(worker_number),
-            name=f"narrow-download-{worker_number}",
-        )
-        for worker_number in range(NARROW_ASYNC_DOWNLOADS)
-    ]
-    scan_tasks = [
-        asyncio.create_task(
-            scan_worker(worker_number),
-            name=f"narrow-scan-{worker_number}",
-        )
-        for worker_number in range(NARROW_YARA_SCAN_THREADS)
-    ]
-
-    async def finish_downloads_and_stop_scanners():
-        """Wait for all fetchers, then terminate scanners after queue drain."""
-        await asyncio.gather(*download_tasks)
-        for _ in scan_tasks:
-            await downloaded_queue.put(None)
-
-    coordinator_task = asyncio.create_task(
-        finish_downloads_and_stop_scanners(),
-        name="narrow-download-coordinator",
-    )
-
-    all_tasks = [coordinator_task, *download_tasks, *scan_tasks]
+    # Stream completed results from a fixed-size thread pool.
+    # settings = RetrohuntSettings()
+    processes = calculate_narrow_search_threads()
+    logger.info("Initiating narrow search with %d threads", processes)
+    pool = ThreadPool(processes=processes)
     try:
-        # Scanner exceptions propagate immediately. The coordinator prevents
-        # sentinel insertion until every downloader has finished.
-        await asyncio.gather(coordinator_task, *scan_tasks)
-    except BaseException:
-        stop_event.set()
-        for task in all_tasks:
-            task.cancel()
-        await asyncio.gather(*all_tasks, return_exceptions=True)
-        raise
-    finally:
-        # Running YARA calls cannot be force-killed safely, matching the old
-        # ThreadPool behaviour. Pending scans are cancelled and active scans
-        # are allowed to finish before their binary buffers are released.
-        scan_executor.shutdown(wait=True, cancel_futures=True)
+        for status, file_path, rules_for_file, results in pool.imap_unordered(
+            worker_task,
+            file_to_rules.items(),
+            chunksize=4,
+        ):
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled by user.")
 
-    # Convert back to lists and remove empty rules.
+            files_complete += 1
+            current_percent = (files_complete * 100) // total_files if total_files else 100
+
+            while current_percent >= next_progress_percent:
+                logger.info(
+                    "Narrow search %d%% complete: %d/%d files processed",
+                    next_progress_percent,
+                    files_complete,
+                    total_files,
+                )
+                next_progress_percent += 5
+
+                rss_before_mib = _read_process_rss_mib()
+
+                gc.collect()
+                _LIBC.malloc_trim(0)
+
+                rss_after_mib = _read_process_rss_mib()
+
+                logger.info(
+                    "Narrow memory trim at %d%%: RSS before=%d MiB, RSS after=%d MiB",
+                    next_progress_percent,
+                    rss_before_mib,
+                    rss_after_mib,
+                )
+
+            if status == "missing":
+                for rule_name in rules_for_file:
+                    total_jobs -= 1
+                    rule_matches_sets[rule_name].discard(file_path)
+                continue
+
+            for rule_name, matched in results:
+                jobs_complete += 1
+
+                completed_item = (
+                    rule_name,
+                    [file_path] if matched else [],
+                )
+
+                progress_callback(
+                    SearchPhaseEnum.NARROW_PHASE,
+                    jobs_complete,
+                    total_jobs,
+                    completed_item,
+                )
+
+                if not matched:
+                    rule_matches_sets[rule_name].discard(file_path)
+    except CancelException:
+        stop_event.set()
+        pool.terminate()
+        raise
+    except Exception:
+        stop_event.set()
+        pool.terminate()
+        raise
+    else:
+        pool.close()
+    finally:
+        pool.join()
+
+    # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
     for rule_name, paths in rule_matches_sets.items():
         if paths:
@@ -972,7 +810,7 @@ async def _narrow_phase_search_async(
 
 
 def trigger_stop_event():
-    """Set the shared stop event if the user cancels manually."""
+    """Set stop event for threads if user cancels manually."""
     stop_event.set()
 
 
@@ -981,39 +819,44 @@ def clear_stop_event():
     stop_event.clear()
 
 
-def calculate_narrow_search_concurrency() -> int:
-    """Calculate safe in-flight async narrow-phase work from the container limit."""
+def calculate_narrow_search_threads() -> int:
+    """Calculate a safe narrow-search thread count from the container limit."""
     _MIB_PER_GIB = 512
 
-    # The async implementation still buffers one complete binary per in-flight
-    # worker before YARA scans it, so retain the measured per-worker memory model
-    # used by the threaded implementation for an apples-to-apples comparison.
+    # Derived from:
+    #   5 threads  -> 8 GB peak
+    #   10 threads -> 11GB peak
+    #
+    # Incremental usage:
+    #   (11 - 8) / 5 = approximately 0.6 GB per thread
+    #
+    # Rounded down to 0.5 GiB per thread.
     _NARROW_BASELINE_MEMORY_MIB = 10 * _MIB_PER_GIB
-    _NARROW_MEMORY_PER_ASYNC_WORKER_MIB = 1 * _MIB_PER_GIB
+    _NARROW_MEMORY_PER_THREAD_MIB = 1 * _MIB_PER_GIB
     _NARROW_MEMORY_RESERVE_MIB = 2 * _MIB_PER_GIB
-    _NARROW_ABSOLUTE_ASYNC_WORKER_CAP = 10
+    _NARROW_ABSOLUTE_THREAD_CAP = 10
 
     raw_memory_limit = os.getenv("CONTAINER_MEMORY_LIMIT_MI")
 
     if raw_memory_limit is None:
-        logger.warning("CONTAINER_MEMORY_LIMIT_MI is not set; defaulting narrow search to 1 async worker.")
+        logger.warning("CONTAINER_MEMORY_LIMIT_MI is not set; defaulting narrow search to 1 thread.")
         return 1
 
     try:
         memory_limit_mib = int(raw_memory_limit)
     except ValueError:
         logger.warning(
-            "Invalid CONTAINER_MEMORY_LIMIT_MI=%r; defaulting narrow search to 1 async worker.",
+            "Invalid CONTAINER_MEMORY_LIMIT_MI=%r; defaulting narrow search to 1 thread.",
             raw_memory_limit,
         )
         return 1
 
-    memory_available_for_workers_mib = memory_limit_mib - _NARROW_BASELINE_MEMORY_MIB - _NARROW_MEMORY_RESERVE_MIB
+    memory_available_for_threads_mib = memory_limit_mib - _NARROW_BASELINE_MEMORY_MIB - _NARROW_MEMORY_RESERVE_MIB
 
-    if memory_available_for_workers_mib < _NARROW_MEMORY_PER_ASYNC_WORKER_MIB:
+    if memory_available_for_threads_mib < _NARROW_MEMORY_PER_THREAD_MIB:
         logger.warning(
             "Container memory limit of %d MiB is below the measured safe "
-            "narrow-search requirement. Defaulting to 1 async worker. "
+            "narrow-search requirement. Defaulting to 1 thread. "
             "Estimated baseline=%d MiB, reserve=%d MiB.",
             memory_limit_mib,
             _NARROW_BASELINE_MEMORY_MIB,
@@ -1021,30 +864,25 @@ def calculate_narrow_search_concurrency() -> int:
         )
         return 1
 
-    memory_allowed_workers = memory_available_for_workers_mib // _NARROW_MEMORY_PER_ASYNC_WORKER_MIB
+    memory_allowed_threads = memory_available_for_threads_mib // _NARROW_MEMORY_PER_THREAD_MIB
 
-    workers = max(
+    threads = max(
         1,
-        min(memory_allowed_workers, _NARROW_ABSOLUTE_ASYNC_WORKER_CAP),
+        min(memory_allowed_threads, _NARROW_ABSOLUTE_THREAD_CAP),
     )
 
     logger.info(
-        "Calculated narrow search async workers: %d "
+        "Calculated narrow search threads: %d "
         "(container limit=%d MiB, baseline=%d MiB, "
-        "reserve=%d MiB, per-worker=%d MiB)",
-        workers,
+        "reserve=%d MiB, per-thread=%d MiB)",
+        threads,
         memory_limit_mib,
         _NARROW_BASELINE_MEMORY_MIB,
         _NARROW_MEMORY_RESERVE_MIB,
-        _NARROW_MEMORY_PER_ASYNC_WORKER_MIB,
+        _NARROW_MEMORY_PER_THREAD_MIB,
     )
 
-    return workers
-
-
-def calculate_narrow_search_threads() -> int:
-    """Backward-compatible alias for existing tests and callers."""
-    return calculate_narrow_search_concurrency()
+    return threads
 
 
 def _read_process_rss_mib() -> int:
