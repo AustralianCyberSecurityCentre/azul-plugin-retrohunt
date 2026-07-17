@@ -1,8 +1,10 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
+import asyncio
 import binascii
 import ctypes
-import gc
+
+# import gc
 import hashlib
 import logging
 import multiprocessing as mp
@@ -12,7 +14,8 @@ import time
 from collections import defaultdict
 from functools import partial
 from itertools import product
-from multiprocessing.pool import ThreadPool
+
+# from multiprocessing.pool import ThreadPool
 from threading import Event
 
 import yara
@@ -609,7 +612,7 @@ def yara_callback(_data):
     return yara.CALLBACK_ABORT
 
 
-def _narrow_phase_search(
+async def _narrow_phase_search(
     queryType: QueryTypeEnum,
     rule_matches: RuleFileMatches,
     rule_content: RuleContent,
@@ -639,28 +642,43 @@ def _narrow_phase_search(
                 content = 'import "pe"\n' + content
             compiled_yara_rules[rule_name] = yara.compile(source=content)
 
-    # Worker function. Exceptions are intentionally allowed to propagate
-    # through the thread pool result iterator, especially CancelException.
-    def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
-        if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled by user.")
-
-        cfg = file_config.get(file_path)
+    async def download(file_path, config):
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-            data = data_callback(file_path, cfg)
+            data = await data_callback(file_path, config)
 
-        # Cancellation may have been requested while the dispatcher call was in progress.
-        if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled by user.")
+        return file_path, data
 
+    async def downloader(file_to_rules, file_config):
+        tasks = [asyncio.create_task(download(file_path, file_config[file_path])) for file_path in file_to_rules]
+
+        for completed_task in asyncio.as_completed(tasks):
+            yield await completed_task
+
+    # async def downloader(file_to_rules, file_config):
+    #    tasks = []
+
+    #    for file_path in file_to_rules:
+    #        tasks.append(
+    #            asyncio.create_task(
+    #                data_callback(file_path, file_config[file_path])
+    #            )
+    #        )
+
+    #    for completed_task in asyncio.as_completed(tasks):
+    #        data = await completed_task
+    #        yield data file_path
+
+    async def process_data(data: bytes, path: str, rules_for_file: dict):
+        """Check rules on data."""
         if data:
             prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
 
         if not data:
             prom_missing_files.labels(query_hash=query_hash).inc()
-            return ("missing", file_path, rules_for_file, None)
+            return ("missing", path, rules_for_file, None)
 
         results = []
+        logger.info(f"Processing {rules_for_file}")
         for rule_name in rules_for_file:
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
@@ -683,109 +701,177 @@ def _narrow_phase_search(
                         > 0
                     )
             elif queryType == QueryTypeEnum.SURICATA:
-                matched = _run_suricata(rule_content[rule_name], file_path, data)
+                matched = _run_suricata(rule_content[rule_name], path, data)
 
             results.append((rule_name, matched))
 
-        return ("ok", file_path, rules_for_file, results)
+        return ("ok", path, rules_for_file, results)
 
-    def worker_task(task: tuple[str, set[str]]):
-        file_path, rules_for_file = task
-        return worker(file_path, frozenset(rules_for_file), stop_event, query_hash)
+    async def download_and_process_data(file_to_rules: dict, file_config: dict):
+        """Download and process data with async."""
+        download_tasks = [asyncio.create_task(downloader(file_to_rules, file_config))]
+
+        processing_tasks = []
+
+        for completed_download in asyncio.as_completed(download_tasks):
+            data, file_path = await completed_download
+
+        rules_for_file = file_to_rules[file_path]
+
+        processing_tasks.append(asyncio.create_task(process_data(data, file_path, rules_for_file)))
+
+        return await asyncio.gather(*processing_tasks)
+
+    _results = await download_and_process_data(file_to_rules, file_config)
+    logger.inf(f"Results: {_results}")
+    # Worker function. Exceptions are intentionally allowed to propagate
+    # through the thread pool result iterator, especially CancelException.
+    # def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
+    #    if stop_event.is_set():
+    #        raise CancelException("Narrow phase cancelled by user.")
+
+    #    cfg = file_config.get(file_path)
+    #    with prom_narrow_io_duration.labels(query_hash=query_hash).time():
+    #        data = data_callback(file_path, cfg)
+
+    # Cancellation may have been requested while the dispatcher call was in progress.
+    #    if stop_event.is_set():
+    #        raise CancelException("Narrow phase cancelled by user.")
+
+    #    if data:
+    #        prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
+
+    #    if not data:
+    #        prom_missing_files.labels(query_hash=query_hash).inc()
+    #        return ("missing", file_path, rules_for_file, None)
+
+    #    results = []
+    #    for rule_name in rules_for_file:
+    #        if stop_event.is_set():
+    #            raise CancelException("Narrow phase cancelled by user.")
+
+    #        if queryType == QueryTypeEnum.YARA:
+    #            with prom_narrow_cpu_duration.labels(
+    #                query_hash=query_hash,
+    #                rule_name=rule_name,
+    #            ).time():
+    #                matched = (
+    #                    len(
+    #                        compiled_yara_rules[rule_name].match(
+    #                            data=data,
+    #                            callback=yara_callback,
+    #                            which_callbacks=yara.CALLBACK_MATCHES,
+    #                            fast=True,
+    #                            timeout=60,
+    #                        )
+    #                    )
+    #                    > 0
+    #                )
+    #        elif queryType == QueryTypeEnum.SURICATA:
+    #            matched = _run_suricata(rule_content[rule_name], file_path, data)
+
+    #        results.append((rule_name, matched))
+
+    #    return ("ok", file_path, rules_for_file, results)
+
+    # def worker_task(task: tuple[str, set[str]]):
+    #    file_path, rules_for_file = task
+    #    return worker(file_path, frozenset(rules_for_file), stop_event, query_hash)
 
     # Precompute progress totals.
-    total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
-    jobs_complete = 0
+    # total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
+    # jobs_complete = 0
 
-    total_files = len(file_to_rules)
-    files_complete = 0
-    next_progress_percent = 5
+    # total_files = len(file_to_rules)
+    # files_complete = 0
+    # next_progress_percent = 5
 
-    progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
+    # progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
 
-    logger.info(
-        "Narrow search starting: %d unique files to process across %d rule/file jobs",
-        total_files,
-        total_jobs,
-    )
+    # logger.info(
+    #    "Narrow search starting: %d unique files to process across %d rule/file jobs",
+    #    total_files,
+    #    total_jobs,
+    # )
 
     # Stream completed results from a fixed-size thread pool.
     # settings = RetrohuntSettings()
-    processes = calculate_narrow_search_threads()
-    logger.info("Initiating narrow search with %d threads", processes)
-    pool = ThreadPool(processes=processes)
-    try:
-        for status, file_path, rules_for_file, results in pool.imap_unordered(
-            worker_task,
-            file_to_rules.items(),
-            chunksize=1,
-        ):
-            if stop_event.is_set():
-                raise CancelException("Narrow phase cancelled by user.")
+    # processes = calculate_narrow_search_threads()
+    # logger.info("Initiating narrow search with %d threads", processes)
+    # pool = ThreadPool(processes=processes)
+    # try:
+    #    for status, file_path, rules_for_file, results in pool.imap_unordered(
+    #        worker_task,
+    #        file_to_rules.items(),
+    #        chunksize=1,
+    #    ):
+    #        if stop_event.is_set():
+    #            raise CancelException("Narrow phase cancelled by user.")
 
-            files_complete += 1
-            current_percent = (files_complete * 100) // total_files if total_files else 100
+    #        files_complete += 1
+    #        current_percent = (files_complete * 100) // total_files if total_files else 100
 
-            while current_percent >= next_progress_percent:
-                logger.info(
-                    "Narrow search %d%% complete: %d/%d files processed",
-                    next_progress_percent,
-                    files_complete,
-                    total_files,
-                )
-                next_progress_percent += 5
+    #        while current_percent >= next_progress_percent:
+    #            logger.info(
+    #                "Narrow search %d%% complete: %d/%d files processed",
+    #                next_progress_percent,
+    #                files_complete,
+    #                total_files,
+    #            )
+    #            next_progress_percent += 5
 
-                rss_before_mib = _read_process_rss_mib()
+    #            rss_before_mib = _read_process_rss_mib()
 
-                gc.collect()
-                _LIBC.malloc_trim(0)
+    #            gc.collect()
+    #            _LIBC.malloc_trim(0)
 
-                rss_after_mib = _read_process_rss_mib()
+    #            rss_after_mib = _read_process_rss_mib()
 
-                logger.info(
-                    "Narrow memory trim at %d%%: RSS before=%d MiB, RSS after=%d MiB",
-                    next_progress_percent,
-                    rss_before_mib,
-                    rss_after_mib,
-                )
+    #            logger.info(
+    #                "Narrow memory trim at %d%%: RSS before=%d MiB, RSS after=%d MiB",
+    #                next_progress_percent,
+    #                rss_before_mib,
+    #                rss_after_mib,
+    #            )
 
-            if status == "missing":
-                for rule_name in rules_for_file:
-                    total_jobs -= 1
-                    rule_matches_sets[rule_name].discard(file_path)
-                continue
+    #        if status == "missing":
+    #            for rule_name in rules_for_file:
+    #                total_jobs -= 1
+    #                rule_matches_sets[rule_name].discard(file_path)
+    #            continue
 
-            for rule_name, matched in results:
-                jobs_complete += 1
+    #        for rule_name, matched in results:
+    #            jobs_complete += 1
 
-                completed_item = (
-                    rule_name,
-                    [file_path] if matched else [],
-                )
+    #            completed_item = (
+    #                rule_name,
+    #                [file_path] if matched else [],
+    #            )
 
-                progress_callback(
-                    SearchPhaseEnum.NARROW_PHASE,
-                    jobs_complete,
-                    total_jobs,
-                    completed_item,
-                )
+    #            progress_callback(
+    #                SearchPhaseEnum.NARROW_PHASE,
+    #                jobs_complete,
+    #                total_jobs,
+    #                completed_item,
+    #            )
 
-                if not matched:
-                    rule_matches_sets[rule_name].discard(file_path)
-    except CancelException:
-        stop_event.set()
-        pool.terminate()
-        raise
-    except Exception:
-        stop_event.set()
-        pool.terminate()
-        raise
-    else:
-        pool.close()
-    finally:
-        pool.join()
+    #            if not matched:
+    #                rule_matches_sets[rule_name].discard(file_path)
+    # except CancelException:
+    #    stop_event.set()
+    #    pool.terminate()
+    #    raise
+    # except Exception:
+    #    stop_event.set()
+    #    pool.terminate()
+    #    raise
+    # else:
+    #    pool.close()
+    # finally:
+    #    pool.join()
 
     # Convert back to lists and remove empty rules
+    logger.info(f"Rule matches sets {rule_matches_sets.items()}")
     final_matches: RuleFileMatches = {}
     for rule_name, paths in rule_matches_sets.items():
         if paths:

@@ -245,7 +245,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             return None
 
         try:
-            response = dp.get_binary(source=source, label=label, sha256=match_hash)
+            response = dp.async_get_binary(source=source, label=label, sha256=match_hash)
         except dispatcher.DispatcherApiException:
             pass
         else:
