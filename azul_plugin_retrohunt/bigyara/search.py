@@ -12,6 +12,7 @@ import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import product
 from threading import Event
@@ -43,6 +44,14 @@ from .yara_parse import RuleSearchPlans, parse_yara_rules
 
 stop_event = Event()
 _narrow_event_loop: asyncio.AbstractEventLoop | None = None
+
+# Hybrid narrow-phase pipeline limits. Downloads are asynchronous, while YARA
+# scans run in a small dedicated thread pool so retrieval can continue during
+# CPU-bound matching without allowing unbounded downloaded data to accumulate.
+NARROW_ASYNC_DOWNLOADS = 8
+NARROW_YARA_SCAN_THREADS = 2
+NARROW_DOWNLOADED_QUEUE_SIZE = 2
+
 logger = logging.getLogger("bigyara.search")
 _LIBC = ctypes.CDLL("libc.so.6")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
@@ -663,17 +672,19 @@ async def _narrow_phase_search_async(
     progress_callback: ProgressCallback,
     query_hash: str,
 ) -> RuleFileMatches:
-    """Narrow files with bounded asynchronous retrieval and synchronous matching."""
+    """Narrow files with async downloads and bounded threaded matching."""
     # Convert rule_matches to sets for fast removal.
     rule_matches_sets: dict[str, set[str]] = {rule_name: set(paths) for rule_name, paths in rule_matches.items()}
 
-    # Invert mapping: file -> rules.
+    # Invert mapping: file -> rules. Each binary is downloaded only once even
+    # when several rules selected it during the broad phase.
     file_to_rules: dict[str, set[str]] = defaultdict(set)
     for rule_name, paths in rule_matches_sets.items():
         for path in paths:
             file_to_rules[path].add(rule_name)
 
-    # Precompile YARA rules once.
+    # Precompile YARA rules once and share them with the two scan threads, as
+    # the previous threaded implementation already did.
     compiled_yara_rules = {}
     if queryType == QueryTypeEnum.YARA:
         for rule_name, content in list(rule_content.items()):
@@ -681,26 +692,14 @@ async def _narrow_phase_search_async(
                 content = 'import "pe"\n' + content
             compiled_yara_rules[rule_name] = yara.compile(source=content)
 
-    async def process_file(file_path: str, rules_for_file: frozenset[str]):
-        if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled by user.")
+    def scan_file(
+        file_path: str,
+        rules_for_file: frozenset[str],
+        data: bytes,
+    ) -> list[tuple[str, bool]]:
+        """Run all relevant tool scans for one downloaded file."""
+        results: list[tuple[str, bool]] = []
 
-        cfg = file_config.get(file_path)
-        with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-            data = await data_callback(file_path, cfg)
-
-        # Cancellation may have been requested while the dispatcher stream was active.
-        if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled by user.")
-
-        if data:
-            prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
-
-        if not data:
-            prom_missing_files.labels(query_hash=query_hash).inc()
-            return ("missing", file_path, rules_for_file, None)
-
-        results = []
         for rule_name in rules_for_file:
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
@@ -724,10 +723,12 @@ async def _narrow_phase_search_async(
                     )
             elif queryType == QueryTypeEnum.SURICATA:
                 matched = _run_suricata(rule_content[rule_name], file_path, data)
+            else:
+                raise ValueError("Invalid query type for narrow phase")
 
             results.append((rule_name, matched))
 
-        return ("ok", file_path, rules_for_file, results)
+        return results
 
     # Precompute progress totals.
     total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
@@ -744,21 +745,26 @@ async def _narrow_phase_search_async(
         total_files,
         total_jobs,
     )
-
-    concurrency = calculate_narrow_search_threads()
     logger.info(
-        "Initiating narrow search with %d asynchronous workers",
-        concurrency,
+        "Initiating hybrid narrow search with %d async downloads, %d YARA scan threads and a %d-file downloaded queue",
+        NARROW_ASYNC_DOWNLOADS,
+        NARROW_YARA_SCAN_THREADS,
+        NARROW_DOWNLOADED_QUEUE_SIZE,
     )
 
-    # A shared iterator avoids creating one asyncio.Task per candidate, which would
-    # add substantial overhead for hunts with 100k+ files. Each async worker takes
-    # the next file only after finishing its current streamed download and scan.
+    # The queue contains only complete downloads waiting for a scan thread.
+    # Its small maxsize provides backpressure when matching is slower than I/O.
+    downloaded_queue: asyncio.Queue[tuple[str, frozenset[str], bytes | None] | None] = asyncio.Queue(
+        maxsize=NARROW_DOWNLOADED_QUEUE_SIZE
+    )
+
+    # A shared iterator avoids creating one task per candidate on 100k+ hunts.
+    # Calls to next() happen without an await, so access is serialized by the
+    # event loop and no additional lock is needed.
     task_iterator = iter(file_to_rules.items())
 
-    async def async_worker():
-        nonlocal files_complete, jobs_complete, next_progress_percent, total_jobs
-
+    async def download_worker(worker_number: int):
+        """Fetch files asynchronously and enqueue complete binary buffers."""
         while True:
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
@@ -768,77 +774,183 @@ async def _narrow_phase_search_async(
             except StopIteration:
                 return
 
-            status, file_path, frozen_rules, results = await process_file(
-                file_path,
-                frozenset(rules_for_file),
-            )
+            frozen_rules = frozenset(rules_for_file)
+            cfg = file_config.get(file_path)
 
+            with prom_narrow_io_duration.labels(query_hash=query_hash).time():
+                data = await data_callback(file_path, cfg)
+
+            # Cancellation may have been requested while the dispatcher stream
+            # was active.
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
 
-            files_complete += 1
-            current_percent = (files_complete * 100) // total_files if total_files else 100
+            if data:
+                prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
+            else:
+                prom_missing_files.labels(query_hash=query_hash).inc()
 
-            while current_percent >= next_progress_percent:
-                logger.info(
-                    "Narrow search %d%% complete: %d/%d files processed",
-                    next_progress_percent,
-                    files_complete,
-                    total_files,
+            # This await applies backpressure when both scan threads and the
+            # bounded queue are occupied. Each downloader retains at most its
+            # current file while waiting.
+            await downloaded_queue.put((file_path, frozen_rules, data))
+            logger.debug(
+                "Async download worker %d queued %s",
+                worker_number,
+                file_path,
+            )
+
+    def record_file_complete(
+        file_path: str,
+        rules_for_file: frozenset[str],
+        results: list[tuple[str, bool]] | None,
+    ):
+        """Apply one scanned or missing-file result on the event-loop thread."""
+        nonlocal files_complete, jobs_complete, next_progress_percent, total_jobs
+
+        files_complete += 1
+        current_percent = (files_complete * 100) // total_files if total_files else 100
+
+        while current_percent >= next_progress_percent:
+            logged_percent = next_progress_percent
+            logger.info(
+                "Narrow search %d%% complete: %d/%d files processed",
+                logged_percent,
+                files_complete,
+                total_files,
+            )
+            next_progress_percent += 5
+
+            rss_before_mib = _read_process_rss_mib()
+
+            gc.collect()
+            _LIBC.malloc_trim(0)
+
+            rss_after_mib = _read_process_rss_mib()
+
+            logger.info(
+                "Narrow memory trim at %d%%: RSS before=%d MiB, RSS after=%d MiB",
+                logged_percent,
+                rss_before_mib,
+                rss_after_mib,
+            )
+
+        if results is None:
+            for rule_name in rules_for_file:
+                total_jobs -= 1
+                rule_matches_sets[rule_name].discard(file_path)
+            return
+
+        for rule_name, matched in results:
+            jobs_complete += 1
+
+            completed_item = (
+                rule_name,
+                [file_path] if matched else [],
+            )
+
+            progress_callback(
+                SearchPhaseEnum.NARROW_PHASE,
+                jobs_complete,
+                total_jobs,
+                completed_item,
+            )
+
+            if not matched:
+                rule_matches_sets[rule_name].discard(file_path)
+
+    loop = asyncio.get_running_loop()
+    scan_executor = ThreadPoolExecutor(
+        max_workers=NARROW_YARA_SCAN_THREADS,
+        thread_name_prefix="retrohunt-yara",
+    )
+
+    async def scan_worker(worker_number: int):
+        """Drain downloaded files and run matching in the scan thread pool."""
+        while True:
+            item = await downloaded_queue.get()
+            try:
+                if item is None:
+                    return
+
+                file_path, rules_for_file, data = item
+
+                if stop_event.is_set():
+                    raise CancelException("Narrow phase cancelled by user.")
+
+                if not data:
+                    record_file_complete(file_path, rules_for_file, None)
+                    continue
+
+                results = await loop.run_in_executor(
+                    scan_executor,
+                    scan_file,
+                    file_path,
+                    rules_for_file,
+                    data,
                 )
-                next_progress_percent += 5
 
-                rss_before_mib = _read_process_rss_mib()
+                # Release the complete binary before callbacks and the next
+                # queue read. This keeps the number of retained buffers bounded.
+                data = None
 
-                gc.collect()
-                _LIBC.malloc_trim(0)
+                if stop_event.is_set():
+                    raise CancelException("Narrow phase cancelled by user.")
 
-                rss_after_mib = _read_process_rss_mib()
-
-                logger.info(
-                    "Narrow memory trim at %d%%: RSS before=%d MiB, RSS after=%d MiB",
-                    next_progress_percent,
-                    rss_before_mib,
-                    rss_after_mib,
+                record_file_complete(file_path, rules_for_file, results)
+                logger.debug(
+                    "YARA scan worker %d processed %s",
+                    worker_number,
+                    file_path,
                 )
+            finally:
+                # Drop the queue item's reference to the downloaded binary even
+                # when matching or a callback raises.
+                item = None
+                downloaded_queue.task_done()
 
-            if status == "missing":
-                for rule_name in frozen_rules:
-                    total_jobs -= 1
-                    rule_matches_sets[rule_name].discard(file_path)
-                continue
-
-            for rule_name, matched in results:
-                jobs_complete += 1
-
-                completed_item = (
-                    rule_name,
-                    [file_path] if matched else [],
-                )
-
-                progress_callback(
-                    SearchPhaseEnum.NARROW_PHASE,
-                    jobs_complete,
-                    total_jobs,
-                    completed_item,
-                )
-
-                if not matched:
-                    rule_matches_sets[rule_name].discard(file_path)
-
-    worker_tasks = [
-        asyncio.create_task(async_worker(), name=f"narrow-worker-{worker_number}")
-        for worker_number in range(concurrency)
+    download_tasks = [
+        asyncio.create_task(
+            download_worker(worker_number),
+            name=f"narrow-download-{worker_number}",
+        )
+        for worker_number in range(NARROW_ASYNC_DOWNLOADS)
+    ]
+    scan_tasks = [
+        asyncio.create_task(
+            scan_worker(worker_number),
+            name=f"narrow-scan-{worker_number}",
+        )
+        for worker_number in range(NARROW_YARA_SCAN_THREADS)
     ]
 
+    async def finish_downloads_and_stop_scanners():
+        """Wait for all fetchers, then terminate scanners after queue drain."""
+        await asyncio.gather(*download_tasks)
+        for _ in scan_tasks:
+            await downloaded_queue.put(None)
+
+    coordinator_task = asyncio.create_task(
+        finish_downloads_and_stop_scanners(),
+        name="narrow-download-coordinator",
+    )
+
+    all_tasks = [coordinator_task, *download_tasks, *scan_tasks]
     try:
-        await asyncio.gather(*worker_tasks)
+        # Scanner exceptions propagate immediately. The coordinator prevents
+        # sentinel insertion until every downloader has finished.
+        await asyncio.gather(coordinator_task, *scan_tasks)
     except BaseException:
         stop_event.set()
-        for task in worker_tasks:
+        for task in all_tasks:
             task.cancel()
-        await asyncio.gather(*worker_tasks, return_exceptions=True)
+        await asyncio.gather(*all_tasks, return_exceptions=True)
         raise
+    finally:
+        # Running YARA calls cannot be force-killed safely, matching the old
+        # ThreadPool behaviour. Pending scans are cancelled and active scans
+        # are allowed to finish before their binary buffers are released.
+        scan_executor.shutdown(wait=True, cancel_futures=True)
 
     # Convert back to lists and remove empty rules.
     final_matches: RuleFileMatches = {}

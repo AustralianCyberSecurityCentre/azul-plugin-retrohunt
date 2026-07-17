@@ -1,4 +1,4 @@
-"""A worker for running BigYara retrohunts with asynchronous narrow-phase retrieval."""
+"""A worker for running BigYara retrohunts with hybrid narrow-phase processing."""
 
 import ctypes
 import gc
@@ -36,7 +36,7 @@ prom_jobs_run = Counter(
 prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a workers run.")
 
 PLUGIN_NAME = "RetroHunter"
-PLUGIN_VERSION = "2026.07.15"
+PLUGIN_VERSION = "2026.07.17"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
 
