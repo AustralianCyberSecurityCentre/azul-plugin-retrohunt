@@ -239,7 +239,7 @@ def search(
                 query_hash=query_hash,
             )
         )
-        #rule_matches = _narrow_phase_search(
+        # rule_matches = _narrow_phase_search(
         #    query_type,
         #    rule_matches,
         #    rule_content,
@@ -247,7 +247,7 @@ def search(
         #    checked_data_callback,
         #    checked_progress_callback,
         #    query_hash=query_hash,
-        #)
+        # )
 
     return rule_matches
 
@@ -698,7 +698,21 @@ async def _narrow_phase_search(
 
         results = []
         logger.info(f"Processing {rules_for_file}")
-      
+
+        def run_yara_match(yara_rule, data):
+            return (
+                len(
+                    yara_rule.match(
+                        data=data,
+                        callback=yara_callback,
+                        which_callbacks=yara.CALLBACK_MATCHES,
+                        fast=True,
+                        timeout=60,
+                    )
+                )
+                > 0
+            )
+
         for rule_name in rules_for_file:
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
@@ -708,16 +722,10 @@ async def _narrow_phase_search(
                     query_hash=query_hash,
                     rule_name=rule_name,
                 ).time():
-                      matched = await asyncio.to_thread(
-                        lambda: len(
-                            compiled_yara_rules[rule_name].match(
-                                data=data,
-                                callback=yara_callback,
-                                which_callbacks=yara.CALLBACK_MATCHES,
-                                fast=True,
-                                timeout=60,
-                            )
-                        ) > 0
+                    matched = await asyncio.to_thread(
+                        run_yara_match,
+                        compiled_yara_rules[rule_name],
+                        data,
                     )
             elif queryType == QueryTypeEnum.SURICATA:
                 matched = _run_suricata(rule_content[rule_name], path, data)
@@ -749,7 +757,6 @@ async def _narrow_phase_search(
 
     _results = await download_and_process_data(file_to_rules, file_config)
     for status, file_path, rules_for_file, results in _results:
-
         if status == "missing":
             for rule_name in rules_for_file:
                 rule_matches_sets[rule_name].discard(file_path)
