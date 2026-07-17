@@ -19,7 +19,6 @@ import yara
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
-from azul_plugin_retrohunt.worker import get_worker_id
 
 from . import (
     SEARCH_ATOM_SIZE_MIN,
@@ -49,52 +48,52 @@ _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300,
 prom_broad_phase_duration = Histogram(
     "retrohunt_broad_phase_duration_seconds",
     "Time spent in broad phase search.",
-    ["query_hash, worker_id"],
+    ["query_hash"],
     buckets=_DURATION_BUCKETS,
 )
 prom_narrow_phase_duration = Histogram(
     "retrohunt_narrow_phase_duration_seconds",
     "Time spent in narrow phase search.",
-    ["query_hash, worker_id"],
+    ["query_hash"],
     buckets=_DURATION_BUCKETS,
 )
 # bgparse latency
 prom_bgparse_duration = Histogram(
     "retrohunt_bgparse_duration_seconds",
     "Time spent executing bgparse during broad phase.",
-    ["query_hash, worker_id"],
+    ["query_hash"],
     buckets=_DURATION_BUCKETS,
 )
 # PVC/index potential issues
 prom_bgparse_errors = Counter(
     "retrohunt_bgparse_errors_total",
     "Number of bgparse errors encountered during broad phase.",
-    ["query_hash", "index_path", "rule_name, worker_id"],
+    ["query_hash", "index_path", "rule_name"],
 )
 # per-file read latency
 prom_narrow_io_duration = Histogram(
     "retrohunt_narrow_io_duration_seconds",
     "Time spent reading file data during narrow phase.",
-    ["query_hash, worker_id"],
+    ["query_hash"],
     buckets=_DURATION_BUCKETS,
 )
 # Throughput
 prom_narrow_io_bytes = Counter(
     "retrohunt_narrow_io_bytes_total",
     "Total bytes read during narrow phase.",
-    ["query_hash, worker_id"],
+    ["query_hash"],
 )
 # stale index check
 prom_missing_files = Counter(
     "retrohunt_missing_files_total",
     "Number of files missing during narrow phase.",
-    ["query_hash, worker_id"],
+    ["query_hash"],
 )
 # CPU time spent matching
 prom_narrow_cpu_duration = Histogram(
     "retrohunt_narrow_cpu_duration_seconds",
     "CPU time spent matching rules during narrow phase.",
-    ["query_hash", "rule_name, worker_id"],
+    ["query_hash", "rule_name"],
     buckets=_DURATION_BUCKETS,
 )
 
@@ -207,7 +206,7 @@ def search(
 
     rule_atoms, rule_content, rule_search_plans = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search optimised")
-    with prom_broad_phase_duration.labels(query_hash=query_hash, worker_id=get_worker_id()).time():
+    with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
             query_type,
             indices,
@@ -225,7 +224,7 @@ def search(
             rule_matches.pop(rule_name, None)
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
-    with prom_narrow_phase_duration.labels(query_hash=query_hash, worker_id=get_worker_id()).time():
+    with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
         rule_matches = _narrow_phase_search(
             query_type,
             rule_matches,
@@ -512,7 +511,9 @@ def _broad_phase_search(
 
         duration = time.time() - start
 
-        prom_bgparse_duration.labels(query_hash=query_hash, worker_id=get_worker_id()).observe(duration)
+        prom_bgparse_duration.labels(
+            query_hash=query_hash,
+        ).observe(duration)
 
         logger.info(f"Total BigGrep parse time: {duration}")
         pool.close()
@@ -594,7 +595,6 @@ def _process_bgparse_output(
                             query_hash=query_hash,
                             index_path=index_path,
                             rule_name=rule_name,
-                            worker_id=get_worker_id(),
                         ).inc()
                         raise FileConfigReadException(f"Could not read file config from index for {path}")
                     key, value = key_value
@@ -646,7 +646,7 @@ def _narrow_phase_search(
             raise CancelException("Narrow phase cancelled by user.")
 
         cfg = file_config.get(file_path)
-        with prom_narrow_io_duration.labels(query_hash=query_hash, worker_id=get_worker_id()).time():
+        with prom_narrow_io_duration.labels(query_hash=query_hash).time():
             data = data_callback(file_path, cfg)
 
         # Cancellation may have been requested while the dispatcher call was in progress.
@@ -654,10 +654,10 @@ def _narrow_phase_search(
             raise CancelException("Narrow phase cancelled by user.")
 
         if data:
-            prom_narrow_io_bytes.labels(query_hash=query_hash, worker_id=get_worker_id()).inc(len(data))
+            prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
 
         if not data:
-            prom_missing_files.labels(query_hash=query_hash, worker_id=get_worker_id()).inc()
+            prom_missing_files.labels(query_hash=query_hash).inc()
             return ("missing", file_path, rules_for_file, None)
 
         results = []
@@ -667,7 +667,8 @@ def _narrow_phase_search(
 
             if queryType == QueryTypeEnum.YARA:
                 with prom_narrow_cpu_duration.labels(
-                    query_hash=query_hash, rule_name=rule_name, worker_id=get_worker_id()
+                    query_hash=query_hash,
+                    rule_name=rule_name,
                 ).time():
                     matched = (
                         len(
@@ -711,7 +712,6 @@ def _narrow_phase_search(
     # Stream completed results from a fixed-size thread pool.
     # settings = RetrohuntSettings()
     processes = calculate_narrow_search_threads()
-    processes = 10
     logger.info("Initiating narrow search with %d threads", processes)
     pool = ThreadPool(processes=processes)
     try:
@@ -816,20 +816,20 @@ def clear_stop_event():
 
 def calculate_narrow_search_threads() -> int:
     """Calculate a safe narrow-search thread count from the container limit."""
-    _MIB_PER_GIB = 1024
+    _MIB_PER_GIB = 512
 
     # Derived from:
-    #   5 threads  -> 14.4 GB peak
-    #   10 threads -> 18.8 GB peak
+    #   5 threads  -> 8 GB peak
+    #   10 threads -> 11GB peak
     #
     # Incremental usage:
-    #   (18.8 - 14.4) / 5 = approximately 0.88 GB per thread
+    #   (11 - 8) / 5 = approximately 0.6 GB per thread
     #
-    # Rounded upward to 1 GiB per thread.
+    # Rounded down to 0.5 GiB per thread.
     _NARROW_BASELINE_MEMORY_MIB = 10 * _MIB_PER_GIB
     _NARROW_MEMORY_PER_THREAD_MIB = 1 * _MIB_PER_GIB
     _NARROW_MEMORY_RESERVE_MIB = 2 * _MIB_PER_GIB
-    _NARROW_ABSOLUTE_THREAD_CAP = 10
+    _NARROW_ABSOLUTE_THREAD_CAP = 20
 
     raw_memory_limit = os.getenv("CONTAINER_MEMORY_LIMIT_MI")
 
