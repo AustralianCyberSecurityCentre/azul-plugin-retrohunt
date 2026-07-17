@@ -829,7 +829,7 @@ def calculate_narrow_search_threads() -> int:
     _NARROW_BASELINE_MEMORY_MIB = 10 * _MIB_PER_GIB
     _NARROW_MEMORY_PER_THREAD_MIB = 1 * _MIB_PER_GIB
     _NARROW_MEMORY_RESERVE_MIB = 2 * _MIB_PER_GIB
-    _NARROW_ABSOLUTE_THREAD_CAP = 20
+    _NARROW_ABSOLUTE_THREAD_CAP = 10
 
     raw_memory_limit = os.getenv("CONTAINER_MEMORY_LIMIT_MI")
 
