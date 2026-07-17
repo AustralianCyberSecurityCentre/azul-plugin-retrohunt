@@ -230,7 +230,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             job = _update_progress(job, logs)
             last_update = now
 
-    def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
+    async def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
         check_is_cancelled(job.entity.id)
         data: bytes = None
         match_hash: str = match_path.split("/")[-1]
@@ -245,7 +245,13 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             return None
 
         try:
-            response = dp.async_get_binary(source=source, label=label, sha256=match_hash)
+            response = await dp.async_get_binary(
+                source=source,
+                label=label,
+                sha256=match_hash,
+            )
+            data = response.content
+            # response = dp.async_get_binary(source=source, label=label, sha256=match_hash)
         except dispatcher.DispatcherApiException:
             pass
         else:

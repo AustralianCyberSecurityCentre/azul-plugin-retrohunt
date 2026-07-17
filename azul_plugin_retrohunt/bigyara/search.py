@@ -185,19 +185,14 @@ def search(
             except Exception as e:
                 raise ProgressCallbackException("Exception in progress callback") from e
 
-    def checked_data_callback(path: str, config: dict[bytes, bytes]) -> bytes:
-        data: bytes = None
-
-        if data_callback:
-            try:
-                data = data_callback(path, config)
-            except CancelException:
-                raise
-            except Exception as e:
-                raise DataCallbackException("Exception in data callback") from e
-        else:
-            raise ValueError("Invalid data callback")
-        return data
+    async def checked_data_callback(path: str, config: dict[bytes, bytes]) -> bytes:
+        """Check data callback."""
+        try:
+            return await data_callback(path, config)
+        except CancelException:
+            raise
+        except Exception as e:
+            raise DataCallbackException("Exception in data callback") from e
 
     if query_type == QueryTypeEnum.STRING:
         # string searches don't actually require the file data to succeed,
@@ -655,8 +650,7 @@ async def _narrow_phase_search(
 
     async def download(file_path, config):
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-            data = await asyncio.to_thread(
-                data_callback,
+            data = await data_callback(
                 file_path,
                 config,
             )
