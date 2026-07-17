@@ -228,15 +228,26 @@ def search(
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
     with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
-        rule_matches = _narrow_phase_search(
-            query_type,
-            rule_matches,
-            rule_content,
-            file_config,
-            checked_data_callback,
-            checked_progress_callback,
-            query_hash=query_hash,
+        rule_matches = asyncio.run(
+            _narrow_phase_search(
+                query_type,
+                rule_matches,
+                rule_content,
+                file_config,
+                checked_data_callback,
+                checked_progress_callback,
+                query_hash=query_hash,
+            )
         )
+        #rule_matches = _narrow_phase_search(
+        #    query_type,
+        #    rule_matches,
+        #    rule_content,
+        #    file_config,
+        #    checked_data_callback,
+        #    checked_progress_callback,
+        #    query_hash=query_hash,
+        #)
 
     return rule_matches
 
@@ -644,7 +655,11 @@ async def _narrow_phase_search(
 
     async def download(file_path, config):
         with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-            data = await data_callback(file_path, config)
+            data = await asyncio.to_thread(
+                data_callback,
+                file_path,
+                config,
+            )
 
         return file_path, data
 
@@ -668,7 +683,11 @@ async def _narrow_phase_search(
     #        data = await completed_task
     #        yield data file_path
 
-    async def process_data(data: bytes, path: str, rules_for_file: dict):
+    async def process_data(
+        data: bytes,
+        path: str,
+        rules_for_file: set[str],
+    ):
         """Check rules on data."""
         if data:
             prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
@@ -679,6 +698,7 @@ async def _narrow_phase_search(
 
         results = []
         logger.info(f"Processing {rules_for_file}")
+      
         for rule_name in rules_for_file:
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
@@ -688,8 +708,8 @@ async def _narrow_phase_search(
                     query_hash=query_hash,
                     rule_name=rule_name,
                 ).time():
-                    matched = (
-                        len(
+                      matched = await asyncio.to_thread(
+                        lambda: len(
                             compiled_yara_rules[rule_name].match(
                                 data=data,
                                 callback=yara_callback,
@@ -697,8 +717,7 @@ async def _narrow_phase_search(
                                 fast=True,
                                 timeout=60,
                             )
-                        )
-                        > 0
+                        ) > 0
                     )
             elif queryType == QueryTypeEnum.SURICATA:
                 matched = _run_suricata(rule_content[rule_name], path, data)
@@ -707,23 +726,39 @@ async def _narrow_phase_search(
 
         return ("ok", path, rules_for_file, results)
 
-    async def download_and_process_data(file_to_rules: dict, file_config: dict):
-        """Download and process data with async."""
-        download_tasks = [asyncio.create_task(downloader(file_to_rules, file_config))]
-
+    async def download_and_process_data(file_to_rules, file_config):
         processing_tasks = []
 
-        for completed_download in asyncio.as_completed(download_tasks):
-            data, file_path = await completed_download
+        async for file_path, data in downloader(
+            file_to_rules,
+            file_config,
+        ):
+            logger.info("Downloaded %s", file_path)
 
-        rules_for_file = file_to_rules[file_path]
-
-        processing_tasks.append(asyncio.create_task(process_data(data, file_path, rules_for_file)))
+            processing_tasks.append(
+                asyncio.create_task(
+                    process_data(
+                        data,
+                        file_path,
+                        file_to_rules[file_path],
+                    )
+                )
+            )
 
         return await asyncio.gather(*processing_tasks)
 
     _results = await download_and_process_data(file_to_rules, file_config)
-    logger.inf(f"Results: {_results}")
+    for status, file_path, rules_for_file, results in _results:
+
+        if status == "missing":
+            for rule_name in rules_for_file:
+                rule_matches_sets[rule_name].discard(file_path)
+            continue
+
+        for rule_name, matched in results:
+            if not matched:
+                rule_matches_sets[rule_name].discard(file_path)
+    logger.info(f"Results: {_results}")
     # Worker function. Exceptions are intentionally allowed to propagate
     # through the thread pool result iterator, especially CancelException.
     # def worker(file_path: str, rules_for_file: frozenset[str], stop_event, query_hash: str):
