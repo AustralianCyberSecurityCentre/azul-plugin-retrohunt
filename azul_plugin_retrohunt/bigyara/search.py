@@ -19,6 +19,7 @@ import yara
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
+from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 from . import (
     SEARCH_ATOM_SIZE_MIN,
@@ -715,7 +716,7 @@ def _narrow_phase_search(
     )
 
     # Stream completed results from a fixed-size thread pool.
-    # settings = RetrohuntSettings()
+    # Number of threads used based on available memory in the container.
     processes = calculate_narrow_search_threads()
     logger.info("Initiating narrow search with %d threads", processes)
     pool = ThreadPool(processes=processes)
@@ -740,19 +741,8 @@ def _narrow_phase_search(
                 )
                 next_progress_percent += 5
 
-                rss_before_mib = _read_process_rss_mib()
-
                 gc.collect()
                 _LIBC.malloc_trim(0)
-
-                rss_after_mib = _read_process_rss_mib()
-
-                logger.info(
-                    "Narrow memory trim at %d%%: RSS before=%d MiB, RSS after=%d MiB",
-                    next_progress_percent,
-                    rss_before_mib,
-                    rss_after_mib,
-                )
 
             if status == "missing":
                 for rule_name in rules_for_file:
@@ -836,7 +826,8 @@ def calculate_narrow_search_threads() -> int:
     _NARROW_MEMORY_RESERVE_MIB = 2 * _MIB_PER_GIB
     _NARROW_ABSOLUTE_THREAD_CAP = 10
 
-    raw_memory_limit = os.getenv("CONTAINER_MEMORY_LIMIT_MI")
+    settings = RetrohuntSettings()
+    raw_memory_limit = settings.search_settings.container_memory_limit_mi
 
     if raw_memory_limit is None:
         logger.warning("CONTAINER_MEMORY_LIMIT_MI is not set; defaulting narrow search to 1 thread.")
@@ -883,18 +874,6 @@ def calculate_narrow_search_threads() -> int:
     )
 
     return threads
-
-
-def _read_process_rss_mib() -> int:
-    try:
-        with open("/proc/self/status", encoding="utf-8") as status_file:
-            for line in status_file:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) // 1024
-    except (OSError, ValueError):
-        logger.exception("Unable to read process RSS")
-
-    return 0
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
