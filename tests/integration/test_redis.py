@@ -24,6 +24,7 @@ def redis_env(monkeypatch):
         monkeypatch.setenv("REDIS_PASSWORD", "")
         monkeypatch.setenv("REDIS_DB", "0")
         monkeypatch.setenv("REDIS_CLEANUP_DELAY", "30")
+        monkeypatch.setenv("CONTAINER_MEMORY_LIMIT_MI", "16000")
 
 
 @pytest.fixture
