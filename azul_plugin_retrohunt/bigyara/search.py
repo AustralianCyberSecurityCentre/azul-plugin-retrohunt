@@ -811,20 +811,20 @@ def clear_stop_event():
 
 def calculate_narrow_search_threads() -> int:
     """Calculate a safe narrow-search thread count from the container limit."""
-    _MIB_PER_GIB = 512
+    _MIB_PER_GIB = 260
 
     # Derived from:
-    #   5 threads  -> 8 GB peak
-    #   10 threads -> 11GB peak
+    #   1 threads  -> 800 MB peak
+    #   10 threads -> 3GB peak
     #
     # Incremental usage:
-    #   (11 - 8) / 5 = approximately 0.6 GB per thread
+    #   (3000 - 800) / 10 = approximately 0.26 GB per thread
     #
     # Rounded down to 0.5 GiB per thread.
     _NARROW_BASELINE_MEMORY_MIB = 10 * _MIB_PER_GIB
     _NARROW_MEMORY_PER_THREAD_MIB = 1 * _MIB_PER_GIB
     _NARROW_MEMORY_RESERVE_MIB = 2 * _MIB_PER_GIB
-    _NARROW_ABSOLUTE_THREAD_CAP = 10
+    _NARROW_ABSOLUTE_THREAD_CAP = 20
 
     settings = RetrohuntSettings()
     raw_memory_limit = settings.search_settings.container_memory_limit_mi
