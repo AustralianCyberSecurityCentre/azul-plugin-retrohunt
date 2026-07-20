@@ -40,6 +40,7 @@ class RetrohuntBaseTest:
         os.environ["REDIS_CLEANUP_DELAY"] = "30"
         os.environ["REDIS_TTL"] = "21600000"
         os.environ["REDIS_EXCEPTION_WAIT"] = "60"
+        os.environ["CONTAINER_MEMORY_LIMIT_MI"] = "16000"
         self.indexer_cfg_name = "content"
         self.indexers_cfg = {
             self.indexer_cfg_name: RetrohuntSettings.Indexer(
