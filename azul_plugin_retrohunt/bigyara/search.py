@@ -824,7 +824,10 @@ def calculate_narrow_search_threads() -> int:
     _NARROW_BASELINE_MEMORY_MIB = 10 * _MIB_PER_GIB
     _NARROW_MEMORY_PER_THREAD_MIB = 1 * _MIB_PER_GIB
     _NARROW_MEMORY_RESERVE_MIB = 2 * _MIB_PER_GIB
-    _NARROW_ABSOLUTE_THREAD_CAP = 20
+    # maximum 10 threads seems to be the sweet spot.
+    # any more and the narrow search starts to suffer from an increase I/O
+    # duration.
+    _NARROW_ABSOLUTE_THREAD_CAP = 10
 
     settings = RetrohuntSettings()
     raw_memory_limit = settings.search_settings.container_memory_limit_mi
