@@ -173,7 +173,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
     last_cancel_check = 0.0
     cancel_check_lock = threading.Lock()
 
-    def maybe_check_is_cancelled(force: bool = False) -> None:
+    def periodic_check_is_cancelled(force: bool = False) -> None:
         """Throttle Redis cancellation checks across narrow-phase threads."""
         nonlocal last_cancel_check
 
@@ -197,7 +197,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
     def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job, last_update
 
-        maybe_check_is_cancelled()
+        periodic_check_is_cancelled()
 
         if phase == SearchPhaseEnum.ATOM_PARSE:
             job.entity.status = azm.HuntState.PARSING_RULES
@@ -246,7 +246,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             last_update = now
 
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
-        maybe_check_is_cancelled()
+        periodic_check_is_cancelled()
         data: bytes = None
         match_hash = match_path.rsplit("/", 1)[-1]
 
@@ -273,7 +273,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             match_metadata[match_path] = config
 
         # The API may have cancelled the hunt while get_binary was blocked.
-        maybe_check_is_cancelled()
+        periodic_check_is_cancelled()
         return data
 
     try:
@@ -301,7 +301,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         else:
             raise Exception("Unknown search type.")
 
-        maybe_check_is_cancelled(force=True)
+        periodic_check_is_cancelled(force=True)
 
         search(
             search_query,
@@ -312,7 +312,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             recursive=True,
         )
 
-        maybe_check_is_cancelled(force=True)
+        periodic_check_is_cancelled(force=True)
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
         prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
@@ -507,8 +507,8 @@ def main():
                 # Acknowledge the message
                 logger.info(f"Acknowledging job {rs.RETROHUNT_JOB} {rs.RETROHUNT_GROUP} {msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
-                gc.collect()
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
+                #gc.collect()
+                #ctypes.CDLL("libc.so.6").malloc_trim(0)
             except CancelException:
                 logger.info(f"Finalising cancelled hunt {job_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)

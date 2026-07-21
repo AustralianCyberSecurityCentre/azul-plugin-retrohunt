@@ -435,7 +435,6 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
                 ],
             },
         )
-        print("This is results ", results)
         self.assertEqual(global_total_complete, 2)
         self.assertEqual(global_total, 2)
 

@@ -21,7 +21,7 @@ class RetrohuntSettings(BaseSettings):
     class SearhSettings(BaseSettings):
         """Settings for the BigGrep and Narrow phase search."""
 
-        container_memory_limit_mi: int = Field(8000, alias="CONTAINER_MEMORY_LIMIT_MI")
+        container_memory_limit_mi: int = Field(2000, alias="CONTAINER_MEMORY_LIMIT_MI")
 
     class Indexer(BaseModel):
         """Nested configuration for indexers."""
