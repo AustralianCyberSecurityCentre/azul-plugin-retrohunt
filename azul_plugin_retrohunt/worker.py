@@ -1,7 +1,7 @@
 """A simple synchronous worker for running BigYara retrohunts."""
 
-import ctypes
-import gc
+# import ctypes
+# import gc
 import json
 import logging
 import os
@@ -507,8 +507,8 @@ def main():
                 # Acknowledge the message
                 logger.info(f"Acknowledging job {rs.RETROHUNT_JOB} {rs.RETROHUNT_GROUP} {msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
-                #gc.collect()
-                #ctypes.CDLL("libc.so.6").malloc_trim(0)
+                # gc.collect()
+                # ctypes.CDLL("libc.so.6").malloc_trim(0)
             except CancelException:
                 logger.info(f"Finalising cancelled hunt {job_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
