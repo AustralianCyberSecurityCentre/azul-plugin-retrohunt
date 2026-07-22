@@ -492,7 +492,7 @@ def _broad_phase_search(
                 new_matches, file_config = _process_bgparse_output(
                     stdout,
                     rule_name,
-                    [],
+                    # [],
                     file_config,
                     query_hash=query_hash,
                     index_path=index,
@@ -513,12 +513,8 @@ def _broad_phase_search(
                 query_hash=query_hash,
             ).observe(duration)
 
-            logger.info(f"Total BigGrep parse time: {duration}")
-            pool.close()
-            pool.join()
+            logger.debug(f"Total BigGrep parse time: {duration}")
         except CancelException:
-            raise
-        except Exception:
             raise
 
     logger.debug("All index searches completed")
@@ -560,7 +556,7 @@ def _broad_phase_search(
 def _process_bgparse_output(
     output: bytes,
     rule_name: str,
-    file_matches: list[str],
+    # file_matches: list[str],
     file_config: FileConfig,
     query_hash: str,
     index_path: str,
@@ -577,8 +573,8 @@ def _process_bgparse_output(
             parts = line.split(b",")
             path = parts[0].decode()
 
-            if path not in file_matches:
-                new_match_paths.append(path)
+            # if path not in file_matches:
+            new_match_paths.append(path)
 
             if path not in file_config:
                 cfg = {}
@@ -714,57 +710,49 @@ def _narrow_phase_search(
     logger.info("Initiating narrow search with %d threads", processes)
 
     with ThreadPool(processes=processes) as pool:
-        try:
-            for status, file_path, rules_for_file, results in pool.imap_unordered(
-                worker_task,
-                file_to_rules.items(),
-                chunksize=4,
-            ):
-                if stop_event.is_set():
-                    raise CancelException("Narrow phase cancelled by user.")
+        for status, file_path, rules_for_file, results in pool.imap_unordered(
+            worker_task,
+            file_to_rules.items(),
+            chunksize=4,
+        ):
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled by user.")
 
-                files_complete += 1
-                current_percent = (files_complete * 100) // total_files if total_files else 100
+            files_complete += 1
+            current_percent = (files_complete * 100) // total_files if total_files else 100
 
-                while current_percent >= next_progress_percent:
-                    logger.info(
-                        "Narrow search %d%% complete: %d/%d files processed",
-                        next_progress_percent,
-                        files_complete,
-                        total_files,
-                    )
-                    next_progress_percent += 5
+            while current_percent >= next_progress_percent:
+                logger.info(
+                    "Narrow search %d%% complete: %d/%d files processed",
+                    next_progress_percent,
+                    files_complete,
+                    total_files,
+                )
+                next_progress_percent += 5
 
-                if status == "missing":
-                    for rule_name in rules_for_file:
-                        total_jobs -= 1
-                        rule_matches_sets[rule_name].discard(file_path)
-                    continue
+            if status == "missing":
+                for rule_name in rules_for_file:
+                    total_jobs -= 1
+                    rule_matches_sets[rule_name].discard(file_path)
+                continue
 
-                for rule_name, matched in results:
-                    jobs_complete += 1
+            for rule_name, matched in results:
+                jobs_complete += 1
 
-                    completed_item = (
-                        rule_name,
-                        [file_path] if matched else [],
-                    )
+                completed_item = (
+                    rule_name,
+                    [file_path] if matched else [],
+                )
 
-                    progress_callback(
-                        SearchPhaseEnum.NARROW_PHASE,
-                        jobs_complete,
-                        total_jobs,
-                        completed_item,
-                    )
+                progress_callback(
+                    SearchPhaseEnum.NARROW_PHASE,
+                    jobs_complete,
+                    total_jobs,
+                    completed_item,
+                )
 
-                    if not matched:
-                        rule_matches_sets[rule_name].discard(file_path)
-        except CancelException:
-            stop_event.set()
-            # pool.terminate()
-            raise
-        except Exception:
-            stop_event.set()
-            raise
+                if not matched:
+                    rule_matches_sets[rule_name].discard(file_path)
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
