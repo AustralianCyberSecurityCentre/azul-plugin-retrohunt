@@ -510,7 +510,6 @@ def main():
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 continue
             finally:
-                stop_event.set()
                 clear_stop_event()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
         # used by tests
