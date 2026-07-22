@@ -1,9 +1,6 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
-
-# import ctypes
-# import gc
 import hashlib
 import logging
 import multiprocessing
@@ -44,7 +41,6 @@ from .yara_parse import RuleSearchPlans, parse_yara_rules
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
-# _LIBC = ctypes.CDLL("libc.so.6")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -457,7 +453,6 @@ def _broad_phase_search(
 
     start = time.time()
 
-    # pool = mp.Pool()
     with multiprocessing.Pool() as pool:
         try:
             result_iterator = pool.starmap_async(worker, tasks)
@@ -522,13 +517,9 @@ def _broad_phase_search(
             pool.close()
             pool.join()
         except CancelException:
-            pool.terminate()
             raise
         except Exception:
-            pool.terminate()
             raise
-        finally:
-            pool.join()
 
     logger.debug("All index searches completed")
     rule_matches: RuleFileMatches = {}
@@ -716,12 +707,12 @@ def _narrow_phase_search(
         total_files,
         total_jobs,
     )
-
+    settings = RetrohuntSettings()
+    processes = settings.search_settings.max_thread_count
     # Stream completed results from a fixed-size thread pool.
     # Number of threads used based on available memory in the container.
-    processes = calculate_narrow_search_threads()
     logger.info("Initiating narrow search with %d threads", processes)
-    # pool = ThreadPool(processes=processes)
+
     with ThreadPool(processes=processes) as pool:
         try:
             for status, file_path, rules_for_file, results in pool.imap_unordered(
@@ -743,9 +734,6 @@ def _narrow_phase_search(
                         total_files,
                     )
                     next_progress_percent += 5
-
-                    # gc.collect()
-                    # _LIBC.malloc_trim(0)
 
                 if status == "missing":
                     for rule_name in rules_for_file:
@@ -776,12 +764,7 @@ def _narrow_phase_search(
             raise
         except Exception:
             stop_event.set()
-            # pool.terminate()
             raise
-        # else:
-        #    pool.close()
-        # finally:
-        #    pool.join()
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
@@ -810,76 +793,6 @@ def trigger_stop_event():
 def clear_stop_event():
     """Clear the stop event flag."""
     stop_event.clear()
-
-
-def calculate_narrow_search_threads() -> int:
-    """Calculate a safe narrow-search thread count from the container limit."""
-    _MIB_PER_GIB = 260
-
-    # Derived from:
-    #   1 threads  -> 800 MB peak
-    #   10 threads -> 3GB peak
-    #
-    # Incremental usage:
-    #   (3000 - 800) / 10 = approximately 0.26 GB per thread
-    #
-    # Rounded down to 0.5 GiB per thread.
-    _NARROW_BASELINE_MEMORY_MIB = 10 * _MIB_PER_GIB
-    _NARROW_MEMORY_PER_THREAD_MIB = 1 * _MIB_PER_GIB
-    _NARROW_MEMORY_RESERVE_MIB = 2 * _MIB_PER_GIB
-    # maximum 10 threads seems to be the sweet spot.
-    # any more and the narrow search starts to suffer from an increase I/O
-    # duration.
-    _NARROW_ABSOLUTE_THREAD_CAP = 10
-
-    settings = RetrohuntSettings()
-    raw_memory_limit = settings.search_settings.container_memory_limit_mi
-
-    if raw_memory_limit is None:
-        logger.warning("CONTAINER_MEMORY_LIMIT_MI is not set; defaulting narrow search to 1 thread.")
-        return 1
-
-    try:
-        memory_limit_mib = int(raw_memory_limit)
-    except ValueError:
-        logger.warning(
-            "Invalid CONTAINER_MEMORY_LIMIT_MI=%r; defaulting narrow search to 1 thread.",
-            raw_memory_limit,
-        )
-        return 1
-
-    memory_available_for_threads_mib = memory_limit_mib - _NARROW_BASELINE_MEMORY_MIB - _NARROW_MEMORY_RESERVE_MIB
-
-    if memory_available_for_threads_mib < _NARROW_MEMORY_PER_THREAD_MIB:
-        logger.warning(
-            "Container memory limit of %d MiB is below the measured safe "
-            "narrow-search requirement. Defaulting to 1 thread. "
-            "Estimated baseline=%d MiB, reserve=%d MiB.",
-            memory_limit_mib,
-            _NARROW_BASELINE_MEMORY_MIB,
-            _NARROW_MEMORY_RESERVE_MIB,
-        )
-        return 1
-
-    memory_allowed_threads = memory_available_for_threads_mib // _NARROW_MEMORY_PER_THREAD_MIB
-
-    threads = max(
-        1,
-        min(memory_allowed_threads, _NARROW_ABSOLUTE_THREAD_CAP),
-    )
-
-    logger.info(
-        "Calculated narrow search threads: %d "
-        "(container limit=%d MiB, baseline=%d MiB, "
-        "reserve=%d MiB, per-thread=%d MiB)",
-        threads,
-        memory_limit_mib,
-        _NARROW_BASELINE_MEMORY_MIB,
-        _NARROW_MEMORY_RESERVE_MIB,
-        _NARROW_MEMORY_PER_THREAD_MIB,
-    )
-
-    return threads
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
