@@ -21,7 +21,7 @@ class RetrohuntSettings(BaseSettings):
     class SearhSettings(BaseSettings):
         """Settings for the BigGrep and Narrow phase search."""
 
-        max_thread_count: int = Field(20, alias="MAX_THREAD_COUNT")
+        max_thread_count: int = Field(10, alias="MAX_THREAD_COUNT")
 
     class Indexer(BaseModel):
         """Nested configuration for indexers."""
