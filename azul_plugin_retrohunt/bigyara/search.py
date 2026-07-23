@@ -300,6 +300,9 @@ def _run_bgparse_task(
         capture_output=True,
     )
 
+    if stop_event.is_set():
+        raise CancelException("Broadphase cancelled by user.")
+
     return (
         rule_name,
         group_idx,
@@ -499,6 +502,9 @@ def _broad_phase_search(
                 search_count,
                 (rule_name, new_matches),
             )
+
+            if stop_event.is_set():
+                raise CancelException("Broadphase cancelled by user.")
 
         duration = time.time() - start
 
