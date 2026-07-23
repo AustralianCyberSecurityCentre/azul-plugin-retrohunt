@@ -34,11 +34,6 @@ from .env import executables
 from .suricata_parse import parse_suricata_rules
 from .yara_parse import RuleSearchPlans, parse_yara_rules
 
-# FUTURE: multiprocessing has been removed from search functionality.
-#         performance should be investigated and improved where necessary.
-#         in particular, subprocesses called in for loops should be done asynchronously,
-#         in batches according to available core count.
-
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
@@ -492,7 +487,6 @@ def _broad_phase_search(
                 new_matches, file_config = _process_bgparse_output(
                     stdout,
                     rule_name,
-                    # [],
                     file_config,
                     query_hash=query_hash,
                     index_path=index,
@@ -556,7 +550,6 @@ def _broad_phase_search(
 def _process_bgparse_output(
     output: bytes,
     rule_name: str,
-    # file_matches: list[str],
     file_config: FileConfig,
     query_hash: str,
     index_path: str,
@@ -573,7 +566,6 @@ def _process_bgparse_output(
             parts = line.split(b",")
             path = parts[0].decode()
 
-            # if path not in file_matches:
             new_match_paths.append(path)
 
             if path not in file_config:
