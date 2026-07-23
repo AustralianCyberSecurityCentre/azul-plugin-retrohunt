@@ -34,7 +34,7 @@ prom_jobs_run = Counter(
 prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a workers run.")
 
 PLUGIN_NAME = "RetroHunter"
-PLUGIN_VERSION = "2026.07.15"
+PLUGIN_VERSION = "2026.07.23"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
 CANCELLATION_CHECK_INTERVAL_SECONDS = 0.5
