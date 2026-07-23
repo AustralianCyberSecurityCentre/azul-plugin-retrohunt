@@ -449,67 +449,64 @@ def _broad_phase_search(
     start = time.time()
 
     with multiprocessing.Pool() as pool:
-        try:
-            result_iterator = pool.starmap_async(worker, tasks)
+        result_iterator = pool.starmap_async(worker, tasks)
 
-            while not result_iterator.ready():
-                # This callback checks Redis for an externally requested cancellation.
-                progress_callback(
-                    SearchPhaseEnum.BROAD_PHASE,
-                    searches_complete,
-                    search_count,
-                    None,
+        while not result_iterator.ready():
+            # This callback checks Redis for an externally requested cancellation.
+            progress_callback(
+                SearchPhaseEnum.BROAD_PHASE,
+                searches_complete,
+                search_count,
+                None,
+            )
+            time.sleep(0.5)
+
+        results = result_iterator.get()
+
+        for (
+            rule_name,
+            search_id,
+            index,
+            search_string,
+            returncode,
+            stdout,
+            stderr,
+        ) in results:
+            if returncode != 0:
+                raise BiggrepException(
+                    f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
                 )
-                time.sleep(0.5)
 
-            results = result_iterator.get()
+            if b"<error>" in stderr:
+                error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
+                raise BiggrepException(
+                    f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
+                )
 
-            for (
-                rule_name,
-                search_id,
-                index,
-                search_string,
-                returncode,
+            new_matches, file_config = _process_bgparse_output(
                 stdout,
-                stderr,
-            ) in results:
-                if returncode != 0:
-                    raise BiggrepException(
-                        f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
-                    )
-
-                if b"<error>" in stderr:
-                    error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
-                    raise BiggrepException(
-                        f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
-                    )
-
-                new_matches, file_config = _process_bgparse_output(
-                    stdout,
-                    rule_name,
-                    file_config,
-                    query_hash=query_hash,
-                    index_path=index,
-                )
-
-                search_matches[rule_name][search_id].update(new_matches)
-                searches_complete += 1
-                progress_callback(
-                    SearchPhaseEnum.BROAD_PHASE,
-                    searches_complete,
-                    search_count,
-                    (rule_name, new_matches),
-                )
-
-            duration = time.time() - start
-
-            prom_bgparse_duration.labels(
+                rule_name,
+                file_config,
                 query_hash=query_hash,
-            ).observe(duration)
+                index_path=index,
+            )
 
-            logger.debug(f"Total BigGrep parse time: {duration}")
-        except CancelException:
-            raise
+            search_matches[rule_name][search_id].update(new_matches)
+            searches_complete += 1
+            progress_callback(
+                SearchPhaseEnum.BROAD_PHASE,
+                searches_complete,
+                search_count,
+                (rule_name, new_matches),
+            )
+
+        duration = time.time() - start
+
+        prom_bgparse_duration.labels(
+            query_hash=query_hash,
+        ).observe(duration)
+
+        logger.debug(f"Total BigGrep parse time: {duration}")
 
     logger.debug("All index searches completed")
     rule_matches: RuleFileMatches = {}
