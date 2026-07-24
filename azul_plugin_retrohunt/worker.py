@@ -8,15 +8,21 @@ import sys
 import threading
 import uuid
 from io import StringIO
-from time import sleep
+from time import monotonic, sleep
 
 import pendulum
 from azul_bedrock import dispatcher
 from azul_bedrock import models_network as azm
 from prometheus_client import Counter, Summary, start_http_server
-from redis.exceptions import ResponseError
+from redis.exceptions import ResponseError, WatchError
 
-from azul_plugin_retrohunt.bigyara.search import QueryTypeEnum, SearchPhaseEnum, search
+from azul_plugin_retrohunt.bigyara.search import (
+    QueryTypeEnum,
+    SearchPhaseEnum,
+    clear_stop_event,
+    search,
+    trigger_stop_event,
+)
 from azul_plugin_retrohunt.retrohunt import CancelException, FatalException, RetrohuntService
 from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
 
@@ -28,9 +34,10 @@ prom_jobs_run = Counter(
 prom_worker_runtime = Summary("retrohunt_worker_runtime", "Total runtime for a workers run.")
 
 PLUGIN_NAME = "RetroHunter"
-PLUGIN_VERSION = "2026.03.25"
+PLUGIN_VERSION = "2026.07.23"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
+CANCELLATION_CHECK_INTERVAL_SECONDS = 0.5
 
 dp: dispatcher.DispatcherAPI = None
 
@@ -64,6 +71,7 @@ def check_is_cancelled(job_id: str):
         return  # corrupted or missing, not considered cancelled
 
     if event.entity.status == azm.HuntState.CANCELLED:
+        trigger_stop_event()
         raise CancelException(f"Hunt {job_id} cancelled by user")
 
 
@@ -123,14 +131,61 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
             # Jump to end again
             logs.seek(0, os.SEEK_END)
         job.entity.logs = logs.getvalue()
-    rs.redis.set(job.entity.id, json.dumps(job.model_dump()))
+    serialized_job = json.dumps(job.model_dump())
+
+    # Do not overwrite a cancellation written by the API between progress
+    # updates. WATCH makes the read/check/write atomic with respect to changes.
+    while True:
+        try:
+            with rs.redis.pipeline() as pipe:
+                pipe.watch(job.entity.id)
+                current_raw = pipe.get(job.entity.id)
+
+                if current_raw and job.entity.status != azm.HuntState.CANCELLED:
+                    try:
+                        current_event = azm.RetrohuntEvent(**json.loads(current_raw))
+                    except Exception:
+                        current_event = None
+
+                    if current_event and current_event.entity.status == azm.HuntState.CANCELLED:
+                        pipe.unwatch()
+                        trigger_stop_event()
+                        raise CancelException(f"Hunt {job.entity.id} cancelled by user")
+
+                pipe.multi()
+                pipe.set(job.entity.id, serialized_job)
+                pipe.execute()
+                break
+        except WatchError:
+            # The API or another process changed the job while we were writing.
+            # Re-read it and preserve cancellation if that was the change.
+            continue
+
     return job
 
 
 def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
     """Execute the given retrohunt."""
     match_metadata: MatchMetadata = {}
-    last_update: pendulum.DateTime | None = None
+    last_update: float | None = None
+    last_cancel_check = 0.0
+    cancel_check_lock = threading.Lock()
+
+    def periodic_check_is_cancelled(force: bool = False) -> None:
+        """Throttle Redis cancellation checks across narrow-phase threads."""
+        nonlocal last_cancel_check
+
+        now = monotonic()
+        if not force and now - last_cancel_check < CANCELLATION_CHECK_INTERVAL_SECONDS:
+            return
+
+        with cancel_check_lock:
+            now = monotonic()
+            if not force and now - last_cancel_check < CANCELLATION_CHECK_INTERVAL_SECONDS:
+                return
+
+            check_is_cancelled(job.entity.id)
+            last_cancel_check = now
 
     # clear logs
     if logs:
@@ -138,9 +193,9 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         logs.seek(0)
 
     def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
-        nonlocal job
+        nonlocal job, last_update
 
-        check_is_cancelled(job.entity.id)
+        periodic_check_is_cancelled()
 
         if phase == SearchPhaseEnum.ATOM_PARSE:
             job.entity.status = azm.HuntState.PARSING_RULES
@@ -163,20 +218,16 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             if new_match and len(new_match[1]) == 1:
                 job.entity.tool_match_count += 1
 
-                # convert config to string dict.
-                match_result_dict: dict[str, str] = {}
-                match_result_dict["stream_label"] = match_metadata[new_match[1][0]][b"stream_label"].decode()
-                match_result_dict["stream_source"] = match_metadata[new_match[1][0]][b"stream_source"].decode()
+                match_path = new_match[1][0]
+                metadata = match_metadata[match_path]
+                sample = metadata.get(b"sample")
+                match_result_dict = {
+                    "stream_label": metadata[b"stream_label"].decode(),
+                    "stream_source": metadata[b"stream_source"].decode(),
+                    "sample": sample.decode() if sample is not None else match_path.rsplit("/", 1)[-1],
+                }
 
-                # if sample isn't set, use the hash generated for the filename
-                if b"sample" in match_metadata[new_match[1][0]]:
-                    match_result_dict["sample"] = match_metadata[new_match[1][0]][b"sample"].decode()
-                else:
-                    match_result_dict["sample"] = new_match[1][0].split("/")[-1]
-
-                if new_match[0] not in job.entity.results:
-                    job.entity.results[new_match[0]] = []
-                job.entity.results[new_match[0]].append(match_result_dict)
+                job.entity.results.setdefault(new_match[0], []).append(match_result_dict)
 
                 # cancel if the number of matches has exceeded the limit.
                 if job.entity.tool_match_count >= MATCH_LIMIT:
@@ -186,23 +237,30 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
                         "Please try to refine your search terms to match less content."
                     )
         # try not to spam update messages
-        if last_update is None or (pendulum.now() - last_update).seconds >= 1:
+        now = monotonic()
+        if last_update is None or now - last_update >= 1.0:
             job.action = azm.RetrohuntEvent.RetrohuntAction.Running
             job = _update_progress(job, logs)
+            last_update = now
 
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
-        check_is_cancelled(job.entity.id)
+        periodic_check_is_cancelled()
         data: bytes = None
-        match_hash: str = match_path.split("/")[-1]
+        match_hash = match_path.rsplit("/", 1)[-1]
 
-        configd = {x.decode(): y.decode() for x, y in config.items()}
+        label_raw = config.get(b"stream_label")
+        source_raw = config.get(b"stream_source")
 
-        label = configd.get("stream_label")
-        source = configd.get("stream_source")
-
-        if not label or not source:
-            logger.error(f"Failed to retrieve metadata label and/or source for {match_hash}: {configd}")
+        if not label_raw or not source_raw:
+            logger.error(
+                "Failed to retrieve metadata label and/or source for %s: %s",
+                match_hash,
+                config,
+            )
             return None
+
+        label = label_raw.decode()
+        source = source_raw.decode()
 
         try:
             response = dp.get_binary(source=source, label=label, sha256=match_hash)
@@ -211,6 +269,9 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         else:
             data = response.content
             match_metadata[match_path] = config
+
+        # The API may have cancelled the hunt while get_binary was blocked.
+        periodic_check_is_cancelled()
         return data
 
     try:
@@ -238,7 +299,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         else:
             raise Exception("Unknown search type.")
 
-        check_is_cancelled(job.entity.id)
+        periodic_check_is_cancelled(force=True)
 
         search(
             search_query,
@@ -249,11 +310,16 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             recursive=True,
         )
 
+        periodic_check_is_cancelled(force=True)
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
         prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
         logger.debug(job.entity)
-    except CancelException:
+    except CancelException as ex:
+        trigger_stop_event()
+        job.entity.status = azm.HuntState.CANCELLED
+        prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
+        logger.info("Hunt cancelled: %s", ex)
         raise
     except Exception as ex:
         exception_str = str(repr(ex))
@@ -402,11 +468,13 @@ def main():
                 continue
 
             job = azm.RetrohuntEvent(**json.loads(event_json))
-
             job_id = job.entity.id
 
             # these will be cleaned up by the cronjob later
-            if job.entity.status in {azm.HuntState.FAILED}:
+            if job.entity.status in {
+                azm.HuntState.COMPLETED,
+                azm.HuntState.FAILED,
+            }:
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
                 continue
@@ -424,27 +492,31 @@ def main():
                 path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
                 bgi_folders.append(path_to_bgi_folder)
 
-            # Check cancellation before starting work
-            check_is_cancelled(job_id)
-
             try:
+                # The search cancellation Event is module-global, so reset it
+                # before every new hunt.
+                clear_stop_event()
+
+                # Check cancellation before starting work
+                check_is_cancelled(job_id)
+
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
                 # Acknowledge the message
+                logger.info(f"Acknowledging job {rs.RETROHUNT_JOB} {rs.RETROHUNT_GROUP} {msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
             except CancelException:
-                logger.info(f"Cleaning up cancelled hunt {job_id}")
-                rs.redis.delete(job_id)
+                logger.info(f"Finalising cancelled hunt {job_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
                 continue
             finally:
-                stop_event.set()
+                clear_stop_event()
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
         # used by tests
         except FatalException:
             raise
         except Exception as e:
-            logger.exception(f"Worker error, continuing loop: {e}")
+            logger.exception(f"[worker={worker_id}] worker error, sleeping {exception_sleep}s: {e}")
             sleep(exception_sleep)
             continue
 

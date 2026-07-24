@@ -3,14 +3,21 @@
 import binascii
 import hashlib
 import logging
+import multiprocessing
 import os
 import subprocess  # noqa: S404  # nosec: B404
+import time
 from collections import defaultdict
+from functools import partial
+from itertools import product
+from multiprocessing.pool import ThreadPool
+from threading import Event
 
 import yara
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
+from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 from . import (
     SEARCH_ATOM_SIZE_MIN,
@@ -25,15 +32,10 @@ from . import (
 )
 from .env import executables
 from .suricata_parse import parse_suricata_rules
-from .yara_parse import parse_yara_rules
+from .yara_parse import RuleSearchPlans, parse_yara_rules
 
-# FUTURE: multiprocessing has been removed from search functionality.
-#         performance should be investigated and improved where necessary.
-#         in particular, subprocesses called in for loops should be done asynchronously,
-#         in batches according to available core count.
-
+stop_event = Event()
 logger = logging.getLogger("bigyara.search")
-
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -52,7 +54,7 @@ prom_narrow_phase_duration = Histogram(
 prom_bgparse_duration = Histogram(
     "retrohunt_bgparse_duration_seconds",
     "Time spent executing bgparse during broad phase.",
-    ["query_hash", "index_path", "rule_name"],
+    ["query_hash"],
     buckets=_DURATION_BUCKETS,
 )
 # PVC/index potential issues
@@ -143,6 +145,13 @@ def search(
     # ensure types are what we expect
     if not isinstance(query, str):
         raise TypeError("query must be str.")
+
+    # YARA and Suricata searches require the original file data during the
+    # narrow phase. Validate this before starting any multiprocessing or
+    # thread-pool work so the caller receives a predictable ValueError.
+    if query_type in {QueryTypeEnum.YARA, QueryTypeEnum.SURICATA} and data_callback is None:
+        raise ValueError("A data callback is required for YARA and Suricata searches.")
+
     if not isinstance(index_dirs, list):
         index_dirs = [index_dirs]
 
@@ -172,6 +181,8 @@ def search(
         if data_callback:
             try:
                 data = data_callback(path, config)
+            except CancelException:
+                raise
             except Exception as e:
                 raise DataCallbackException("Exception in data callback") from e
         else:
@@ -186,22 +197,24 @@ def search(
 
     query_hash = hashlib.sha256(query.encode()).hexdigest()
 
-    rule_atoms, rule_content = _atom_parse(query, query_type, checked_progress_callback)
-    logger.info("Starting Broad search")
+    rule_atoms, rule_content, rule_search_plans = _atom_parse(query, query_type, checked_progress_callback)
+    logger.info("Starting Broad search optimised")
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
             query_type,
             indices,
-            rule_atoms,
+            rule_search_plans,
             checked_progress_callback,
             query_hash=query_hash,
         )
 
     for rule_name in rule_atoms:
-        if len(rule_matches[rule_name]) > 0:
-            logger.info(f'Found {len(rule_matches[rule_name])} indexed file matches for "{rule_name}"')
+        matches = rule_matches.get(rule_name, [])
+
+        if matches:
+            logger.info(f'Found {len(matches)} indexed file matches for "{rule_name}"')
         else:
-            del rule_matches[rule_name]
+            rule_matches.pop(rule_name, None)
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
     with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
@@ -238,9 +251,16 @@ def _get_index_files(directories: list[str], recursive: bool) -> list[str]:
     return index_files
 
 
-def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback) -> tuple[RuleAtoms, RuleContent]:
+def _atom_parse(
+    query: str, query_type: int, progress_callback: ProgressCallback
+) -> tuple[
+    RuleAtoms,
+    RuleContent,
+    RuleSearchPlans,
+]:
     rule_atoms: RuleAtoms = {}
     rule_content: RuleContent = None
+    rule_search_plans: RuleSearchPlans = {}
 
     if query_type == QueryTypeEnum.STRING:
         progress_callback(SearchPhaseEnum.ATOM_PARSE, 0, 1, None)
@@ -248,7 +268,7 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
             rule_atoms[query] = [query.encode()]
             progress_callback(SearchPhaseEnum.ATOM_PARSE, 1, 1, (query, rule_atoms[query]))
     elif query_type == QueryTypeEnum.YARA:
-        rule_atoms, rule_content = parse_yara_rules(query, progress_callback)
+        rule_atoms, rule_content, rule_search_plans = parse_yara_rules(query, progress_callback)
     elif query_type == QueryTypeEnum.SURICATA:
         rule_atoms, rule_content = parse_suricata_rules(query, progress_callback)
     else:
@@ -259,138 +279,314 @@ def _atom_parse(query: str, query_type: int, progress_callback: ProgressCallback
             f"No search atoms found from input - ensure that all atoms will be at least {SEARCH_ATOM_SIZE_MIN} bytes."
         )
 
-    return rule_atoms, rule_content
+    return rule_atoms, rule_content, rule_search_plans
 
 
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
+def _run_bgparse_task(
+    bgparse_exec,
+    index,
+    rule_name,
+    group_idx,
+    search_string,
+):
+    """Worker function executed in subprocess pool."""
+    cmd = f"{bgparse_exec} {search_string}{index}"
+
+    process = subprocess.run(  # noqa S602
+        cmd,
+        shell=True,
+        capture_output=True,
+    )
+
+    if stop_event.is_set():
+        raise CancelException("Broadphase cancelled by user.")
+
+    return (
+        rule_name,
+        group_idx,
+        index,
+        search_string,
+        process.returncode,
+        process.stdout,
+        process.stderr,
+    )
+
+
 def _broad_phase_search(
     query_type: int,
     indices: list[str],
-    rule_atoms: RuleAtoms,
+    rule_search_plans: RuleSearchPlans,
     progress_callback: ProgressCallback,
-    query_hash,
+    query_hash: str,
 ) -> tuple[RuleFileMatches, FileConfig]:
-    """Broad phase search by passing atoms to bgparse to find matches."""
-    # suricata can do the broad stage search in batches for each rule,
-    # since all atoms must be found to progress to the next phase.
-    # unfortunately, biggrep does not support doing batch searches where any of the files can match.
-    # therefore for yara queries we must search atom-by-atom.
-
-    rule_matches: RuleFileMatches = {}
-    file_config: FileConfig = {}
-
-    searches_complete: int = 0
-    search_count: int = 0
 
     if query_type == QueryTypeEnum.SURICATA:
-        search_count: int = len(rule_atoms) * len(indices)
-    else:
-        for atoms in rule_atoms.values():
-            search_count += len(atoms)
-        search_count *= len(indices)
+        # not supporting Suricata yet
+        return
 
-    progress_callback(SearchPhaseEnum.BROAD_PHASE, searches_complete, search_count, None)
+    bgparse_exec = executables["bgparse"]
+    logger.info("Rule search plans broad phase: %s", rule_search_plans)
 
-    for index in indices:
-        for rule_name, atoms in rule_atoms.items():
-            search_strings: list[str] = []
-            if query_type == QueryTypeEnum.SURICATA:
-                search_strings = [""]
-                for atom in atoms:
-                    search_strings[0] += f"-s {binascii.b2a_hex(atom).upper().decode()} "
-            else:
-                for atom in atoms:
-                    search_strings.append("-s" + binascii.b2a_hex(atom).upper().decode() + " ")
+    search_strings: dict[str, list[tuple[int, str]]] = {}
+    broad_phase_modes: dict[str, str] = {}
 
-            for search_string in search_strings:
-                # run bgparse
-                with prom_bgparse_duration.labels(
-                    query_hash=query_hash,
-                    index_path=index,
-                    rule_name=rule_name,
-                ).time():
-                    process: subprocess.CompletedProcess[bytes] = subprocess.run(  # noqa: S602
-                        f"{executables['bgparse']}  {search_string}{index}",
-                        shell=True,  # noqa: S602
-                        capture_output=True,
+    for rule_name, plan in rule_search_plans.items():
+        search_strings[rule_name] = []
+
+        required_string_group_options: list[list[int]] = []
+        required_strings_usable = bool(getattr(plan, "required_strings", None))
+
+        if required_strings_usable:
+            for string_name in sorted(plan.required_strings):
+                valid_group_ids = [
+                    group_idx
+                    for group_idx in plan.string_groups.get(string_name, [])
+                    if 0 <= group_idx < len(plan.groups)
+                ]
+
+                if not valid_group_ids:
+                    required_strings_usable = False
+                    logger.warning(
+                        'Rule "%s": required string %s has no usable atom groups',
+                        rule_name,
+                        string_name,
                     )
+                    break
 
-                # handle bgparse errors
-                if process.returncode != 0:
-                    raise BiggrepException(
-                        f"bgparse returned exit code {process.returncode}. "
-                        f"Args: {search_string}{index}\n{process.stderr}"
-                    )
-                if b"<error>" in process.stderr:
-                    error_message = process.stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
-                    raise BiggrepException(
-                        f"bgparse error:{error_message} - errored while searching for {atoms} in {index}"
-                    )
+                required_string_group_options.append(valid_group_ids)
 
-                # process the output into match files and their corresponding config
-                new_matches, file_config = _process_bgparse_output(
-                    process.stdout,
+        if required_strings_usable and required_string_group_options:
+            broad_phase_modes[rule_name] = "required_strings"
+
+            for combination_index, group_combination in enumerate(product(*required_string_group_options)):
+                combined_atoms: list[bytes] = []
+
+                for group_idx in group_combination:
+                    combined_atoms.extend(plan.groups[group_idx])
+
+                unique_atoms = list(dict.fromkeys(combined_atoms))
+                hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in unique_atoms]
+
+                search_id = -(combination_index + 1)
+                search_strings[rule_name].append(
+                    (
+                        search_id,
+                        "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                    )
+                )
+            logger.info(
+                'Rule "%s": required_strings present; generated %d combined AND bgparse searches covering %d required strings',
+                rule_name,
+                len(search_strings[rule_name]),
+                len(plan.required_strings),
+            )
+
+        else:
+            required_group_ids: set[int] = set()
+
+            if getattr(plan, "required_groups", None):
+                for required_group in plan.required_groups:
+                    for group_idx, actual_group in enumerate(plan.groups):
+                        if set(actual_group) == set(required_group):
+                            required_group_ids.add(group_idx)
+                            break
+
+            required_group_ids = {group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)}
+
+            if required_group_ids:
+                broad_phase_modes[rule_name] = "required_groups"
+
+                for group_idx in sorted(required_group_ids):
+                    group = plan.groups[group_idx]
+                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                    search_strings[rule_name].append(
+                        (
+                            group_idx,
+                            "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                        )
+                    )
+                logger.info(
+                    'Rule "%s": no usable required_strings; generated %d required_group searches',
                     rule_name,
-                    rule_matches.get(rule_name, []),
-                    file_config,
-                    query_hash=query_hash,
-                    index_path=index,
-                )
-                if rule_name not in rule_matches:
-                    rule_matches[rule_name] = []
-                rule_matches[rule_name].extend(new_matches)
-
-                # if the search found something, pass it through to the progress callback
-                searches_complete += 1
-                progress_callback(
-                    SearchPhaseEnum.BROAD_PHASE,
-                    searches_complete,
-                    search_count,
-                    (rule_name, new_matches),
+                    len(search_strings[rule_name]),
                 )
 
-    if len(rule_matches) == 0:
-        raise NoIndexMatchesException("Search aborted due to index matches.")
+            else:
+                broad_phase_modes[rule_name] = "fallback"
+
+                for group_idx, group in enumerate(plan.groups):
+                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                    search_strings[rule_name].append(
+                        (
+                            group_idx,
+                            "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                        )
+                    )
+
+                logger.info(
+                    'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
+                    rule_name,
+                    len(search_strings[rule_name]),
+                )
+
+    tasks = []
+    for index in indices:
+        for rule_name, grouped_searches in search_strings.items():
+            for search_id, search_string in grouped_searches:
+                tasks.append((index, rule_name, search_id, search_string))
+
+    logger.info("Broad phase generated %d tasks", len(tasks))
+    search_count = len(tasks)
+    searches_complete = 0
+    progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
+
+    worker = partial(_run_bgparse_task, bgparse_exec)
+    file_config: FileConfig = {}
+    search_matches: dict[str, dict[int, set[str]]] = {
+        rule_name: {search_id: set() for search_id, _ in grouped_searches}
+        for rule_name, grouped_searches in search_strings.items()
+    }
+
+    start = time.time()
+
+    with multiprocessing.Pool() as pool:
+        result_iterator = pool.starmap_async(worker, tasks)
+
+        while not result_iterator.ready():
+            # This callback checks Redis for an externally requested cancellation.
+            progress_callback(
+                SearchPhaseEnum.BROAD_PHASE,
+                searches_complete,
+                search_count,
+                None,
+            )
+            time.sleep(0.5)
+
+        results = result_iterator.get()
+
+        for (
+            rule_name,
+            search_id,
+            index,
+            search_string,
+            returncode,
+            stdout,
+            stderr,
+        ) in results:
+            if returncode != 0:
+                raise BiggrepException(
+                    f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
+                )
+
+            if b"<error>" in stderr:
+                error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
+                raise BiggrepException(
+                    f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
+                )
+
+            new_matches, file_config = _process_bgparse_output(
+                stdout,
+                rule_name,
+                file_config,
+                query_hash=query_hash,
+                index_path=index,
+            )
+
+            search_matches[rule_name][search_id].update(new_matches)
+            searches_complete += 1
+            progress_callback(
+                SearchPhaseEnum.BROAD_PHASE,
+                searches_complete,
+                search_count,
+                (rule_name, new_matches),
+            )
+
+            if stop_event.is_set():
+                raise CancelException("Broadphase cancelled by user.")
+
+        duration = time.time() - start
+
+        prom_bgparse_duration.labels(
+            query_hash=query_hash,
+        ).observe(duration)
+
+        logger.debug(f"Total BigGrep parse time: {duration}")
 
     logger.debug("All index searches completed")
-    return (rule_matches, file_config)
+    rule_matches: RuleFileMatches = {}
+
+    for rule_name, _plan in rule_search_plans.items():
+        mode = broad_phase_modes[rule_name]
+        result_sets = list(search_matches[rule_name].values())
+        final_matches = set.union(*result_sets) if result_sets else set()
+
+        if mode == "required_strings":
+            logger.info(
+                'Rule "%s": %d combined required-string searches produced %d candidates',
+                rule_name,
+                len(result_sets),
+                len(final_matches),
+            )
+        elif mode == "required_groups":
+            logger.info(
+                'Rule "%s": required_groups OR broad phase produced %d candidates',
+                rule_name,
+                len(final_matches),
+            )
+        else:
+            logger.info(
+                'Rule "%s": fallback OR over all groups produced %d candidates',
+                rule_name,
+                len(final_matches),
+            )
+
+        rule_matches[rule_name] = list(final_matches)
+
+    if all(len(matches) == 0 for matches in rule_matches.values()):
+        raise NoIndexMatchesException("Search aborted due to no index matches.")
+
+    return rule_matches, file_config
 
 
 def _process_bgparse_output(
     output: bytes,
     rule_name: str,
-    file_matches: list[str],
     file_config: FileConfig,
     query_hash: str,
     index_path: str,
-) -> tuple[RuleFileMatches, FileConfig]:
+) -> tuple[list[str], FileConfig]:
     """Turn bgparse stdout into a list of matching files and their config."""
-    new_match_paths: list[str] = []
+    new_match_paths = []
 
     if output:
         for line in output.splitlines():
             line = line.rstrip()
-            if len(line) > 0:
-                path = line.split(b",")[0].decode()
-                if path not in file_matches:
-                    new_match_paths.append(path)
+            if not line:
+                continue
 
-                if path not in file_config:
-                    file_config[path] = {}
-                    storage_config_byte_list = line.split(b",")[1:-1]
-                    for storage_config_bytes in storage_config_byte_list:
-                        key_value = storage_config_bytes.split(b"=")
-                        if len(key_value) == 2:
-                            file_config[path][key_value[0]] = key_value[1]
-                        else:
-                            prom_bgparse_errors.labels(
-                                query_hash=query_hash,
-                                index_path=index_path,
-                                rule_name=rule_name,
-                            ).inc()
-                            raise FileConfigReadException(f"Could not read file config from index for {path}")
-    return (new_match_paths, file_config)
+            parts = line.split(b",")
+            path = parts[0].decode()
+
+            new_match_paths.append(path)
+
+            if path not in file_config:
+                cfg = {}
+                for kv in parts[1:-1]:
+                    key_value = kv.split(b"=", 1)
+                    if len(key_value) != 2:
+                        prom_bgparse_errors.labels(
+                            query_hash=query_hash,
+                            index_path=index_path,
+                            rule_name=rule_name,
+                        ).inc()
+                        raise FileConfigReadException(f"Could not read file config from index for {path}")
+                    key, value = key_value
+                    cfg[key] = value
+                file_config[path] = cfg
+
+    return new_match_paths, file_config
 
 
 def yara_callback(_data):
@@ -405,110 +601,181 @@ def _narrow_phase_search(
     file_config: FileConfig,
     data_callback: DataCallback,
     progress_callback: ProgressCallback,
-    query_hash,
+    query_hash: str,
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
     if queryType == QueryTypeEnum.STRING:
         return rule_matches
 
-    # Invert the rule matches so that we know what rules each file uses.
-    # This way if a file can't be found we don't compile the rule.
-    file_to_all_matches_dict = defaultdict(list)
-    for rule_name, file_path_list in rule_matches.items():
-        for file_path in file_path_list:
-            file_to_all_matches_dict[file_path].append(rule_name)
+    # Convert rule_matches to sets for fast removal
+    rule_matches_sets: dict[str, set[str]] = {rule_name: set(paths) for rule_name, paths in rule_matches.items()}
 
-    total_jobs = 0
-    jobs_complete = 0
-    compiled_yara_rules: dict[str, yara.Rules] = dict()
-    for rule_file_paths in rule_matches.values():
-        total_jobs += len(rule_file_paths)
-    progress_callback(SearchPhaseEnum.NARROW_PHASE, jobs_complete, total_jobs, None)
+    # Invert mapping: file → rules
+    file_to_rules: dict[str, set[str]] = defaultdict(set)
+    for rule_name, paths in rule_matches_sets.items():
+        for p in paths:
+            file_to_rules[p].add(rule_name)
 
-    for file_path, yara_rules in file_to_all_matches_dict.items():
-        # Load data
-        with prom_narrow_io_duration.labels(query_hash=query_hash).time():
-            data = data_callback(file_path, file_config[file_path])
+    # Precompile YARA rules once
+    compiled_yara_rules = {}
+    if queryType == QueryTypeEnum.YARA:
+        for rule_name, content in rule_content.items():
+            if not content.startswith('import "pe"\n'):
+                content = 'import "pe"\n' + content
+            compiled_yara_rules[rule_name] = yara.compile(source=content)
+
+    # Bind metric children once instead of performing label lookups per file.
+    io_duration_metric = prom_narrow_io_duration.labels(query_hash=query_hash)
+    io_bytes_metric = prom_narrow_io_bytes.labels(query_hash=query_hash)
+    missing_files_metric = prom_missing_files.labels(query_hash=query_hash)
+    cpu_duration_metrics = {
+        rule_name: prom_narrow_cpu_duration.labels(
+            query_hash=query_hash,
+            rule_name=rule_name,
+        )
+        for rule_name in rule_matches_sets
+    }
+
+    # Worker function. Exceptions are intentionally allowed to propagate
+    # through the thread pool result iterator, especially CancelException.
+    def worker(file_path: str, rules_for_file: set[str]):
+        if stop_event.is_set():
+            raise CancelException("Narrow phase cancelled by user.")
+
+        cfg = file_config.get(file_path)
+        with io_duration_metric.time():
+            data = data_callback(file_path, cfg)
+
+        # Cancellation may have been requested while the dispatcher call was in progress.
+        if stop_event.is_set():
+            raise CancelException("Narrow phase cancelled by user.")
 
         if data:
-            prom_narrow_io_bytes.labels(query_hash=query_hash).inc(len(data))
+            io_bytes_metric.inc(len(data))
+        else:
+            missing_files_metric.inc()
+            return ("missing", file_path, rules_for_file, None)
 
-        if not data:
-            prom_missing_files.labels(query_hash=query_hash).inc()
-            logger.warning(f"Unable to locate data for {file_path} - skipping")
-            for rule_name in yara_rules:
-                # Decrement total jobs as file couldn't be located.
-                total_jobs -= 1
-                rule_matches[rule_name].remove(file_path)
-            continue
+        results = []
+        for rule_name in rules_for_file:
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled by user.")
 
-        # Compile and cache yara rules
-        if queryType == QueryTypeEnum.YARA:
-            for rule_name in yara_rules:
-                if rule_name in compiled_yara_rules:
-                    continue
-                # FUTURE: parse the imports from the top of the rule content to apply to all rules,
-                #         instead of just assuming it needs pe.
-                # FUTURE: make sure yara is compiled with all standard modules so that import them works.
-                rule_content[rule_name] = 'import "pe"\n' + rule_content[rule_name]
-                compiled_rule: yara.Rules = yara.compile(source=rule_content[rule_name])
-                compiled_yara_rules[rule_name] = compiled_rule
-
-        for rule_name in yara_rules:
-            matched: bool = False
             if queryType == QueryTypeEnum.YARA:
-                # FUTURE: this should have a better timeout.
-                # FUTURE: yara include directives should be turned off.
-                with prom_narrow_cpu_duration.labels(
-                    query_hash=query_hash,
-                    rule_name=rule_name,
-                ).time():
-                    matched = (
-                        len(
-                            compiled_yara_rules[rule_name].match(
-                                data=data,
-                                callback=yara_callback,
-                                which_callbacks=yara.CALLBACK_MATCHES,
-                                fast=True,
-                                timeout=60,
-                            )
+                with cpu_duration_metrics[rule_name].time():
+                    matched = bool(
+                        compiled_yara_rules[rule_name].match(
+                            data=data,
+                            callback=yara_callback,
+                            which_callbacks=yara.CALLBACK_MATCHES,
+                            fast=True,
+                            timeout=60,
                         )
-                        > 0
                     )
             elif queryType == QueryTypeEnum.SURICATA:
                 matched = _run_suricata(rule_content[rule_name], file_path, data)
-            jobs_complete += 1
-            if matched:
-                # even though a narrow phase search is unnecessary for string searches,
-                # we still call the progress callback in case the user is trying to do
-                # something important in it.
+
+            results.append((rule_name, matched))
+
+        return ("ok", file_path, rules_for_file, results)
+
+    def worker_task(task: tuple[str, set[str]]):
+        file_path, rules_for_file = task
+        return worker(file_path, rules_for_file)
+
+    # Precompute progress totals.
+    total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
+    jobs_complete = 0
+
+    total_files = len(file_to_rules)
+    files_complete = 0
+    next_progress_percent = 5
+
+    progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
+
+    logger.info(
+        "Narrow search starting: %d unique files to process across %d rule/file jobs",
+        total_files,
+        total_jobs,
+    )
+    settings = RetrohuntSettings()
+    processes = settings.search_settings.max_thread_count
+    # Stream completed results from a fixed-size thread pool.
+    # Number of threads used based on available memory in the container.
+    logger.info("Initiating narrow search with %d threads", processes)
+
+    with ThreadPool(processes=processes) as pool:
+        for status, file_path, rules_for_file, results in pool.imap_unordered(
+            worker_task,
+            file_to_rules.items(),
+            chunksize=4,
+        ):
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled by user.")
+
+            files_complete += 1
+            current_percent = (files_complete * 100) // total_files if total_files else 100
+
+            while current_percent >= next_progress_percent:
+                logger.info(
+                    "Narrow search %d%% complete: %d/%d files processed",
+                    next_progress_percent,
+                    files_complete,
+                    total_files,
+                )
+                next_progress_percent += 5
+
+            if status == "missing":
+                for rule_name in rules_for_file:
+                    total_jobs -= 1
+                    rule_matches_sets[rule_name].discard(file_path)
+                continue
+
+            for rule_name, matched in results:
+                jobs_complete += 1
+
+                completed_item = (
+                    rule_name,
+                    [file_path] if matched else [],
+                )
+
                 progress_callback(
                     SearchPhaseEnum.NARROW_PHASE,
                     jobs_complete,
                     total_jobs,
-                    (rule_name, [file_path]),
-                )
-            else:
-                progress_callback(
-                    SearchPhaseEnum.NARROW_PHASE,
-                    jobs_complete,
-                    total_jobs,
-                    (rule_name, []),
+                    completed_item,
                 )
 
-                rule_matches[rule_name].remove(file_path)
+                if not matched:
+                    rule_matches_sets[rule_name].discard(file_path)
 
-    # Clear all of the now empty rule_matches.
-    for rule_name in list(rule_matches.keys()):
-        if not rule_matches[rule_name]:
-            del rule_matches[rule_name]
+    # Convert back to lists and remove empty rules
+    final_matches: RuleFileMatches = {}
+    for rule_name, paths in rule_matches_sets.items():
+        if paths:
+            final_matches[rule_name] = list(paths)
 
-    if rule_matches:
-        logger.info(f"Found {len(rule_matches)} confirmed matches for provided yara rules.")
+    if final_matches:
+        confirmed_file_matches = sum(len(paths) for paths in final_matches.values())
+        logger.info(
+            "Found %d confirmed file matches across %d YARA rules.",
+            confirmed_file_matches,
+            len(final_matches),
+        )
     else:
         logger.info("No rules matched after Narrowing.")
 
-    return rule_matches
+    return final_matches
+
+
+def trigger_stop_event():
+    """Set stop event for threads if user cancels manually."""
+    stop_event.set()
+
+
+def clear_stop_event():
+    """Clear the stop event flag."""
+    stop_event.clear()
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
