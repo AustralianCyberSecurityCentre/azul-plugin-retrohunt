@@ -106,9 +106,7 @@ class RuleSearchPlan:
     """Search plan object."""
 
     condition_ast: ConditionNode | None = None
-
     string_groups: dict[str, list[int]] = field(default_factory=dict)
-
     atoms: list[bytes] = field(default_factory=list)
 
     # OR of groups
@@ -125,11 +123,8 @@ class RuleSearchPlan:
 
     # $a and $b and <complex_expression>
     required_strings: set[str] = field(default_factory=set)
-
     required_groups: list[set[bytes]] = field(default_factory=list)
-
     optional_strings: set[str] = field(default_factory=set)
-
     raw_condition: str = ""
 
 
