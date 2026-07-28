@@ -39,7 +39,7 @@ class RetrohuntIngestor(BinaryPlugin):
 
     # FUTURE must not index binaries from sources that age off artifacts
 
-    VERSION = "2024.06.18"
+    VERSION = "2026.07.28"
     NAME = "RetrohuntIngestor"
     SETTINGS = add_settings(
         require_historic=False,
