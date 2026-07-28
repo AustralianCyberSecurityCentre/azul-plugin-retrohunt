@@ -13,6 +13,7 @@ from itertools import product
 from multiprocessing.pool import ThreadPool
 from threading import Event
 
+import psutil
 import yara
 from prometheus_client import Counter, Histogram
 
@@ -35,6 +36,7 @@ from .suricata_parse import parse_suricata_rules
 from .yara_parse import RuleSearchPlans, parse_yara_rules
 
 stop_event = Event()
+base_mem = ""
 logger = logging.getLogger("bigyara.search")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
@@ -199,6 +201,8 @@ def search(
 
     rule_atoms, rule_content, rule_search_plans = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search optimised")
+    log_mem()
+
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
             query_type,
@@ -227,7 +231,7 @@ def search(
             checked_progress_callback,
             query_hash=query_hash,
         )
-
+    log_mem()
     return rule_matches
 
 
@@ -725,6 +729,8 @@ def _narrow_phase_search(
                 )
                 next_progress_percent += 5
 
+                log_mem()
+
             if status == "missing":
                 for rule_name in rules_for_file:
                     total_jobs -= 1
@@ -776,6 +782,15 @@ def trigger_stop_event():
 def clear_stop_event():
     """Clear the stop event flag."""
     stop_event.clear()
+
+
+def log_mem():
+    """Memory logging."""
+    virtual_mem = psutil.virtual_memory()
+    logging.info(f"Total: {virtual_mem.total / (1024 * 1024):.2f} MB")
+    logging.info(f"Available: {virtual_mem.available / (1024 * 1024):.2f} MB")
+    logging.info(f"Used: {virtual_mem.used / (1024 * 1024):.2f} MB")
+    logging.info(f"Percent Used: {virtual_mem.percent}%")
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
