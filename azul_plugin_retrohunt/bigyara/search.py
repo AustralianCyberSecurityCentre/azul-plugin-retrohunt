@@ -39,6 +39,8 @@ from .yara_parse import RuleSearchPlans, parse_yara_rules
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
+snapshot1 = None
+snapshot2 = None
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -145,6 +147,9 @@ def search(
      - a broad phase search is done by searching for the atoms via biggrep,
      - a narrow phase search is done by by using the tool specific to the query type.
     """
+    global snapshot1
+    tracemalloc.start()
+
     # ensure types are what we expect
     if not isinstance(query, str):
         raise TypeError("query must be str.")
@@ -204,8 +209,6 @@ def search(
     logger.info("Starting Broad search optimised")
     log_mem()
 
-    tracemalloc.start()
-
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
             query_type,
@@ -224,6 +227,7 @@ def search(
             rule_matches.pop(rule_name, None)
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
+    snapshot1 = tracemalloc.take_snapshot()
     with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
         rule_matches = _narrow_phase_search(
             query_type,
@@ -615,6 +619,8 @@ def _narrow_phase_search(
     query_hash: str,
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
+    global snapshot1
+    global snapshot2
     if queryType == QueryTypeEnum.STRING:
         return rule_matches
 
@@ -650,9 +656,9 @@ def _narrow_phase_search(
     # Worker function. Exceptions are intentionally allowed to propagate
     # through the thread pool result iterator, especially CancelException.
     def worker(file_path: str, rules_for_file: set[str]):
+        global snapshot2
         if stop_event.is_set():
             raise CancelException("Narrow phase cancelled by user.")
-
         cfg = file_config.get(file_path)
         with io_duration_metric.time():
             data = data_callback(file_path, cfg)
@@ -690,6 +696,7 @@ def _narrow_phase_search(
         logger.info(f"Reference count for data before None: {sys.getrefcount(data) - 1}")
         data = None
         logger.info(f"Reference count for data after None: {sys.getrefcount(data) - 1}")
+        snapshot2 = tracemalloc.take_snapshot()
         return ("ok", file_path, rules_for_file, results)
 
     def worker_task(task: tuple[str, set[str]]):
@@ -739,8 +746,7 @@ def _narrow_phase_search(
                 next_progress_percent += 5
 
                 log_mem()
-                snapshot = tracemalloc.take_snapshot()
-                top_stats = snapshot.statistics("lineno")
+                top_stats = snapshot2.compare_to(snapshot1, "lineno")
                 for stat in top_stats[:10]:
                     logger.info(stat)
                 current, peak = tracemalloc.get_traced_memory()

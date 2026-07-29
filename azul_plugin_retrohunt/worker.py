@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import threading
+import tracemalloc
 import uuid
 from io import StringIO
 from time import monotonic, sleep
@@ -194,7 +195,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
     def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job, last_update
-
+        snapshot1 = tracemalloc.take_snapshot()
         periodic_check_is_cancelled()
 
         if phase == SearchPhaseEnum.ATOM_PARSE:
@@ -242,6 +243,11 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             job.action = azm.RetrohuntEvent.RetrohuntAction.Running
             job = _update_progress(job, logs)
             last_update = now
+        snapshot2 = tracemalloc.take_snapshot()
+        top_stats = snapshot2.compare_to(snapshot1, "lineno")
+        logger.info("mem compare in callback")
+        for stat in top_stats[:10]:
+            logger.info(stat)
 
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
         periodic_check_is_cancelled()
@@ -374,6 +380,7 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 
 def main():
     """Start the retrohunt worker."""
+    tracemalloc.start()
     global dp
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
     logs: StringIO = capture_logs(logging.INFO)
