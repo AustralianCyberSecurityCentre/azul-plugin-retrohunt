@@ -709,7 +709,7 @@ def _narrow_phase_search(
     processes = settings.search_settings.max_thread_count
 
     # Keep the executor queue bounded. Submitting every file at once would create
-    # hundreds of thousands of Future and work-item objects and retain them until
+    # potentially hundreds of thousands of Future and work-item objects and retain them until
     # the executor is shut down.
     max_in_flight = max(processes * 2, processes)
 
