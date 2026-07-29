@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
+import tracemalloc
 from collections import defaultdict
 from functools import partial
 from itertools import product
@@ -231,6 +232,10 @@ def search(
             query_hash=query_hash,
         )
     log_mem()
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics("lineno")
+    for stat in top_stats[:10]:
+        logger.info(stat)
     return rule_matches
 
 
@@ -680,6 +685,7 @@ def _narrow_phase_search(
 
             results.append((rule_name, matched))
 
+        data = None
         return ("ok", file_path, rules_for_file, results)
 
     def worker_task(task: tuple[str, set[str]]):
@@ -729,6 +735,10 @@ def _narrow_phase_search(
                 next_progress_percent += 5
 
                 log_mem()
+                snapshot = tracemalloc.take_snapshot()
+                top_stats = snapshot.statistics("lineno")
+                for stat in top_stats[:10]:
+                    logger.info(stat)
 
             if status == "missing":
                 for rule_name in rules_for_file:
