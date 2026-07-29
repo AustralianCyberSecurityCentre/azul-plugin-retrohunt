@@ -1,23 +1,18 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
-import ctypes
-
-# import gc
 import hashlib
 import logging
 import multiprocessing
 import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
-import tracemalloc
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import partial
 from itertools import product
 from threading import Event
 
-import psutil
 import yara
 from prometheus_client import Counter, Histogram
 
@@ -41,9 +36,6 @@ from .yara_parse import RuleSearchPlans, parse_yara_rules
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
-snapshot1 = None
-snapshot2 = None
-libc = ctypes.CDLL("libc.so.6")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -150,9 +142,6 @@ def search(
      - a broad phase search is done by searching for the atoms via biggrep,
      - a narrow phase search is done by by using the tool specific to the query type.
     """
-    global snapshot1
-    tracemalloc.start()
-
     # ensure types are what we expect
     if not isinstance(query, str):
         raise TypeError("query must be str.")
@@ -210,7 +199,6 @@ def search(
 
     rule_atoms, rule_content, rule_search_plans = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search optimised")
-    log_mem()
 
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
@@ -230,7 +218,6 @@ def search(
             rule_matches.pop(rule_name, None)
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
     logger.info("Starting narrow search ")
-    snapshot1 = tracemalloc.take_snapshot()
     with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
         rule_matches = _narrow_phase_search(
             query_type,
@@ -241,11 +228,7 @@ def search(
             checked_progress_callback,
             query_hash=query_hash,
         )
-    log_mem()
-    snapshot = tracemalloc.take_snapshot()
-    top_stats = snapshot.statistics("lineno")
-    for stat in top_stats[:10]:
-        logger.info(stat)
+
     return rule_matches
 
 
@@ -786,13 +769,6 @@ def _narrow_phase_search(
                             )
                             next_progress_percent += 5
 
-                            log_mem()
-                            # gc.collect()
-                            # libc.malloc_trim(0)
-                            current, peak = tracemalloc.get_traced_memory()
-                            logger.info(f"Current memory usage: {current / 1024:.1f} KiB")
-                            logger.info(f"Peak memory usage: {peak / 1024:.1f} KiB")
-
                         if status == "missing":
                             for rule_name in rules_for_file:
                                 total_jobs -= 1
@@ -850,10 +826,7 @@ def _narrow_phase_search(
         )
     else:
         logger.info("No rules matched after Narrowing.")
-    snapshot2 = tracemalloc.take_snapshot()
-    top_stats = snapshot2.compare_to(snapshot1, "lineno")
-    for stat in top_stats[:10]:
-        logger.info(stat)
+
     return final_matches
 
 
@@ -865,15 +838,6 @@ def trigger_stop_event():
 def clear_stop_event():
     """Clear the stop event flag."""
     stop_event.clear()
-
-
-def log_mem():
-    """Memory logging."""
-    virtual_mem = psutil.virtual_memory()
-    logger.info(f"Total: {virtual_mem.total / (1024 * 1024):.2f} MB")
-    logger.info(f"Available: {virtual_mem.available / (1024 * 1024):.2f} MB")
-    logger.info(f"Used: {virtual_mem.used / (1024 * 1024):.2f} MB")
-    logger.info(f"Percent Used: {virtual_mem.percent}%")
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
