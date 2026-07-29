@@ -203,6 +203,8 @@ def search(
     logger.info("Starting Broad search optimised")
     log_mem()
 
+    tracemalloc.start()
+
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
             query_type,
