@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import os
 import subprocess  # noqa: S404  # nosec: B404
+import sys
 import time
 import tracemalloc
 from collections import defaultdict
@@ -686,8 +687,9 @@ def _narrow_phase_search(
                 matched = _run_suricata(rule_content[rule_name], file_path, data)
 
             results.append((rule_name, matched))
-
+        logger.info(f"Reference count for data before None: {sys.getrefcount(data) - 1}")
         data = None
+        logger.info(f"Reference count for data after None: {sys.getrefcount(data) - 1}")
         return ("ok", file_path, rules_for_file, results)
 
     def worker_task(task: tuple[str, set[str]]):
