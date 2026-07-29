@@ -1,6 +1,8 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
+import ctypes
+import gc
 import hashlib
 import logging
 import multiprocessing
@@ -41,6 +43,7 @@ stop_event = Event()
 logger = logging.getLogger("bigyara.search")
 snapshot1 = None
 snapshot2 = None
+libc = ctypes.CDLL("libc.so.6")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -743,7 +746,8 @@ def _narrow_phase_search(
                 next_progress_percent += 5
 
                 log_mem()
-
+                gc.collect()
+                libc.malloc_trim(0)
                 current, peak = tracemalloc.get_traced_memory()
                 logger.info(f"Current memory usage: {current / 1024:.1f} KiB")
                 logger.info(f"Peak memory usage: {peak / 1024:.1f} KiB")
