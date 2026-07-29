@@ -743,6 +743,9 @@ def _narrow_phase_search(
                 top_stats = snapshot.statistics("lineno")
                 for stat in top_stats[:10]:
                     logger.info(stat)
+                current, peak = tracemalloc.get_traced_memory()
+                logger.info(f"Current memory usage: {current / 1024:.1f} KiB")
+                logger.info(f"Peak memory usage: {peak / 1024:.1f} KiB")
 
             if status == "missing":
                 for rule_name in rules_for_file:
