@@ -619,8 +619,7 @@ def _narrow_phase_search(
     query_hash: str,
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
-    global snapshot1
-    global snapshot2
+    global snapshot1, snapshot2
     if queryType == QueryTypeEnum.STRING:
         return rule_matches
 
@@ -656,7 +655,6 @@ def _narrow_phase_search(
     # Worker function. Exceptions are intentionally allowed to propagate
     # through the thread pool result iterator, especially CancelException.
     def worker(file_path: str, rules_for_file: set[str]):
-        global snapshot2
         if stop_event.is_set():
             raise CancelException("Narrow phase cancelled by user.")
         cfg = file_config.get(file_path)
@@ -696,7 +694,6 @@ def _narrow_phase_search(
         logger.info(f"Reference count for data before None: {sys.getrefcount(data) - 1}")
         data = None
         logger.info(f"Reference count for data after None: {sys.getrefcount(data) - 1}")
-        snapshot2 = tracemalloc.take_snapshot()
         return ("ok", file_path, rules_for_file, results)
 
     def worker_task(task: tuple[str, set[str]]):
@@ -746,9 +743,7 @@ def _narrow_phase_search(
                 next_progress_percent += 5
 
                 log_mem()
-                top_stats = snapshot2.compare_to(snapshot1, "lineno")
-                for stat in top_stats[:10]:
-                    logger.info(stat)
+
                 current, peak = tracemalloc.get_traced_memory()
                 logger.info(f"Current memory usage: {current / 1024:.1f} KiB")
                 logger.info(f"Peak memory usage: {peak / 1024:.1f} KiB")
@@ -792,7 +787,10 @@ def _narrow_phase_search(
         )
     else:
         logger.info("No rules matched after Narrowing.")
-
+    snapshot2 = tracemalloc.take_snapshot()
+    top_stats = snapshot2.compare_to(snapshot1, "lineno")
+    for stat in top_stats[:10]:
+        logger.info(stat)
     return final_matches
 
 
