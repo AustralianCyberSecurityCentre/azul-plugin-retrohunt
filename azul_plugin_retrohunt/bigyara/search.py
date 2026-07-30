@@ -605,7 +605,6 @@ def _narrow_phase_search(
     query_hash: str,
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
-    global snapshot1, snapshot2
     if queryType == QueryTypeEnum.STRING:
         return rule_matches
 
