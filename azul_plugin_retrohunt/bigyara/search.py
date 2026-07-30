@@ -735,80 +735,69 @@ def _narrow_phase_search(
         for _ in range(min(max_in_flight, total_files)):
             submit_next_task()
 
-        try:
-            while pending_futures:
-                done_futures, not_done_futures = wait(
-                    pending_futures,
-                    return_when=FIRST_COMPLETED,
-                )
-                # pending_futures already owns the outstanding Future references.
-                del not_done_futures
+        while pending_futures:
+            done_futures, not_done_futures = wait(
+                pending_futures,
+                return_when=FIRST_COMPLETED,
+            )
+            # pending_futures already owns the outstanding Future references.
+            del not_done_futures
 
-                # Pop each completed Future from both sets as it is processed so
-                # its result and internal references can be reclaimed immediately.
-                while done_futures:
-                    future = done_futures.pop()
-                    pending_futures.remove(future)
+            # Pop each completed Future from both sets as it is processed so
+            # its result and internal references can be reclaimed immediately.
+            while done_futures:
+                future = done_futures.pop()
+                pending_futures.remove(future)
 
-                    try:
-                        status, file_path, rules_for_file, results = future.result()
+                try:
+                    status, file_path, rules_for_file, results = future.result()
 
-                        if stop_event.is_set():
-                            raise CancelException("Narrow phase cancelled by user.")
+                    if stop_event.is_set():
+                        raise CancelException("Narrow phase cancelled by user.")
 
-                        files_complete += 1
-                        current_percent = (files_complete * 100) // total_files if total_files else 100
+                    files_complete += 1
+                    current_percent = (files_complete * 100) // total_files if total_files else 100
 
-                        while current_percent >= next_progress_percent:
-                            logger.info(
-                                "Narrow search %d%% complete: %d/%d files processed",
-                                next_progress_percent,
-                                files_complete,
-                                total_files,
+                    while current_percent >= next_progress_percent:
+                        logger.info(
+                            "Narrow search %d%% complete: %d/%d files processed",
+                            next_progress_percent,
+                            files_complete,
+                            total_files,
+                        )
+                        next_progress_percent += 5
+
+                    if status == "missing":
+                        for rule_name in rules_for_file:
+                            total_jobs -= 1
+                            rule_matches_sets[rule_name].discard(file_path)
+                    else:
+                        for rule_name, matched in results:
+                            jobs_complete += 1
+
+                            completed_item = (
+                                rule_name,
+                                [file_path] if matched else [],
                             )
-                            next_progress_percent += 5
 
-                        if status == "missing":
-                            for rule_name in rules_for_file:
-                                total_jobs -= 1
+                            progress_callback(
+                                SearchPhaseEnum.NARROW_PHASE,
+                                jobs_complete,
+                                total_jobs,
+                                completed_item,
+                            )
+
+                            if not matched:
                                 rule_matches_sets[rule_name].discard(file_path)
-                        else:
-                            for rule_name, matched in results:
-                                jobs_complete += 1
+                finally:
+                    # Future.result() stores the completed result on the Future.
+                    # Removing all references here allows it to be collected now,
+                    # rather than at executor shutdown.
+                    del future
 
-                                completed_item = (
-                                    rule_name,
-                                    [file_path] if matched else [],
-                                )
-
-                                progress_callback(
-                                    SearchPhaseEnum.NARROW_PHASE,
-                                    jobs_complete,
-                                    total_jobs,
-                                    completed_item,
-                                )
-
-                                if not matched:
-                                    rule_matches_sets[rule_name].discard(file_path)
-                    finally:
-                        # Future.result() stores the completed result on the Future.
-                        # Removing all references here allows it to be collected now,
-                        # rather than at executor shutdown.
-                        del future
-
-                    # Refill one queue slot only after the completed Future has been
-                    # processed and removed.
-                    submit_next_task()
-
-        except CancelException:
-            stop_event.set()
-            for future in pending_futures:
-                future.cancel()
-            raise
-        except BaseException:
-            for future in pending_futures:
-                future.cancel()
-            raise
+                # Refill one queue slot only after the completed Future has been
+                # processed and removed.
+                submit_next_task()
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
