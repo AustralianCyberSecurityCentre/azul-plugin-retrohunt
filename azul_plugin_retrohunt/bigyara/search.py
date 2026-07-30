@@ -2,7 +2,8 @@
 
 import binascii
 import ctypes
-import gc
+
+# import gc
 import hashlib
 import logging
 import multiprocessing
@@ -804,10 +805,10 @@ def _narrow_phase_search(
         # and all worker threads from this chunk have terminated.
         del chunk
 
-        gc.collect()
+        # gc.collect()
 
         # Linux/glibc only. This asks glibc to return unused heap pages to the OS.
-        libc.malloc_trim(0)
+        # libc.malloc_trim(0)
 
         logger.info(
             "Narrow-phase chunk %d pool exited and memory cleanup completed",
