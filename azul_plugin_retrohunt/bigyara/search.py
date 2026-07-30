@@ -2,6 +2,7 @@
 
 import binascii
 import ctypes
+import gc
 import hashlib
 import logging
 import multiprocessing
@@ -711,50 +712,107 @@ def _narrow_phase_search(
     # Number of threads used based on available memory in the container.
     logger.info("Initiating narrow search with %d threads", processes)
 
-    for chunk in chunks:
-        with ThreadPoolExecutor(max_workers=processes) as executor:
-            futures = {executor.submit(worker_task, item): item for item in chunk.items()}
+    def process_chunk(chunk: dict[str, set[str]]) -> None:
+        """Process exactly one chunk using one temporary thread pool."""
+        nonlocal jobs_complete
+        nonlocal total_jobs
+        nonlocal files_complete
+        nonlocal next_progress_percent
 
-            for future in as_completed(futures):
-                status, file_path, rules_for_file, results = future.result()
-                if stop_event.is_set():
-                    raise CancelException("Narrow phase cancelled by user.")
+        futures = {}
 
-                files_complete += 1
-                current_percent = (files_complete * 100) // total_files if total_files else 100
+        try:
+            with ThreadPoolExecutor(max_workers=processes) as executor:
+                futures = {executor.submit(worker_task, item): item for item in chunk.items()}
 
-                while current_percent >= next_progress_percent:
-                    logger.info(
-                        "Narrow search %d%% complete: %d/%d files processed",
-                        next_progress_percent,
-                        files_complete,
-                        total_files,
-                    )
-                    next_progress_percent += 5
+                for future in as_completed(futures):
+                    try:
+                        status, file_path, rules_for_file, results = future.result()
+                    finally:
+                        # Do not retain completed Future objects and their results.
+                        futures.pop(future, None)
 
-                if status == "missing":
-                    for rule_name in rules_for_file:
-                        total_jobs -= 1
-                        rule_matches_sets[rule_name].discard(file_path)
-                    continue
+                    if stop_event.is_set():
+                        raise CancelException("Narrow phase cancelled by user.")
 
-                for rule_name, matched in results:
-                    jobs_complete += 1
+                    files_complete += 1
+                    current_percent = (files_complete * 100) // total_files if total_files else 100
 
-                    completed_item = (
-                        rule_name,
-                        [file_path] if matched else [],
-                    )
+                    while current_percent >= next_progress_percent:
+                        logger.info(
+                            "Narrow search %d%% complete: %d/%d files processed",
+                            next_progress_percent,
+                            files_complete,
+                            total_files,
+                        )
+                        next_progress_percent += 5
 
-                    progress_callback(
-                        SearchPhaseEnum.NARROW_PHASE,
-                        jobs_complete,
-                        total_jobs,
-                        completed_item,
-                    )
+                    if status == "missing":
+                        for rule_name in rules_for_file:
+                            total_jobs -= 1
+                            rule_matches_sets[rule_name].discard(file_path)
 
-                    if not matched:
-                        rule_matches_sets[rule_name].discard(file_path)
+                        progress_callback(
+                            SearchPhaseEnum.NARROW_PHASE,
+                            jobs_complete,
+                            total_jobs,
+                            None,
+                        )
+                        continue
+
+                    for rule_name, matched in results:
+                        jobs_complete += 1
+
+                        completed_item = (
+                            rule_name,
+                            [file_path] if matched else [],
+                        )
+
+                        progress_callback(
+                            SearchPhaseEnum.NARROW_PHASE,
+                            jobs_complete,
+                            total_jobs,
+                            completed_item,
+                        )
+
+                        if not matched:
+                            rule_matches_sets[rule_name].discard(file_path)
+
+                    # Explicitly release the current Future result.
+                    del results
+
+        except BaseException:
+            # Cancel work that has not started. Running workers must still finish
+            # before the executor's context manager exits.
+            for pending_future in futures:
+                pending_future.cancel()
+            raise
+
+        finally:
+            futures.clear()
+
+    for chunk_number, chunk in enumerate(chunks, start=1):
+        logger.debug(
+            "Starting narrow-phase chunk %d containing %d files",
+            chunk_number,
+            len(chunk),
+        )
+
+        process_chunk(chunk)
+
+        # process_chunk cannot return until ThreadPoolExecutor.__exit__ has run
+        # and all worker threads from this chunk have terminated.
+        del chunk
+
+        gc.collect()
+
+        # Linux/glibc only. This asks glibc to return unused heap pages to the OS.
+        libc.malloc_trim(0)
+
+        logger.debug(
+            "Narrow-phase chunk %d pool exited and memory cleanup completed",
+            chunk_number,
+        )
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
@@ -785,30 +843,22 @@ def clear_stop_event():
     stop_event.clear()
 
 
-def chunk_dict(d: dict[str, set[str]], chunk_size: int) -> list[dict[str, set[str]]]:
-    """Splits a dictionary into a list of smaller dictionaries, each with up to chunk_size items.
-
-    Args:
-        d: The dictionary to split.
-        chunk_size: Maximum number of items per chunk.
-
-    Returns:
-        A list of dictionaries.
-    """
+def chunk_dict(
+    d: dict[str, set[str]],
+    chunk_size: int,
+):
+    """Yield dictionaries containing at most chunk_size items."""
     if chunk_size <= 0:
         raise ValueError("chunk_size must be a positive integer")
 
     items = iter(d.items())
-    chunks = []
 
     while True:
-        # Take up to chunk_size items
         batch = dict(islice(items, chunk_size))
         if not batch:
-            break
-        chunks.append(batch)
+            return
 
-    return chunks
+        yield batch
 
 
 def _run_suricata(rule_text: str, file_path: str, data: bytes) -> bool:
