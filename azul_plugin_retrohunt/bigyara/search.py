@@ -711,7 +711,7 @@ def _narrow_phase_search(
     # Keep the executor queue bounded. Submitting every file at once would create
     # potentially hundreds of thousands of Future and work-item objects and retain them until
     # the executor is shut down.
-    max_in_flight = max(processes * 2, processes)
+    max_in_flight = max(processes * 2, 5)
 
     logger.info(
         "Initiating narrow search with %d threads and at most %d in-flight futures",
