@@ -709,14 +709,12 @@ def _narrow_phase_search(
     # Stream completed results from a fixed-size thread pool.
     # Number of threads used based on available memory in the container.
     logger.info("Initiating narrow search with %d threads", processes)
-    futures = []
 
     with ThreadPoolExecutor(workers=processes) as executor:
-        futures = {executor.submit(worker_task, item): item for item in file_to_rules.items()}
+        future_gen = (executor.submit(worker_task, item) for item in file_to_rules.items())
 
-        for future in as_completed(futures):
+        for future in as_completed(future_gen):
             status, file_path, rules_for_file, results = future.result()
-            del futures[future]
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
 
