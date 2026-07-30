@@ -792,7 +792,7 @@ def _narrow_phase_search(
             futures.clear()
 
     for chunk_number, chunk in enumerate(chunks, start=1):
-        logger.debug(
+        logger.info(
             "Starting narrow-phase chunks %d containing %d files",
             chunk_number,
             len(chunk),
@@ -809,7 +809,7 @@ def _narrow_phase_search(
         # Linux/glibc only. This asks glibc to return unused heap pages to the OS.
         libc.malloc_trim(0)
 
-        logger.debug(
+        logger.info(
             "Narrow-phase chunk %d pool exited and memory cleanup completed",
             chunk_number,
         )
