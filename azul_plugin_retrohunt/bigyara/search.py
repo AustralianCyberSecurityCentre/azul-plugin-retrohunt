@@ -8,9 +8,9 @@ import os
 import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import partial
 from itertools import product
-from multiprocessing.pool import ThreadPool
 from threading import Event
 
 import yara
@@ -199,6 +199,7 @@ def search(
 
     rule_atoms, rule_content, rule_search_plans = _atom_parse(query, query_type, checked_progress_callback)
     logger.info("Starting Broad search optimised")
+
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
             query_type,
@@ -637,47 +638,52 @@ def _narrow_phase_search(
     }
 
     # Worker function. Exceptions are intentionally allowed to propagate
-    # through the thread pool result iterator, especially CancelException.
+    # through the Future result, especially CancelException.
     def worker(file_path: str, rules_for_file: set[str]):
-        if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled by user.")
-
-        cfg = file_config.get(file_path)
-        with io_duration_metric.time():
-            data = data_callback(file_path, cfg)
-
-        # Cancellation may have been requested while the dispatcher call was in progress.
-        if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled by user.")
-
-        if data:
-            io_bytes_metric.inc(len(data))
-        else:
-            missing_files_metric.inc()
-            return ("missing", file_path, rules_for_file, None)
-
-        results = []
-        for rule_name in rules_for_file:
+        data = None
+        try:
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
 
-            if queryType == QueryTypeEnum.YARA:
-                with cpu_duration_metrics[rule_name].time():
-                    matched = bool(
-                        compiled_yara_rules[rule_name].match(
-                            data=data,
-                            callback=yara_callback,
-                            which_callbacks=yara.CALLBACK_MATCHES,
-                            fast=True,
-                            timeout=60,
+            cfg = file_config.get(file_path)
+            with io_duration_metric.time():
+                data = data_callback(file_path, cfg)
+
+            # Cancellation may have been requested while the dispatcher call was in progress.
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled by user.")
+
+            if data:
+                io_bytes_metric.inc(len(data))
+            else:
+                missing_files_metric.inc()
+                return ("missing", file_path, rules_for_file, None)
+
+            results = []
+            for rule_name in rules_for_file:
+                if stop_event.is_set():
+                    raise CancelException("Narrow phase cancelled by user.")
+
+                if queryType == QueryTypeEnum.YARA:
+                    with cpu_duration_metrics[rule_name].time():
+                        matched = bool(
+                            compiled_yara_rules[rule_name].match(
+                                data=data,
+                                callback=yara_callback,
+                                which_callbacks=yara.CALLBACK_MATCHES,
+                                fast=True,
+                                timeout=60,
+                            )
                         )
-                    )
-            elif queryType == QueryTypeEnum.SURICATA:
-                matched = _run_suricata(rule_content[rule_name], file_path, data)
+                elif queryType == QueryTypeEnum.SURICATA:
+                    matched = _run_suricata(rule_content[rule_name], file_path, data)
 
-            results.append((rule_name, matched))
+                results.append((rule_name, matched))
 
-        return ("ok", file_path, rules_for_file, results)
+            return ("ok", file_path, rules_for_file, results)
+        finally:
+            # Ensure the potentially large file buffer is released even if matching raises.
+            data = None
 
     def worker_task(task: tuple[str, set[str]]):
         file_path, rules_for_file = task
@@ -700,54 +706,98 @@ def _narrow_phase_search(
     )
     settings = RetrohuntSettings()
     processes = settings.search_settings.max_thread_count
-    # Stream completed results from a fixed-size thread pool.
-    # Number of threads used based on available memory in the container.
-    logger.info("Initiating narrow search with %d threads", processes)
 
-    with ThreadPool(processes=processes) as pool:
-        for status, file_path, rules_for_file, results in pool.imap_unordered(
-            worker_task,
-            file_to_rules.items(),
-            chunksize=4,
-        ):
-            if stop_event.is_set():
-                raise CancelException("Narrow phase cancelled by user.")
+    # Keep the executor queue bounded. Submitting every file at once would create
+    # potentially hundreds of thousands of Future and work-item objects and retain them until
+    # the executor is shut down.
+    max_in_flight = max(processes * 2, 5)
 
-            files_complete += 1
-            current_percent = (files_complete * 100) // total_files if total_files else 100
+    logger.info(
+        "Initiating narrow search with %d threads and at most %d in-flight futures",
+        processes,
+        max_in_flight,
+    )
 
-            while current_percent >= next_progress_percent:
-                logger.info(
-                    "Narrow search %d%% complete: %d/%d files processed",
-                    next_progress_percent,
-                    files_complete,
-                    total_files,
-                )
-                next_progress_percent += 5
+    task_iterator = iter(file_to_rules.items())
 
-            if status == "missing":
-                for rule_name in rules_for_file:
-                    total_jobs -= 1
-                    rule_matches_sets[rule_name].discard(file_path)
-                continue
+    with ThreadPoolExecutor(max_workers=processes) as executor:
+        pending_futures = set()
 
-            for rule_name, matched in results:
-                jobs_complete += 1
+        def submit_next_task() -> bool:
+            try:
+                task = next(task_iterator)
+            except StopIteration:
+                return False
 
-                completed_item = (
-                    rule_name,
-                    [file_path] if matched else [],
-                )
+            pending_futures.add(executor.submit(worker_task, task))
+            return True
 
-                progress_callback(
-                    SearchPhaseEnum.NARROW_PHASE,
-                    jobs_complete,
-                    total_jobs,
-                    completed_item,
-                )
+        for _ in range(min(max_in_flight, total_files)):
+            submit_next_task()
 
-                if not matched:
-                    rule_matches_sets[rule_name].discard(file_path)
+        while pending_futures:
+            done_futures, not_done_futures = wait(
+                pending_futures,
+                return_when=FIRST_COMPLETED,
+            )
+            # pending_futures already owns the outstanding Future references.
+            del not_done_futures
+
+            # Pop each completed Future from both sets as it is processed so
+            # its result and internal references can be reclaimed immediately.
+            while done_futures:
+                future = done_futures.pop()
+                pending_futures.remove(future)
+
+                try:
+                    status, file_path, rules_for_file, results = future.result()
+
+                    if stop_event.is_set():
+                        raise CancelException("Narrow phase cancelled by user.")
+
+                    files_complete += 1
+                    current_percent = (files_complete * 100) // total_files if total_files else 100
+
+                    while current_percent >= next_progress_percent:
+                        logger.info(
+                            "Narrow search %d%% complete: %d/%d files processed",
+                            next_progress_percent,
+                            files_complete,
+                            total_files,
+                        )
+                        next_progress_percent += 5
+
+                    if status == "missing":
+                        for rule_name in rules_for_file:
+                            total_jobs -= 1
+                            rule_matches_sets[rule_name].discard(file_path)
+                    else:
+                        for rule_name, matched in results:
+                            jobs_complete += 1
+
+                            completed_item = (
+                                rule_name,
+                                [file_path] if matched else [],
+                            )
+
+                            progress_callback(
+                                SearchPhaseEnum.NARROW_PHASE,
+                                jobs_complete,
+                                total_jobs,
+                                completed_item,
+                            )
+
+                            if not matched:
+                                rule_matches_sets[rule_name].discard(file_path)
+                finally:
+                    # Future.result() stores the completed result on the Future.
+                    # Removing all references here allows it to be collected now,
+                    # rather than at executor shutdown.
+                    del future
+
+                # Refill one queue slot only after the completed Future has been
+                # processed and removed.
+                submit_next_task()
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}

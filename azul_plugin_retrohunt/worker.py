@@ -194,7 +194,6 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
     def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job, last_update
-
         periodic_check_is_cancelled()
 
         if phase == SearchPhaseEnum.ATOM_PARSE:
