@@ -793,7 +793,7 @@ def _narrow_phase_search(
 
     for chunk_number, chunk in enumerate(chunks, start=1):
         logger.debug(
-            "Starting narrow-phase chunk %d containing %d files",
+            "Starting narrow-phase chunks %d containing %d files",
             chunk_number,
             len(chunk),
         )
