@@ -816,17 +816,31 @@ def _narrow_phase_search(
 
     # Convert back to lists and remove empty rules
     final_matches: RuleFileMatches = {}
+
     for rule_name, paths in rule_matches_sets.items():
         if paths:
             final_matches[rule_name] = list(paths)
 
     if final_matches:
-        confirmed_file_matches = sum(len(paths) for paths in final_matches.values())
+        confirmed_path_matches = sum(len(paths) for paths in final_matches.values())
+
+        unique_file_names = {os.path.basename(path) for paths in final_matches.values() for path in paths}
+
         logger.info(
-            "Found %d confirmed file matches across %d YARA rules.",
-            confirmed_file_matches,
+            "Found %d confirmed matching paths representing %d unique filenames across %d YARA rules.",
+            confirmed_path_matches,
+            len(unique_file_names),
             len(final_matches),
         )
+
+        for rule_name, paths in final_matches.items():
+            for path in sorted(paths):
+                logger.info(
+                    'Confirmed narrow match: rule="%s" path="%s" file_id="%s"',
+                    rule_name,
+                    path,
+                    os.path.basename(path),
+                )
     else:
         logger.info("No rules matched after Narrowing.")
 
