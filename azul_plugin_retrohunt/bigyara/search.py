@@ -719,6 +719,7 @@ def _narrow_phase_search(
         nonlocal total_jobs
         nonlocal files_complete
         nonlocal next_progress_percent
+        progress_report_interval = 50
 
         futures = {}
 
@@ -764,17 +765,25 @@ def _narrow_phase_search(
                     for rule_name, matched in results:
                         jobs_complete += 1
 
-                        completed_item = (
-                            rule_name,
-                            [file_path] if matched else [],
-                        )
+                        if matched:
+                            completed_item = (
+                                rule_name,
+                                [file_path],
+                            )
 
-                        progress_callback(
-                            SearchPhaseEnum.NARROW_PHASE,
-                            jobs_complete,
-                            total_jobs,
-                            completed_item,
-                        )
+                            progress_callback(
+                                SearchPhaseEnum.NARROW_PHASE,
+                                jobs_complete,
+                                total_jobs,
+                                completed_item,
+                            )
+                        elif jobs_complete % progress_report_interval == 0 or jobs_complete == total_jobs:
+                            progress_callback(
+                                SearchPhaseEnum.NARROW_PHASE,
+                                jobs_complete,
+                                total_jobs,
+                                None,
+                            )
 
                         if not matched:
                             rule_matches_sets[rule_name].discard(file_path)
