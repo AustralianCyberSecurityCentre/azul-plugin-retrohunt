@@ -710,7 +710,7 @@ def _narrow_phase_search(
     # Number of threads used based on available memory in the container.
     logger.info("Initiating narrow search with %d threads", processes)
 
-    with ThreadPoolExecutor(workers=processes) as executor:
+    with ThreadPoolExecutor(max_workers=processes) as executor:
         future_gen = (executor.submit(worker_task, item) for item in file_to_rules.items())
 
         for future in as_completed(future_gen):
