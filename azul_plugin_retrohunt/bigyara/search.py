@@ -34,7 +34,7 @@ from . import (
 )
 from .env import executables
 from .suricata_parse import parse_suricata_rules
-from .yara_parse import RuleSearchPlans, parse_yara_rules
+from .yara_parse import AndNode, OrNode, RuleSearchPlans, StringNode, parse_yara_rules
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
@@ -343,6 +343,7 @@ def _broad_phase_search(
 
     search_strings: dict[str, list[tuple[int, str]]] = {}
     broad_phase_modes: dict[str, str] = {}
+    required_or_clauses: dict[str, list[list[int]]] = {}
 
     for rule_name, plan in rule_search_plans.items():
         search_strings[rule_name] = []
@@ -397,18 +398,47 @@ def _broad_phase_search(
 
         else:
             required_group_ids: set[int] = set()
+            rule_required_or_clauses: list[list[int]] = []
 
-            if getattr(plan, "required_groups", None):
-                for required_group in plan.required_groups:
-                    for group_idx, actual_group in enumerate(plan.groups):
-                        if set(actual_group) == set(required_group):
-                            required_group_ids.add(group_idx)
+            # Preserve the direct top-level AND/OR structure from the parser.
+            # For ($a or $b) and ($c or $d), this produces two mandatory OR
+            # clauses instead of flattening all four strings into one large OR.
+            condition_ast = getattr(plan, "condition_ast", None)
+            if isinstance(condition_ast, AndNode):
+                for child in condition_ast.children:
+                    if not isinstance(child, OrNode) or not child.children:
+                        continue
+
+                    # Only use a clause when every alternative is a searchable
+                    # string. Skipping mixed/unknown branches is conservative.
+                    if not all(isinstance(sub, StringNode) for sub in child.children):
+                        continue
+
+                    clause_group_ids: list[int] = []
+                    clause_usable = True
+
+                    for sub in child.children:
+                        valid_group_ids = [
+                            group_idx
+                            for group_idx in plan.string_groups.get(sub.string_name, [])
+                            if 0 <= group_idx < len(plan.groups)
+                        ]
+
+                        if not valid_group_ids:
+                            clause_usable = False
                             break
 
-            required_group_ids = {group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)}
+                        clause_group_ids.extend(valid_group_ids)
 
-            if required_group_ids:
-                broad_phase_modes[rule_name] = "required_groups"
+                    if clause_usable:
+                        unique_clause_group_ids = list(dict.fromkeys(clause_group_ids))
+                        if unique_clause_group_ids:
+                            rule_required_or_clauses.append(unique_clause_group_ids)
+                            required_group_ids.update(unique_clause_group_ids)
+
+            if rule_required_or_clauses:
+                broad_phase_modes[rule_name] = "required_or_clauses"
+                required_or_clauses[rule_name] = rule_required_or_clauses
 
                 for group_idx in sorted(required_group_ids):
                     group = plan.groups[group_idx]
@@ -419,29 +449,62 @@ def _broad_phase_search(
                             "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
                         )
                     )
+
                 logger.info(
-                    'Rule "%s": no usable required_strings; generated %d required_group searches',
+                    'Rule "%s": generated %d searches across %d required OR clauses; '
+                    "the clause with the fewest candidates will be selected",
                     rule_name,
                     len(search_strings[rule_name]),
+                    len(rule_required_or_clauses),
                 )
 
             else:
-                broad_phase_modes[rule_name] = "fallback"
+                if getattr(plan, "required_groups", None):
+                    for required_group in plan.required_groups:
+                        for group_idx, actual_group in enumerate(plan.groups):
+                            if set(actual_group) == set(required_group):
+                                required_group_ids.add(group_idx)
+                                break
 
-                for group_idx, group in enumerate(plan.groups):
-                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
-                    search_strings[rule_name].append(
-                        (
-                            group_idx,
-                            "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                required_group_ids = {
+                    group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)
+                }
+
+                if required_group_ids:
+                    broad_phase_modes[rule_name] = "required_groups"
+
+                    for group_idx in sorted(required_group_ids):
+                        group = plan.groups[group_idx]
+                        hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                        search_strings[rule_name].append(
+                            (
+                                group_idx,
+                                "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                            )
                         )
+                    logger.info(
+                        'Rule "%s": no usable required_strings/OR clauses; generated %d required_group searches',
+                        rule_name,
+                        len(search_strings[rule_name]),
                     )
 
-                logger.info(
-                    'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
-                    rule_name,
-                    len(search_strings[rule_name]),
-                )
+                else:
+                    broad_phase_modes[rule_name] = "fallback"
+
+                    for group_idx, group in enumerate(plan.groups):
+                        hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                        search_strings[rule_name].append(
+                            (
+                                group_idx,
+                                "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                            )
+                        )
+
+                    logger.info(
+                        'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
+                        rule_name,
+                        len(search_strings[rule_name]),
+                    )
 
     tasks = []
     for index in indices:
@@ -588,6 +651,26 @@ def _broad_phase_search(
                 rule_name,
                 len(result_sets),
                 len(final_matches),
+            )
+        elif mode == "required_or_clauses":
+            clause_results: list[tuple[list[int], set[str]]] = []
+
+            for clause_group_ids in required_or_clauses[rule_name]:
+                clause_sets = [search_matches[rule_name][group_idx] for group_idx in clause_group_ids]
+                clause_matches = set.union(*clause_sets) if clause_sets else set()
+                clause_results.append((clause_group_ids, clause_matches))
+
+            selected_group_ids, final_matches = min(
+                clause_results,
+                key=lambda item: (len(item[1]), tuple(item[0])),
+            )
+
+            logger.info(
+                'Rule "%s": selected required OR clause groups %s with %d candidates from %d mandatory OR clauses',
+                rule_name,
+                selected_group_ids,
+                len(final_matches),
+                len(clause_results),
             )
         elif mode == "required_groups":
             logger.info(
