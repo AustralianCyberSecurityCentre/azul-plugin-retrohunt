@@ -642,7 +642,7 @@ def _narrow_phase_search(
         for rule_name in rule_matches_sets
     }
 
-    chunk_size = 500
+    chunk_size = 1000
     # Split the files to process into smaller chunks
     chunks = chunk_dict(file_to_rules, chunk_size)
 
