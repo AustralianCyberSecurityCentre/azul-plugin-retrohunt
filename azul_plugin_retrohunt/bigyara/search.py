@@ -641,8 +641,8 @@ def _narrow_phase_search(
         )
         for rule_name in rule_matches_sets
     }
-
-    chunk_size = 500
+    settings = RetrohuntSettings()
+    chunk_size = settings.search_settings.chunk_size
     # Split the files to process into smaller chunks
     chunks = chunk_dict(file_to_rules, chunk_size)
 
@@ -707,7 +707,6 @@ def _narrow_phase_search(
         total_files,
         total_jobs,
     )
-    settings = RetrohuntSettings()
     processes = settings.search_settings.max_thread_count
     # Stream completed results from a fixed-size thread pool.
     # Number of threads used based on available memory in the container.
