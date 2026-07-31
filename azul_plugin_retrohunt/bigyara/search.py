@@ -642,7 +642,8 @@ def _narrow_phase_search(
         for rule_name in rule_matches_sets
     }
 
-    chunk_size = 1000
+    settings = RetrohuntSettings()
+    chunk_size = settings.search_settings.chunk_size
     # Split the files to process into smaller chunks
     chunks = chunk_dict(file_to_rules, chunk_size)
 
@@ -707,7 +708,6 @@ def _narrow_phase_search(
         total_files,
         total_jobs,
     )
-    settings = RetrohuntSettings()
     processes = settings.search_settings.max_thread_count
     # Stream completed results from a fixed-size thread pool.
     # Number of threads used based on available memory in the container.
@@ -719,90 +719,70 @@ def _narrow_phase_search(
         nonlocal total_jobs
         nonlocal files_complete
         nonlocal next_progress_percent
-        progress_report_interval = 50
 
         futures = {}
 
-        try:
-            with ThreadPoolExecutor(max_workers=processes) as executor:
-                futures = {executor.submit(worker_task, item): item for item in chunk.items()}
+        with ThreadPoolExecutor(max_workers=processes) as executor:
+            futures = {executor.submit(worker_task, item): item for item in chunk.items()}
 
-                for future in as_completed(futures):
-                    try:
-                        status, file_path, rules_for_file, results = future.result()
-                    finally:
-                        # Do not retain completed Future objects and their results.
-                        futures.pop(future, None)
+            for future in as_completed(futures):
+                try:
+                    status, file_path, rules_for_file, results = future.result()
+                finally:
+                    # Do not retain completed Future objects and their results.
+                    futures.pop(future, None)
 
-                    if stop_event.is_set():
-                        raise CancelException("Narrow phase cancelled by user.")
+                if stop_event.is_set():
+                    raise CancelException("Narrow phase cancelled by user.")
 
-                    files_complete += 1
-                    current_percent = (files_complete * 100) // total_files if total_files else 100
+                files_complete += 1
+                current_percent = (files_complete * 100) // total_files if total_files else 100
 
-                    while current_percent >= next_progress_percent:
-                        logger.info(
-                            "Narrow search %d%% complete: %d/%d files processed",
-                            next_progress_percent,
-                            files_complete,
-                            total_files,
-                        )
-                        next_progress_percent += 5
+                while current_percent >= next_progress_percent:
+                    logger.info(
+                        "Narrow search %d%% complete: %d/%d files processed",
+                        next_progress_percent,
+                        files_complete,
+                        total_files,
+                    )
+                    next_progress_percent += 5
 
-                    if status == "missing":
-                        for rule_name in rules_for_file:
-                            total_jobs -= 1
-                            rule_matches_sets[rule_name].discard(file_path)
+                if status == "missing":
+                    for rule_name in rules_for_file:
+                        total_jobs -= 1
+                        rule_matches_sets[rule_name].discard(file_path)
 
-                        progress_callback(
-                            SearchPhaseEnum.NARROW_PHASE,
-                            jobs_complete,
-                            total_jobs,
-                            None,
-                        )
-                        continue
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        None,
+                    )
+                    continue
 
-                    for rule_name, matched in results:
-                        jobs_complete += 1
+                for rule_name, matched in results:
+                    jobs_complete += 1
 
-                        if matched:
-                            completed_item = (
-                                rule_name,
-                                [file_path],
-                            )
+                    completed_item = (
+                        rule_name,
+                        [file_path] if matched else [],
+                    )
 
-                            progress_callback(
-                                SearchPhaseEnum.NARROW_PHASE,
-                                jobs_complete,
-                                total_jobs,
-                                completed_item,
-                            )
-                        elif jobs_complete % progress_report_interval == 0 or jobs_complete == total_jobs:
-                            progress_callback(
-                                SearchPhaseEnum.NARROW_PHASE,
-                                jobs_complete,
-                                total_jobs,
-                                None,
-                            )
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        completed_item,
+                    )
 
-                        if not matched:
-                            rule_matches_sets[rule_name].discard(file_path)
+                    if not matched:
+                        rule_matches_sets[rule_name].discard(file_path)
 
-                    # Explicitly release the current Future result.
-                    del results
-
-        except BaseException:
-            # Cancel work that has not started. Running workers must still finish
-            # before the executor's context manager exits.
-            for pending_future in futures:
-                pending_future.cancel()
-            raise
-
-        finally:
-            futures.clear()
+                # Explicitly release the current Future result.
+                del results
 
     for chunk_number, chunk in enumerate(chunks, start=1):
-        logger.info(
+        logger.debug(
             "Starting narrow-phase chunks %d containing %d files",
             chunk_number,
             len(chunk),
@@ -814,12 +794,7 @@ def _narrow_phase_search(
         # and all worker threads from this chunk have terminated.
         del chunk
 
-        # gc.collect()
-
-        # Linux/glibc only. This asks glibc to return unused heap pages to the OS.
-        # libc.malloc_trim(0)
-
-        logger.info(
+        logger.debug(
             "Narrow-phase chunk %d pool exited and memory cleanup completed",
             chunk_number,
         )
