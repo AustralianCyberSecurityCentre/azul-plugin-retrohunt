@@ -12,7 +12,6 @@ import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
 from itertools import islice, product
 from threading import Event
 
@@ -320,6 +319,13 @@ def _run_bgparse_task(
     )
 
 
+def _run_bgparse_task_args(
+    task: tuple[str, str, str, int, str],
+):
+    """Unpack a broad-phase task for multiprocessing.imap_unordered."""
+    return _run_bgparse_task(*task)
+
+
 def _broad_phase_search(
     query_type: int,
     indices: list[str],
@@ -441,14 +447,21 @@ def _broad_phase_search(
     for index in indices:
         for rule_name, grouped_searches in search_strings.items():
             for search_id, search_string in grouped_searches:
-                tasks.append((index, rule_name, search_id, search_string))
+                tasks.append(
+                    (
+                        bgparse_exec,
+                        index,
+                        rule_name,
+                        search_id,
+                        search_string,
+                    )
+                )
 
     logger.info("Broad phase generated %d tasks", len(tasks))
     search_count = len(tasks)
     searches_complete = 0
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
 
-    worker = partial(_run_bgparse_task, bgparse_exec)
     file_config: FileConfig = {}
     search_matches: dict[str, dict[int, set[str]]] = {
         rule_name: {search_id: set() for search_id, _ in grouped_searches}
@@ -457,30 +470,59 @@ def _broad_phase_search(
 
     start = time.time()
 
+    next_progress_percent = 20
+
     with multiprocessing.Pool() as pool:
-        result_iterator = pool.starmap_async(worker, tasks)
+        # Match Pool.map's normal batching while still yielding completed
+        # task results incrementally.
+        process_count = multiprocessing.cpu_count()
+        chunksize = max(
+            1,
+            (search_count + (process_count * 4) - 1) // (process_count * 4),
+        )
+        result_iterator = pool.imap_unordered(
+            _run_bgparse_task_args,
+            tasks,
+            chunksize=chunksize,
+        )
 
-        while not result_iterator.ready():
-            # This callback checks Redis for an externally requested cancellation.
-            progress_callback(
-                SearchPhaseEnum.BROAD_PHASE,
-                searches_complete,
-                search_count,
-                None,
-            )
-            time.sleep(0.5)
+        while searches_complete < search_count:
+            try:
+                timeout_next = getattr(result_iterator, "next", None)
 
-        results = result_iterator.get()
+                if callable(timeout_next):
+                    # Real multiprocessing IMapIterator supports timeout.
+                    result = timeout_next(timeout=0.5)
+                else:
+                    # Unit tests may return a normal generator.
+                    result = next(result_iterator)
 
-        for (
-            rule_name,
-            search_id,
-            index,
-            search_string,
-            returncode,
-            stdout,
-            stderr,
-        ) in results:
+            except multiprocessing.TimeoutError:
+                progress_callback(
+                    SearchPhaseEnum.BROAD_PHASE,
+                    searches_complete,
+                    search_count,
+                    None,
+                )
+
+                if stop_event.is_set():
+                    raise CancelException("Broadphase cancelled by user.") from None
+
+                continue
+
+            except StopIteration as err:
+                raise BiggrepException("Broad-phase result iterator ended before all tasks completed.") from err
+
+            (
+                rule_name,
+                search_id,
+                index,
+                search_string,
+                returncode,
+                stdout,
+                stderr,
+            ) = result
+
             if returncode != 0:
                 raise BiggrepException(
                     f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
@@ -502,12 +544,24 @@ def _broad_phase_search(
 
             search_matches[rule_name][search_id].update(new_matches)
             searches_complete += 1
+
             progress_callback(
                 SearchPhaseEnum.BROAD_PHASE,
                 searches_complete,
                 search_count,
                 (rule_name, new_matches),
             )
+
+            current_percent = (searches_complete * 100) // search_count if search_count else 100
+
+            while current_percent >= next_progress_percent:
+                logger.info(
+                    "Broad search %d%% complete: %d/%d tasks processed",
+                    next_progress_percent,
+                    searches_complete,
+                    search_count,
+                )
+                next_progress_percent += 20
 
             if stop_event.is_set():
                 raise CancelException("Broadphase cancelled by user.")
