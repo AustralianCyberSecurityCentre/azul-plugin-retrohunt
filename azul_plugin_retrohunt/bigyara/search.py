@@ -781,6 +781,7 @@ def _narrow_phase_search(
 
     settings = RetrohuntSettings()
     chunk_size = settings.search_settings.chunk_size
+    logger.info(f'Narrow chunk size {chunk_size}')
     # Split the files to process into smaller chunks
     chunks = chunk_dict(file_to_rules, chunk_size)
 
