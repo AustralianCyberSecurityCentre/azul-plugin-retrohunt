@@ -2,7 +2,6 @@
 
 import binascii
 import ctypes
-
 import gc
 import hashlib
 import logging
