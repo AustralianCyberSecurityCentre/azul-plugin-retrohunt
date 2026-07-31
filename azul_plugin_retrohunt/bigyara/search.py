@@ -2,6 +2,7 @@
 
 import binascii
 import ctypes
+
 import gc
 import hashlib
 import logging
@@ -11,7 +12,6 @@ import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
 from itertools import islice, product
 from threading import Event
 
@@ -34,7 +34,7 @@ from . import (
 )
 from .env import executables
 from .suricata_parse import parse_suricata_rules
-from .yara_parse import RuleSearchPlans, parse_yara_rules
+from .yara_parse import AndNode, OrNode, RuleSearchPlans, StringNode, parse_yara_rules
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
@@ -319,6 +319,13 @@ def _run_bgparse_task(
     )
 
 
+def _run_bgparse_task_args(
+    task: tuple[str, str, str, int, str],
+):
+    """Unpack a broad-phase task for multiprocessing.imap_unordered."""
+    return _run_bgparse_task(*task)
+
+
 def _broad_phase_search(
     query_type: int,
     indices: list[str],
@@ -336,6 +343,7 @@ def _broad_phase_search(
 
     search_strings: dict[str, list[tuple[int, str]]] = {}
     broad_phase_modes: dict[str, str] = {}
+    selected_required_or_clauses: dict[str, list[int]] = {}
 
     for rule_name, plan in rule_search_plans.items():
         search_strings[rule_name] = []
@@ -390,20 +398,68 @@ def _broad_phase_search(
 
         else:
             required_group_ids: set[int] = set()
+            rule_required_or_clauses: list[list[int]] = []
+            unsafe_required_or_clause = False
 
-            if getattr(plan, "required_groups", None):
-                for required_group in plan.required_groups:
-                    for group_idx, actual_group in enumerate(plan.groups):
-                        if set(actual_group) == set(required_group):
-                            required_group_ids.add(group_idx)
+            # Preserve the direct top-level AND/OR structure from the parser.
+            # For ($a or $b) and ($c or $d), this produces two mandatory OR
+            # clauses instead of flattening all four strings into one large OR.
+            condition_ast = getattr(plan, "condition_ast", None)
+            if isinstance(condition_ast, AndNode):
+                for child in condition_ast.children:
+                    if not isinstance(child, OrNode):
+                        continue
+
+                    if not child.children:
+                        unsafe_required_or_clause = True
+                        continue
+
+                    # Only use a clause when every alternative is a searchable
+                    # string. If no other complete mandatory OR clause can be
+                    # selected, mixed/unknown clauses force the full fallback.
+                    if not all(isinstance(sub, StringNode) for sub in child.children):
+                        unsafe_required_or_clause = True
+                        continue
+
+                    clause_group_ids: list[int] = []
+                    clause_usable = True
+
+                    for sub in child.children:
+                        valid_group_ids = [
+                            group_idx
+                            for group_idx in plan.string_groups.get(sub.string_name, [])
+                            if 0 <= group_idx < len(plan.groups)
+                        ]
+
+                        if not valid_group_ids:
+                            clause_usable = False
+                            unsafe_required_or_clause = True
                             break
 
-            required_group_ids = {group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)}
+                        clause_group_ids.extend(valid_group_ids)
 
-            if required_group_ids:
-                broad_phase_modes[rule_name] = "required_groups"
+                    if clause_usable:
+                        unique_clause_group_ids = list(dict.fromkeys(clause_group_ids))
+                        if unique_clause_group_ids:
+                            rule_required_or_clauses.append(unique_clause_group_ids)
+                            required_group_ids.update(unique_clause_group_ids)
 
-                for group_idx in sorted(required_group_ids):
+            if rule_required_or_clauses:
+                broad_phase_modes[rule_name] = "required_or_clause"
+
+                # Choose one mandatory OR clause before generating any bgparse
+                # tasks. Fewer atom groups means fewer OR-alternative searches.
+                selected_group_ids = min(
+                    rule_required_or_clauses,
+                    key=lambda clause: (
+                        sum(len(plan.groups[group_idx]) for group_idx in clause),
+                        len(clause),
+                        tuple(clause),
+                    ),
+                )
+                selected_required_or_clauses[rule_name] = selected_group_ids
+
+                for group_idx in sorted(selected_group_ids):
                     group = plan.groups[group_idx]
                     hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
                     search_strings[rule_name].append(
@@ -412,42 +468,104 @@ def _broad_phase_search(
                             "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
                         )
                     )
+
                 logger.info(
-                    'Rule "%s": no usable required_strings; generated %d required_group searches',
+                    'Rule "%s": selected required OR clause groups %s containing %d atoms; '
+                    "generated %d searches instead of searching all %d mandatory OR clauses",
                     rule_name,
+                    selected_group_ids,
+                    sum(len(plan.groups[group_idx]) for group_idx in selected_group_ids),
                     len(search_strings[rule_name]),
+                    len(rule_required_or_clauses),
                 )
 
             else:
-                broad_phase_modes[rule_name] = "fallback"
+                if unsafe_required_or_clause:
+                    broad_phase_modes[rule_name] = "fallback"
 
-                for group_idx, group in enumerate(plan.groups):
-                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
-                    search_strings[rule_name].append(
-                        (
-                            group_idx,
-                            "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                    for group_idx, group in enumerate(plan.groups):
+                        hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                        search_strings[rule_name].append(
+                            (
+                                group_idx,
+                                "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                            )
                         )
+
+                    logger.info(
+                        'Rule "%s": unusable mixed/unknown mandatory OR clauses; '
+                        "bypassing required_groups and generated %d fallback OR searches",
+                        rule_name,
+                        len(search_strings[rule_name]),
+                    )
+                    continue
+
+                if getattr(plan, "required_groups", None):
+                    for required_group in plan.required_groups:
+                        for group_idx, actual_group in enumerate(plan.groups):
+                            if set(actual_group) == set(required_group):
+                                required_group_ids.add(group_idx)
+                                break
+
+                required_group_ids = {
+                    group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)
+                }
+
+                if required_group_ids:
+                    broad_phase_modes[rule_name] = "required_groups"
+
+                    for group_idx in sorted(required_group_ids):
+                        group = plan.groups[group_idx]
+                        hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                        search_strings[rule_name].append(
+                            (
+                                group_idx,
+                                "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                            )
+                        )
+                    logger.info(
+                        'Rule "%s": no usable required_strings/OR clauses; generated %d required_group searches',
+                        rule_name,
+                        len(search_strings[rule_name]),
                     )
 
-                logger.info(
-                    'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
-                    rule_name,
-                    len(search_strings[rule_name]),
-                )
+                else:
+                    broad_phase_modes[rule_name] = "fallback"
+
+                    for group_idx, group in enumerate(plan.groups):
+                        hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                        search_strings[rule_name].append(
+                            (
+                                group_idx,
+                                "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                            )
+                        )
+
+                    logger.info(
+                        'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
+                        rule_name,
+                        len(search_strings[rule_name]),
+                    )
 
     tasks = []
     for index in indices:
         for rule_name, grouped_searches in search_strings.items():
             for search_id, search_string in grouped_searches:
-                tasks.append((index, rule_name, search_id, search_string))
+                tasks.append(
+                    (
+                        bgparse_exec,
+                        index,
+                        rule_name,
+                        search_id,
+                        search_string,
+                    )
+                )
 
     logger.info("Broad phase generated %d tasks", len(tasks))
     search_count = len(tasks)
     searches_complete = 0
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
 
-    worker = partial(_run_bgparse_task, bgparse_exec)
     file_config: FileConfig = {}
     search_matches: dict[str, dict[int, set[str]]] = {
         rule_name: {search_id: set() for search_id, _ in grouped_searches}
@@ -456,30 +574,59 @@ def _broad_phase_search(
 
     start = time.time()
 
+    next_progress_percent = 20
+
     with multiprocessing.Pool() as pool:
-        result_iterator = pool.starmap_async(worker, tasks)
+        # Match Pool.map's normal batching while still yielding completed
+        # task results incrementally.
+        process_count = multiprocessing.cpu_count()
+        chunksize = max(
+            1,
+            (search_count + (process_count * 4) - 1) // (process_count * 4),
+        )
+        result_iterator = pool.imap_unordered(
+            _run_bgparse_task_args,
+            tasks,
+            chunksize=chunksize,
+        )
 
-        while not result_iterator.ready():
-            # This callback checks Redis for an externally requested cancellation.
-            progress_callback(
-                SearchPhaseEnum.BROAD_PHASE,
-                searches_complete,
-                search_count,
-                None,
-            )
-            time.sleep(0.5)
+        while searches_complete < search_count:
+            try:
+                timeout_next = getattr(result_iterator, "next", None)
 
-        results = result_iterator.get()
+                if callable(timeout_next):
+                    # Real multiprocessing IMapIterator supports timeout.
+                    result = timeout_next(timeout=0.5)
+                else:
+                    # Unit tests may return a normal generator.
+                    result = next(result_iterator)
 
-        for (
-            rule_name,
-            search_id,
-            index,
-            search_string,
-            returncode,
-            stdout,
-            stderr,
-        ) in results:
+            except multiprocessing.TimeoutError:
+                progress_callback(
+                    SearchPhaseEnum.BROAD_PHASE,
+                    searches_complete,
+                    search_count,
+                    None,
+                )
+
+                if stop_event.is_set():
+                    raise CancelException("Broadphase cancelled by user.") from None
+
+                continue
+
+            except StopIteration as err:
+                raise BiggrepException("Broad-phase result iterator ended before all tasks completed.") from err
+
+            (
+                rule_name,
+                search_id,
+                index,
+                search_string,
+                returncode,
+                stdout,
+                stderr,
+            ) = result
+
             if returncode != 0:
                 raise BiggrepException(
                     f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
@@ -501,12 +648,24 @@ def _broad_phase_search(
 
             search_matches[rule_name][search_id].update(new_matches)
             searches_complete += 1
+
             progress_callback(
                 SearchPhaseEnum.BROAD_PHASE,
                 searches_complete,
                 search_count,
                 (rule_name, new_matches),
             )
+
+            current_percent = (searches_complete * 100) // search_count if search_count else 100
+
+            while current_percent >= next_progress_percent:
+                logger.info(
+                    "Broad search %d%% complete: %d/%d tasks processed",
+                    next_progress_percent,
+                    searches_complete,
+                    search_count,
+                )
+                next_progress_percent += 20
 
             if stop_event.is_set():
                 raise CancelException("Broadphase cancelled by user.")
@@ -532,6 +691,13 @@ def _broad_phase_search(
                 'Rule "%s": %d combined required-string searches produced %d candidates',
                 rule_name,
                 len(result_sets),
+                len(final_matches),
+            )
+        elif mode == "required_or_clause":
+            logger.info(
+                'Rule "%s": selected required OR clause groups %s produced %d candidates',
+                rule_name,
+                selected_required_or_clauses[rule_name],
                 len(final_matches),
             )
         elif mode == "required_groups":
@@ -640,8 +806,10 @@ def _narrow_phase_search(
         )
         for rule_name in rule_matches_sets
     }
+
     settings = RetrohuntSettings()
     chunk_size = settings.search_settings.chunk_size
+    logger.info(f"Narrow chunk size {chunk_size}")
     # Split the files to process into smaller chunks
     chunks = chunk_dict(file_to_rules, chunk_size)
 
@@ -720,78 +888,67 @@ def _narrow_phase_search(
 
         futures = {}
 
-        try:
-            with ThreadPoolExecutor(max_workers=processes) as executor:
-                futures = {executor.submit(worker_task, item): item for item in chunk.items()}
+        with ThreadPoolExecutor(max_workers=processes) as executor:
+            futures = {executor.submit(worker_task, item): item for item in chunk.items()}
 
-                for future in as_completed(futures):
-                    try:
-                        status, file_path, rules_for_file, results = future.result()
-                    finally:
-                        # Do not retain completed Future objects and their results.
-                        futures.pop(future, None)
+            for future in as_completed(futures):
+                try:
+                    status, file_path, rules_for_file, results = future.result()
+                finally:
+                    # Do not retain completed Future objects and their results.
+                    futures.pop(future, None)
 
-                    if stop_event.is_set():
-                        raise CancelException("Narrow phase cancelled by user.")
+                if stop_event.is_set():
+                    raise CancelException("Narrow phase cancelled by user.")
 
-                    files_complete += 1
-                    current_percent = (files_complete * 100) // total_files if total_files else 100
+                files_complete += 1
+                current_percent = (files_complete * 100) // total_files if total_files else 100
 
-                    while current_percent >= next_progress_percent:
-                        logger.info(
-                            "Narrow search %d%% complete: %d/%d files processed",
-                            next_progress_percent,
-                            files_complete,
-                            total_files,
-                        )
-                        next_progress_percent += 5
+                while current_percent >= next_progress_percent:
+                    logger.info(
+                        "Narrow search %d%% complete: %d/%d files processed",
+                        next_progress_percent,
+                        files_complete,
+                        total_files,
+                    )
+                    next_progress_percent += 5
 
-                    if status == "missing":
-                        for rule_name in rules_for_file:
-                            total_jobs -= 1
-                            rule_matches_sets[rule_name].discard(file_path)
+                if status == "missing":
+                    for rule_name in rules_for_file:
+                        total_jobs -= 1
+                        rule_matches_sets[rule_name].discard(file_path)
 
-                        progress_callback(
-                            SearchPhaseEnum.NARROW_PHASE,
-                            jobs_complete,
-                            total_jobs,
-                            None,
-                        )
-                        continue
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        None,
+                    )
+                    continue
 
-                    for rule_name, matched in results:
-                        jobs_complete += 1
+                for rule_name, matched in results:
+                    jobs_complete += 1
 
-                        completed_item = (
-                            rule_name,
-                            [file_path] if matched else [],
-                        )
+                    completed_item = (
+                        rule_name,
+                        [file_path] if matched else [],
+                    )
 
-                        progress_callback(
-                            SearchPhaseEnum.NARROW_PHASE,
-                            jobs_complete,
-                            total_jobs,
-                            completed_item,
-                        )
+                    progress_callback(
+                        SearchPhaseEnum.NARROW_PHASE,
+                        jobs_complete,
+                        total_jobs,
+                        completed_item,
+                    )
 
-                        if not matched:
-                            rule_matches_sets[rule_name].discard(file_path)
+                    if not matched:
+                        rule_matches_sets[rule_name].discard(file_path)
 
-                    # Explicitly release the current Future result.
-                    del results
-
-        except BaseException:
-            # Cancel work that has not started. Running workers must still finish
-            # before the executor's context manager exits.
-            for pending_future in futures:
-                pending_future.cancel()
-            raise
-
-        finally:
-            futures.clear()
+                # Explicitly release the current Future result.
+                del results
 
     for chunk_number, chunk in enumerate(chunks, start=1):
-        logger.info(
+        logger.debug(
             "Starting narrow-phase chunks %d containing %d files",
             chunk_number,
             len(chunk),
@@ -802,13 +959,9 @@ def _narrow_phase_search(
         # process_chunk cannot return until ThreadPoolExecutor.__exit__ has run
         # and all worker threads from this chunk have terminated.
         del chunk
-
         gc.collect()
 
-        # Linux/glibc only. This asks glibc to return unused heap pages to the OS.
-        # libc.malloc_trim(0)
-
-        logger.info(
+        logger.debug(
             "Narrow-phase chunk %d pool exited and memory cleanup completed",
             chunk_number,
         )
