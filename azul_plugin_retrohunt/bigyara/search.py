@@ -200,7 +200,7 @@ def search(
     query_hash = hashlib.sha256(query.encode()).hexdigest()
 
     rule_atoms, rule_content, rule_search_plans = _atom_parse(query, query_type, checked_progress_callback)
-    logger.info("Starting Broad search optimised")
+    logger.info("Starting broad search")
 
     with prom_broad_phase_duration.labels(query_hash=query_hash).time():
         rule_matches, file_config = _broad_phase_search(
@@ -219,7 +219,7 @@ def search(
         else:
             rule_matches.pop(rule_name, None)
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
-    logger.info("Starting narrow search ")
+    logger.info("Starting narrow search")
 
     with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
         rule_matches = _narrow_phase_search(
@@ -286,6 +286,17 @@ def _atom_parse(
     return rule_atoms, rule_content, rule_search_plans
 
 
+def _format_group_atoms(plan, group_ids: list[int] | set[int]) -> str:
+    """Format selected broad-phase group IDs and atoms for user-facing logs."""
+    formatted_groups = []
+
+    for group_idx in sorted(set(group_ids)):
+        atoms = ", ".join(repr(atom) for atom in sorted(plan.groups[group_idx]))
+        formatted_groups.append(f"{group_idx}=[{atoms}]")
+
+    return ", ".join(formatted_groups)
+
+
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
 def _run_bgparse_task(
@@ -338,7 +349,7 @@ def _broad_phase_search(
         return
 
     bgparse_exec = executables["bgparse"]
-    logger.info("Rule search plans broad phase: %s", rule_search_plans)
+    logger.debug("Rule search plans broad phase: %s", rule_search_plans)
 
     search_strings: dict[str, list[tuple[int, str]]] = {}
     broad_phase_modes: dict[str, str] = {}
@@ -388,7 +399,15 @@ def _broad_phase_search(
                         "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
                     )
                 )
+            selected_group_ids = {
+                group_idx for group_options in required_string_group_options for group_idx in group_options
+            }
             logger.info(
+                'Rule "%s": broad-phase groups and atoms (required strings): %s',
+                rule_name,
+                _format_group_atoms(plan, selected_group_ids),
+            )
+            logger.debug(
                 'Rule "%s": required_strings present; generated %d combined AND bgparse searches covering %d required strings',
                 rule_name,
                 len(search_strings[rule_name]),
@@ -469,6 +488,11 @@ def _broad_phase_search(
                     )
 
                 logger.info(
+                    'Rule "%s": broad-phase groups and atoms (required OR clause): %s',
+                    rule_name,
+                    _format_group_atoms(plan, selected_group_ids),
+                )
+                logger.debug(
                     'Rule "%s": selected required OR clause groups %s containing %d atoms; '
                     "generated %d searches instead of searching all %d mandatory OR clauses",
                     rule_name,
@@ -492,6 +516,11 @@ def _broad_phase_search(
                         )
 
                     logger.info(
+                        'Rule "%s": broad-phase groups and atoms (full fallback): %s',
+                        rule_name,
+                        _format_group_atoms(plan, set(range(len(plan.groups)))),
+                    )
+                    logger.debug(
                         'Rule "%s": unusable mixed/unknown mandatory OR clauses; '
                         "bypassing required_groups and generated %d fallback OR searches",
                         rule_name,
@@ -523,6 +552,11 @@ def _broad_phase_search(
                             )
                         )
                     logger.info(
+                        'Rule "%s": broad-phase groups and atoms (required groups): %s',
+                        rule_name,
+                        _format_group_atoms(plan, required_group_ids),
+                    )
+                    logger.debug(
                         'Rule "%s": no usable required_strings/OR clauses; generated %d required_group searches',
                         rule_name,
                         len(search_strings[rule_name]),
@@ -541,6 +575,11 @@ def _broad_phase_search(
                         )
 
                     logger.info(
+                        'Rule "%s": broad-phase groups and atoms (all-groups fallback): %s',
+                        rule_name,
+                        _format_group_atoms(plan, set(range(len(plan.groups)))),
+                    )
+                    logger.debug(
                         'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
                         rule_name,
                         len(search_strings[rule_name]),
@@ -560,7 +599,7 @@ def _broad_phase_search(
                     )
                 )
 
-    logger.info("Broad phase generated %d tasks", len(tasks))
+    logger.debug("Broad phase generated %d tasks", len(tasks))
     search_count = len(tasks)
     searches_complete = 0
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
@@ -686,27 +725,27 @@ def _broad_phase_search(
         final_matches = set.union(*result_sets) if result_sets else set()
 
         if mode == "required_strings":
-            logger.info(
+            logger.debug(
                 'Rule "%s": %d combined required-string searches produced %d candidates',
                 rule_name,
                 len(result_sets),
                 len(final_matches),
             )
         elif mode == "required_or_clause":
-            logger.info(
+            logger.debug(
                 'Rule "%s": selected required OR clause groups %s produced %d candidates',
                 rule_name,
                 selected_required_or_clauses[rule_name],
                 len(final_matches),
             )
         elif mode == "required_groups":
-            logger.info(
+            logger.debug(
                 'Rule "%s": required_groups OR broad phase produced %d candidates',
                 rule_name,
                 len(final_matches),
             )
         else:
-            logger.info(
+            logger.debug(
                 'Rule "%s": fallback OR over all groups produced %d candidates',
                 rule_name,
                 len(final_matches),
@@ -808,7 +847,7 @@ def _narrow_phase_search(
 
     settings = RetrohuntSettings()
     chunk_size = settings.search_settings.chunk_size
-    logger.info(f"Narrow chunk size {chunk_size}")
+    logger.debug("Narrow chunk size %d", chunk_size)
     # Split the files to process into smaller chunks
     chunks = chunk_dict(file_to_rules, chunk_size)
 
@@ -876,7 +915,7 @@ def _narrow_phase_search(
     processes = settings.search_settings.max_thread_count
     # Stream completed results from a fixed-size thread pool.
     # Number of threads used based on available memory in the container.
-    logger.info("Initiating narrow search with %d threads", processes)
+    logger.debug("Initiating narrow search with %d threads", processes)
 
     def process_chunk(chunk: dict[str, set[str]]) -> None:
         """Process exactly one chunk using one temporary thread pool."""
@@ -986,7 +1025,7 @@ def _narrow_phase_search(
 
         for rule_name, paths in final_matches.items():
             for path in sorted(paths):
-                logger.info(
+                logger.debug(
                     'Confirmed narrow match: rule="%s" path="%s" file_id="%s"',
                     rule_name,
                     path,
