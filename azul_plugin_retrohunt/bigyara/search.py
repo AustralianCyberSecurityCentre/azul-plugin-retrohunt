@@ -343,7 +343,7 @@ def _broad_phase_search(
 
     search_strings: dict[str, list[tuple[int, str]]] = {}
     broad_phase_modes: dict[str, str] = {}
-    required_or_clauses: dict[str, list[list[int]]] = {}
+    selected_required_or_clauses: dict[str, list[int]] = {}
 
     for rule_name, plan in rule_search_plans.items():
         search_strings[rule_name] = []
@@ -437,10 +437,21 @@ def _broad_phase_search(
                             required_group_ids.update(unique_clause_group_ids)
 
             if rule_required_or_clauses:
-                broad_phase_modes[rule_name] = "required_or_clauses"
-                required_or_clauses[rule_name] = rule_required_or_clauses
+                broad_phase_modes[rule_name] = "required_or_clause"
 
-                for group_idx in sorted(required_group_ids):
+                # Choose one mandatory OR clause before generating any bgparse
+                # tasks. Fewer atom groups means fewer OR-alternative searches.
+                selected_group_ids = min(
+                    rule_required_or_clauses,
+                    key=lambda clause: (
+                        sum(len(plan.groups[group_idx]) for group_idx in clause),
+                        len(clause),
+                        tuple(clause),
+                    ),
+                )
+                selected_required_or_clauses[rule_name] = selected_group_ids
+
+                for group_idx in sorted(selected_group_ids):
                     group = plan.groups[group_idx]
                     hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
                     search_strings[rule_name].append(
@@ -451,9 +462,11 @@ def _broad_phase_search(
                     )
 
                 logger.info(
-                    'Rule "%s": generated %d searches across %d required OR clauses; '
-                    "the clause with the fewest candidates will be selected",
+                    'Rule "%s": selected required OR clause groups %s containing %d atoms; '
+                    "generated %d searches instead of searching all %d mandatory OR clauses",
                     rule_name,
+                    selected_group_ids,
+                    sum(len(plan.groups[group_idx]) for group_idx in selected_group_ids),
                     len(search_strings[rule_name]),
                     len(rule_required_or_clauses),
                 )
@@ -652,25 +665,12 @@ def _broad_phase_search(
                 len(result_sets),
                 len(final_matches),
             )
-        elif mode == "required_or_clauses":
-            clause_results: list[tuple[list[int], set[str]]] = []
-
-            for clause_group_ids in required_or_clauses[rule_name]:
-                clause_sets = [search_matches[rule_name][group_idx] for group_idx in clause_group_ids]
-                clause_matches = set.union(*clause_sets) if clause_sets else set()
-                clause_results.append((clause_group_ids, clause_matches))
-
-            selected_group_ids, final_matches = min(
-                clause_results,
-                key=lambda item: (len(item[1]), tuple(item[0])),
-            )
-
+        elif mode == "required_or_clause":
             logger.info(
-                'Rule "%s": selected required OR clause groups %s with %d candidates from %d mandatory OR clauses',
+                'Rule "%s": selected required OR clause groups %s produced %d candidates',
                 rule_name,
-                selected_group_ids,
+                selected_required_or_clauses[rule_name],
                 len(final_matches),
-                len(clause_results),
             )
         elif mode == "required_groups":
             logger.info(
