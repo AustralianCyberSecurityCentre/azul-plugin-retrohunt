@@ -399,6 +399,7 @@ def _broad_phase_search(
         else:
             required_group_ids: set[int] = set()
             rule_required_or_clauses: list[list[int]] = []
+            unsafe_required_or_clause = False
 
             # Preserve the direct top-level AND/OR structure from the parser.
             # For ($a or $b) and ($c or $d), this produces two mandatory OR
@@ -406,12 +407,18 @@ def _broad_phase_search(
             condition_ast = getattr(plan, "condition_ast", None)
             if isinstance(condition_ast, AndNode):
                 for child in condition_ast.children:
-                    if not isinstance(child, OrNode) or not child.children:
+                    if not isinstance(child, OrNode):
+                        continue
+
+                    if not child.children:
+                        unsafe_required_or_clause = True
                         continue
 
                     # Only use a clause when every alternative is a searchable
-                    # string. Skipping mixed/unknown branches is conservative.
+                    # string. If no other complete mandatory OR clause can be
+                    # selected, mixed/unknown clauses force the full fallback.
                     if not all(isinstance(sub, StringNode) for sub in child.children):
+                        unsafe_required_or_clause = True
                         continue
 
                     clause_group_ids: list[int] = []
@@ -426,6 +433,7 @@ def _broad_phase_search(
 
                         if not valid_group_ids:
                             clause_usable = False
+                            unsafe_required_or_clause = True
                             break
 
                         clause_group_ids.extend(valid_group_ids)
@@ -472,6 +480,26 @@ def _broad_phase_search(
                 )
 
             else:
+                if unsafe_required_or_clause:
+                    broad_phase_modes[rule_name] = "fallback"
+
+                    for group_idx, group in enumerate(plan.groups):
+                        hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
+                        search_strings[rule_name].append(
+                            (
+                                group_idx,
+                                "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
+                            )
+                        )
+
+                    logger.info(
+                        'Rule "%s": unusable mixed/unknown mandatory OR clauses; '
+                        "bypassing required_groups and generated %d fallback OR searches",
+                        rule_name,
+                        len(search_strings[rule_name]),
+                    )
+                    continue
+
                 if getattr(plan, "required_groups", None):
                     for required_group in plan.required_groups:
                         for group_idx, actual_group in enumerate(plan.groups):
@@ -781,7 +809,7 @@ def _narrow_phase_search(
 
     settings = RetrohuntSettings()
     chunk_size = settings.search_settings.chunk_size
-    logger.info(f'Narrow chunk size {chunk_size}')
+    logger.info(f"Narrow chunk size {chunk_size}")
     # Split the files to process into smaller chunks
     chunks = chunk_dict(file_to_rules, chunk_size)
 
