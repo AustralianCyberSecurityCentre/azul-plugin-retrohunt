@@ -286,15 +286,52 @@ def _atom_parse(
     return rule_atoms, rule_content, rule_search_plans
 
 
+def _string_names_for_group(plan, group_idx: int) -> list[str]:
+    """Return the YARA string names associated with an atom group for logging."""
+    return sorted(string_name for string_name, group_ids in plan.string_groups.items() if group_idx in group_ids)
+
+
 def _format_group_atoms(plan, group_ids: list[int] | set[int]) -> str:
-    """Format selected broad-phase group IDs and atoms for user-facing logs."""
+    """Format selected broad-phase groups, YARA strings, and exact atoms."""
     formatted_groups = []
 
     for group_idx in sorted(set(group_ids)):
+        string_names = _string_names_for_group(plan, group_idx)
+        string_label = ", ".join(string_names) if string_names else "unmapped string"
         atoms = ", ".join(repr(atom) for atom in sorted(plan.groups[group_idx]))
-        formatted_groups.append(f"{group_idx}=[{atoms}]")
+        formatted_groups.append(f"group {group_idx} ({string_label}) -> [{atoms}]")
 
-    return ", ".join(formatted_groups)
+    return "; ".join(formatted_groups)
+
+
+def _format_or_clause(plan, group_ids: list[int]) -> str:
+    """Format the YARA string names represented by a mandatory OR clause."""
+    selected_group_ids = set(group_ids)
+    clause_strings = []
+
+    for string_name, string_group_ids in plan.string_groups.items():
+        valid_group_ids = [group_idx for group_idx in string_group_ids if 0 <= group_idx < len(plan.groups)]
+
+        if valid_group_ids and set(valid_group_ids).issubset(selected_group_ids):
+            clause_strings.append((min(valid_group_ids), string_name))
+
+    ordered_names = [string_name for _first_group_idx, string_name in sorted(clause_strings)]
+
+    if not ordered_names:
+        return f"groups {sorted(selected_group_ids)}"
+
+    return "(" + " OR ".join(ordered_names) + ")"
+
+
+def _format_or_clause_choices(plan, clauses: list[list[int]]) -> str:
+    """Describe the searchable mandatory OR clauses considered by the planner."""
+    choices = []
+
+    for clause in clauses:
+        atom_count = sum(len(plan.groups[group_idx]) for group_idx in clause)
+        choices.append(f"{_format_or_clause(plan, clause)} ({len(clause)} groups, {atom_count} atoms)")
+
+    return "; ".join(choices)
 
 
 # FUTURE: investigate whether there is an alternative to biggrep that allows
@@ -402,8 +439,16 @@ def _broad_phase_search(
             selected_group_ids = {
                 group_idx for group_options in required_string_group_options for group_idx in group_options
             }
+            required_string_expression = " AND ".join(sorted(plan.required_strings))
             logger.info(
-                'Rule "%s": broad-phase groups and atoms (required strings): %s',
+                'Rule "%s": broad-phase selection: the condition requires %s. '
+                "Each broad-phase search will combine one atom option from every "
+                "required string, because every final match must satisfy all of them.",
+                rule_name,
+                required_string_expression,
+            )
+            logger.info(
+                'Rule "%s": exact atom groups selected: %s',
                 rule_name,
                 _format_group_atoms(plan, selected_group_ids),
             )
@@ -487,9 +532,26 @@ def _broad_phase_search(
                         )
                     )
 
+                selected_clause = _format_or_clause(plan, selected_group_ids)
+                selected_atom_count = sum(len(plan.groups[group_idx]) for group_idx in selected_group_ids)
                 logger.info(
-                    'Rule "%s": broad-phase groups and atoms (required OR clause): %s',
+                    'Rule "%s": broad-phase selection: the condition contains %d complete, '
+                    "directly searchable mandatory OR clause(s): %s. Every final match must "
+                    "satisfy each mandatory clause, so searching any one complete clause is safe. "
+                    "Selected %s because it has the lowest search cost (%d groups, %d atoms). "
+                    "This minimises the number of broad-phase searches; it is a task-cost "
+                    "heuristic and does not assume which clause will return the fewest candidates.",
                     rule_name,
+                    len(rule_required_or_clauses),
+                    _format_or_clause_choices(plan, rule_required_or_clauses),
+                    selected_clause,
+                    len(selected_group_ids),
+                    selected_atom_count,
+                )
+                logger.info(
+                    'Rule "%s": exact atom groups selected for %s: %s',
+                    rule_name,
+                    selected_clause,
                     _format_group_atoms(plan, selected_group_ids),
                 )
                 logger.debug(
@@ -515,10 +577,19 @@ def _broad_phase_search(
                             )
                         )
 
+                    fallback_group_ids = set(range(len(plan.groups)))
                     logger.info(
-                        'Rule "%s": broad-phase groups and atoms (full fallback): %s',
+                        'Rule "%s": broad-phase selection: no complete mandatory OR clause '
+                        "could be selected because at least one relevant clause contained an "
+                        "unrecognised condition, a non-string alternative, or a string without "
+                        "usable atoms. Falling back to OR-searching every available atom group "
+                        "instead of trusting a partial clause or the parser's required_groups.",
                         rule_name,
-                        _format_group_atoms(plan, set(range(len(plan.groups)))),
+                    )
+                    logger.info(
+                        'Rule "%s": exact atom groups selected by the full fallback: %s',
+                        rule_name,
+                        _format_group_atoms(plan, fallback_group_ids),
                     )
                     logger.debug(
                         'Rule "%s": unusable mixed/unknown mandatory OR clauses; '
@@ -552,7 +623,14 @@ def _broad_phase_search(
                             )
                         )
                     logger.info(
-                        'Rule "%s": broad-phase groups and atoms (required groups): %s',
+                        'Rule "%s": broad-phase selection: no directly usable required-string '
+                        "plan or complete mandatory OR clause was available. The parser supplied "
+                        "required atom groups, so broad phase will search all of those groups and "
+                        "union their candidate files before narrow-phase verification.",
+                        rule_name,
+                    )
+                    logger.info(
+                        'Rule "%s": exact parser-required atom groups selected: %s',
                         rule_name,
                         _format_group_atoms(plan, required_group_ids),
                     )
@@ -574,10 +652,18 @@ def _broad_phase_search(
                             )
                         )
 
+                    fallback_group_ids = set(range(len(plan.groups)))
                     logger.info(
-                        'Rule "%s": broad-phase groups and atoms (all-groups fallback): %s',
+                        'Rule "%s": broad-phase selection: the condition did not provide any '
+                        "safe required strings, complete mandatory OR clause, or parser-required "
+                        "groups that could reduce the search. Falling back to OR-searching every "
+                        "available atom group so all searchable alternatives are considered.",
                         rule_name,
-                        _format_group_atoms(plan, set(range(len(plan.groups)))),
+                    )
+                    logger.info(
+                        'Rule "%s": exact atom groups selected by the all-groups fallback: %s',
+                        rule_name,
+                        _format_group_atoms(plan, fallback_group_ids),
                     )
                     logger.debug(
                         'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
