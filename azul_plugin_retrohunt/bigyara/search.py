@@ -2,7 +2,8 @@
 
 import binascii
 import ctypes
-import gc
+
+# import gc
 import hashlib
 import logging
 import multiprocessing
@@ -1083,7 +1084,7 @@ def _narrow_phase_search(
         # process_chunk cannot return until ThreadPoolExecutor.__exit__ has run
         # and all worker threads from this chunk have terminated.
         del chunk
-        gc.collect()
+        # gc.collect()
 
         logger.debug(
             "Narrow-phase chunk %d pool exited and memory cleanup completed",
