@@ -988,7 +988,6 @@ def _narrow_phase_search(
     total_files = len(file_to_rules)
     files_complete = 0
     next_progress_percent = 5
-    data_size_per_chunk = 0
 
     progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
 
@@ -1009,7 +1008,6 @@ def _narrow_phase_search(
         nonlocal files_complete
         nonlocal next_progress_percent
         nonlocal query_hash
-        nonlocal data_size_per_chunk
 
         futures = {}
 
@@ -1034,7 +1032,6 @@ def _narrow_phase_search(
                 if stop_event.is_set():
                     raise CancelException("Narrow phase cancelled by user.")
 
-                data_size_per_chunk += data_len
                 files_complete += 1
                 current_percent = (files_complete * 100) // total_files if total_files else 100
 
@@ -1089,8 +1086,7 @@ def _narrow_phase_search(
         )
 
         process_chunk(chunk)
-        logger.info(f"Total size of data per chunk: {data_size_per_chunk / 1024 / 1024}")
-        data_size_per_chunk = 0
+
         # process_chunk cannot return until ThreadPoolExecutor.__exit__ has run
         # and all worker threads from this chunk have terminated.
         del chunk
