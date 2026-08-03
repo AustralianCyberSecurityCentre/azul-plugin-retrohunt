@@ -22,7 +22,7 @@ class RetrohuntSettings(BaseSettings):
         """Settings for the BigGrep and Narrow phase search."""
 
         max_thread_count: int = Field(5, alias="MAX_THREAD_COUNT")
-        chunk_size: int = Field(250, alias="CHUNK_SIZE")
+        chunk_size: int = Field(50, alias="CHUNK_SIZE")
 
     class Indexer(BaseModel):
         """Nested configuration for indexers."""

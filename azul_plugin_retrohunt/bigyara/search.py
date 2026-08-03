@@ -1,9 +1,6 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
-import ctypes
-
-# import gc
 import hashlib
 import logging
 import multiprocessing
@@ -38,7 +35,6 @@ from .yara_parse import AndNode, OrNode, RuleSearchPlans, StringNode, parse_yara
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
-libc = ctypes.CDLL("libc.so.6")
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -1084,7 +1080,6 @@ def _narrow_phase_search(
         # process_chunk cannot return until ThreadPoolExecutor.__exit__ has run
         # and all worker threads from this chunk have terminated.
         del chunk
-        # gc.collect()
 
         logger.debug(
             "Narrow-phase chunk %d pool exited and memory cleanup completed",
