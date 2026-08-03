@@ -716,7 +716,7 @@ def _build_condition_ast(
         string_names,
     )
 
-    logger.info(
+    logger.debug(
         "Rewritten condition expression: %s",
         expr,
     )
@@ -724,7 +724,7 @@ def _build_condition_ast(
     try:
         condition_ast = _parse_partial_condition(expr)
 
-        logger.info(
+        logger.debug(
             "Partial condition AST: %s",
             condition_ast,
         )
