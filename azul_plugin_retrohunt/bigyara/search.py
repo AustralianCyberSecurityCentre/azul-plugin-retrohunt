@@ -917,8 +917,6 @@ def _narrow_phase_search(
             compiled_yara_rules[rule_name] = yara.compile(source=content)
 
     # Bind metric children once instead of performing label lookups per file.
-    io_duration_metric = prom_narrow_io_duration.labels(query_hash=query_hash)
-    io_bytes_metric = prom_narrow_io_bytes.labels(query_hash=query_hash)
     missing_files_metric = prom_missing_files.labels(query_hash=query_hash)
     cpu_duration_metrics = {
         rule_name: prom_narrow_cpu_duration.labels(
@@ -940,18 +938,18 @@ def _narrow_phase_search(
         if stop_event.is_set():
             raise CancelException("Narrow phase cancelled by user.")
         cfg = file_config.get(file_path)
-        with io_duration_metric.time():
-            data = data_callback(file_path, cfg)
-
+        io_start = time.time()
+        data = data_callback(file_path, cfg)
+        io_duration = time.time() - io_start
         # Cancellation may have been requested while the dispatcher call was in progress.
         if stop_event.is_set():
             raise CancelException("Narrow phase cancelled by user.")
-
+        data_len = 0
         if data:
-            io_bytes_metric.inc(len(data))
+            data_len = len(data)
         else:
             missing_files_metric.inc()
-            return ("missing", file_path, rules_for_file, None)
+            return ("missing", file_path, rules_for_file, None, io_duration, data_len)
 
         results = []
         for rule_name in rules_for_file:
@@ -974,7 +972,7 @@ def _narrow_phase_search(
 
             results.append((rule_name, matched))
         data = None
-        return ("ok", file_path, rules_for_file, results)
+        return ("ok", file_path, rules_for_file, results, io_duration, data_len)
 
     def worker_task(task: tuple[str, set[str]]):
         file_path, rules_for_file = task
@@ -1006,6 +1004,7 @@ def _narrow_phase_search(
         nonlocal total_jobs
         nonlocal files_complete
         nonlocal next_progress_percent
+        nonlocal query_hash
 
         futures = {}
 
@@ -1014,10 +1013,18 @@ def _narrow_phase_search(
 
             for future in as_completed(futures):
                 try:
-                    status, file_path, rules_for_file, results = future.result()
+                    status, file_path, rules_for_file, results, io_duration, data_len = future.result()
                 finally:
                     # Do not retain completed Future objects and their results.
                     futures.pop(future, None)
+
+                prom_narrow_io_duration.labels(
+                    query_hash=query_hash,
+                ).observe(io_duration)
+
+                prom_narrow_io_bytes.labels(
+                    query_hash=query_hash,
+                ).inc(data_len)
 
                 if stop_event.is_set():
                     raise CancelException("Narrow phase cancelled by user.")
