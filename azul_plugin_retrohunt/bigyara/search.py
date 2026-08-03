@@ -1,6 +1,7 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
+import gc
 import hashlib
 import logging
 import multiprocessing
@@ -927,8 +928,10 @@ def _narrow_phase_search(
     }
 
     settings = RetrohuntSettings()
-    chunk_size = settings.search_settings.chunk_size
-    logger.debug("Narrow chunk size %d", chunk_size)
+    processes = settings.search_settings.max_thread_count
+    # process max_thread_count + 1 files per chunk
+    chunk_size = processes + 1
+    logger.info(f"Processing {chunk_size} files per chunk")
     # Split the files to process into smaller chunks
     chunks = chunk_dict(file_to_rules, chunk_size)
 
@@ -994,7 +997,7 @@ def _narrow_phase_search(
         total_files,
         total_jobs,
     )
-    processes = settings.search_settings.max_thread_count
+
     # Stream completed results from a fixed-size thread pool.
     # Number of threads used based on available memory in the container.
     logger.debug("Initiating narrow search with %d threads", processes)
@@ -1091,7 +1094,7 @@ def _narrow_phase_search(
         # process_chunk cannot return until ThreadPoolExecutor.__exit__ has run
         # and all worker threads from this chunk have terminated.
         del chunk
-
+        gc.collect()
         logger.debug(
             "Narrow-phase chunk %d pool exited and memory cleanup completed",
             chunk_number,
