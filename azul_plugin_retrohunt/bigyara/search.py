@@ -950,7 +950,8 @@ def _narrow_phase_search(
         else:
             missing_files_metric.inc()
             return ("missing", file_path, rules_for_file, None, io_duration, data_len)
-
+        logger.info(f'raw len {data_len}')
+        logger.info(f'Data length for file: {data_len / 1024 / 1024}')
         results = []
         for rule_name in rules_for_file:
             if stop_event.is_set():
