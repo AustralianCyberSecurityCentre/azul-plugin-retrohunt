@@ -4,12 +4,12 @@ import binascii
 import gc
 import hashlib
 import logging
-import multiprocessing
 import os
 import subprocess  # noqa: S404  # nosec: B404
+import tempfile
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from itertools import islice
 from threading import Event
 
@@ -323,7 +323,7 @@ def _format_or_clause(plan, group_ids: list[int]) -> str:
 
 _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH = 4
 _DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX = 64
-_DEFAULT_MAX_BROAD_PHASE_WORKERS = 2
+_DEFAULT_MAX_BROAD_PHASE_WORKERS = 1
 _DEFAULT_MAX_BROAD_PHASE_TASKS = 10_000
 
 
@@ -473,15 +473,48 @@ def _run_bgparse_task(
     rule_name,
     search_id,
     search_string,
+    query_hash,
+    store_config,
+    allowed_paths,
 ):
-    """Worker function executed in subprocess pool."""
-    cmd = f"{bgparse_exec} {search_string}{index}"
+    """Run one bgparse process and stream its output into parsed results.
 
-    process = subprocess.run(  # noqa S602
-        cmd,
-        shell=True,
-        capture_output=True,
-    )
+    stdout is consumed line by line instead of being retained as one large
+    bytes object. stderr is written to a temporary file so neither pipe can
+    fill while bgparse is running.
+    """
+    cmd = f"{bgparse_exec} {search_string}{index}"
+    task_config: FileConfig = {}
+
+    with tempfile.TemporaryFile() as stderr_file:
+        process = subprocess.Popen(  # noqa: S602  # nosec: B602
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+        )
+
+        if process.stdout is None:
+            process.terminate()
+            process.wait()
+            raise BiggrepException("bgparse stdout pipe was not created.")
+
+        try:
+            new_matches, task_config = _process_bgparse_lines(
+                process.stdout,
+                rule_name,
+                task_config,
+                query_hash=query_hash,
+                index_path=index,
+                store_config=store_config,
+                allowed_paths=allowed_paths,
+            )
+        finally:
+            process.stdout.close()
+
+        returncode = process.wait()
+        stderr_file.seek(0)
+        stderr = stderr_file.read()
 
     if stop_event.is_set():
         raise CancelException("Broadphase cancelled by user.")
@@ -491,16 +524,17 @@ def _run_bgparse_task(
         search_id,
         index,
         search_string,
-        process.returncode,
-        process.stdout,
-        process.stderr,
+        returncode,
+        new_matches,
+        task_config,
+        stderr,
     )
 
 
 def _run_bgparse_task_args(
-    task: tuple[str, str, str, int, str],
+    task: tuple,
 ):
-    """Unpack a broad-phase task for multiprocessing.imap_unordered."""
+    """Unpack a broad-phase task for the bounded thread executor."""
     return _run_bgparse_task(*task)
 
 
@@ -544,7 +578,7 @@ def _broad_phase_search(
         "max_broad_phase_tasks",
         _DEFAULT_MAX_BROAD_PHASE_TASKS,
     )
-    broad_phase_workers = min(configured_broad_workers, multiprocessing.cpu_count())
+    broad_phase_workers = min(configured_broad_workers, os.cpu_count() or 1)
 
     # Each rule plan contains one or more stages. Searches within a stage are
     # OR alternatives. Required-string stages are intersected with one another.
@@ -841,52 +875,67 @@ def _broad_phase_search(
     rule_matches: RuleFileMatches = {}
     start = time.time()
 
-    with multiprocessing.Pool(processes=broad_phase_workers) as pool:
-        for rule_name, rule_plan in broad_plans.items():
-            combine = rule_plan["combine"]
-            rule_candidates: set[str] | None = None
-            rule_config: FileConfig = {}
+    for rule_name, rule_plan in broad_plans.items():
+        combine = rule_plan["combine"]
+        rule_candidates: set[str] | None = None
+        rule_config: FileConfig = {}
 
-            for stage_number, stage in enumerate(rule_plan["stages"], start=1):
-                stage_searches = stage["searches"]
-                stage_task_count = len(indices) * len(stage_searches)
-                stage_matches: set[str] = set()
+        for stage_number, stage in enumerate(rule_plan["stages"], start=1):
+            stage_searches = stage["searches"]
+            stage_task_count = len(indices) * len(stage_searches)
+            stage_matches: set[str] = set()
+            collect_stage_config = combine == "union" or stage_number == 1
 
-                def iter_stage_tasks(
-                    stage_searches=stage_searches,
-                    rule_name=rule_name,
-                ):
-                    for index in indices:
-                        for search_id, search_string in stage_searches:
-                            yield (
-                                bgparse_exec,
-                                index,
-                                rule_name,
-                                search_id,
-                                search_string,
-                            )
+            # For later mandatory-string stages, paths outside the current
+            # intersection can never reach narrow phase. Filtering them while
+            # stdout is streamed prevents large temporary stage result sets.
+            allowed_paths = rule_candidates if combine == "intersection" and rule_candidates is not None else None
 
-                # Keep chunksize at one. Each result may contain a large
-                # captured bgparse stdout buffer; batching results in worker
-                # processes can multiply peak memory usage.
-                result_iterator = pool.imap_unordered(
-                    _run_bgparse_task_args,
-                    iter_stage_tasks(),
-                    chunksize=1,
-                )
+            def iter_stage_tasks(
+                stage_searches=stage_searches,
+                rule_name=rule_name,
+                collect_stage_config=collect_stage_config,
+                allowed_paths=allowed_paths,
+            ):
+                for index in indices:
+                    for search_id, search_string in stage_searches:
+                        yield (
+                            bgparse_exec,
+                            index,
+                            rule_name,
+                            search_id,
+                            search_string,
+                            query_hash,
+                            collect_stage_config,
+                            allowed_paths,
+                        )
+
+            task_iterator = iter(iter_stage_tasks())
+            pending = {}
+
+            # Use threads only to wait on independent bgparse subprocesses.
+            # Unlike multiprocessing.Pool, this does not retain forked Python
+            # workers or pickle complete stdout buffers between processes.
+            # The executor is deliberately recreated for every stage so any
+            # Future-held memory is released before the next intersection.
+            with ThreadPoolExecutor(max_workers=broad_phase_workers) as executor:
+                for _ in range(min(broad_phase_workers, stage_task_count)):
+                    try:
+                        task = next(task_iterator)
+                    except StopIteration:
+                        break
+                    pending[executor.submit(_run_bgparse_task_args, task)] = task
 
                 stage_complete = 0
-                collect_stage_config = combine == "union" or stage_number == 1
 
-                while stage_complete < stage_task_count:
-                    try:
-                        timeout_next = getattr(result_iterator, "next", None)
-                        if callable(timeout_next):
-                            result = timeout_next(timeout=0.5)
-                        else:
-                            result = next(result_iterator)
+                while pending:
+                    completed_futures, _ = wait(
+                        tuple(pending),
+                        timeout=0.5,
+                        return_when=FIRST_COMPLETED,
+                    )
 
-                    except multiprocessing.TimeoutError:
+                    if not completed_futures:
                         progress_callback(
                             SearchPhaseEnum.BROAD_PHASE,
                             searches_complete,
@@ -897,130 +946,138 @@ def _broad_phase_search(
                             raise CancelException("Broadphase cancelled by user.") from None
                         continue
 
-                    except StopIteration as err:
-                        raise BiggrepException(
-                            "Broad-phase result iterator ended before all tasks completed."
-                        ) from err
-
-                    (
-                        completed_rule_name,
-                        _search_id,
-                        index,
-                        search_string,
-                        returncode,
-                        stdout,
-                        stderr,
-                    ) = result
-
-                    if returncode != 0:
-                        raise BiggrepException(
-                            f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
-                        )
-
-                    if b"<error>" in stderr:
-                        error_text = stderr.decode(errors="replace")
-                        error_message = error_text.split("<error>", 1)[1]
-                        if ":" in error_message:
-                            error_message = error_message.split(":", 1)[1]
-                        error_message = error_message.split("\n", 1)[0]
-                        raise BiggrepException(
-                            f"bgparse error:{error_message} - errored while "
-                            f"searching for {completed_rule_name} in {index}"
-                        )
-
-                    if collect_stage_config:
-                        new_matches, rule_config = _process_bgparse_output(
-                            stdout,
+                    for future in completed_futures:
+                        pending.pop(future, None)
+                        (
                             completed_rule_name,
-                            rule_config,
-                            query_hash=query_hash,
-                            index_path=index,
-                        )
-                    else:
-                        # The first required-string stage already captured
-                        # configs for every path that can survive later
-                        # intersections. Do not retain eliminated-stage configs.
-                        new_matches, _ = _process_bgparse_output(
-                            stdout,
-                            completed_rule_name,
-                            {},
-                            query_hash=query_hash,
-                            index_path=index,
-                            store_config=False,
-                        )
+                            _search_id,
+                            index,
+                            search_string,
+                            returncode,
+                            new_matches,
+                            task_config,
+                            stderr,
+                        ) = future.result()
 
-                    stage_matches.update(new_matches)
-                    stage_complete += 1
-                    searches_complete += 1
+                        if returncode != 0:
+                            raise BiggrepException(
+                                f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
+                            )
 
-                    progress_callback(
-                        SearchPhaseEnum.BROAD_PHASE,
-                        searches_complete,
-                        search_count,
-                        (completed_rule_name, new_matches),
-                    )
+                        if b"<error>" in stderr:
+                            error_text = stderr.decode(errors="replace")
+                            error_message = error_text.split("<error>", 1)[1]
+                            if ":" in error_message:
+                                error_message = error_message.split(":", 1)[1]
+                            error_message = error_message.split("\n", 1)[0]
+                            raise BiggrepException(
+                                f"bgparse error:{error_message} - errored while "
+                                f"searching for {completed_rule_name} in {index}"
+                            )
 
-                    current_percent = (searches_complete * 100) // search_count
-                    while current_percent >= next_progress_percent:
-                        logger.info(
-                            "Broad search %d%% complete: %d/%d tasks processed",
-                            next_progress_percent,
+                        stage_matches.update(new_matches)
+
+                        if task_config:
+                            for path, cfg in task_config.items():
+                                rule_config.setdefault(path, cfg)
+
+                        stage_complete += 1
+                        searches_complete += 1
+
+                        progress_callback(
+                            SearchPhaseEnum.BROAD_PHASE,
                             searches_complete,
                             search_count,
+                            (completed_rule_name, new_matches),
                         )
-                        next_progress_percent += 20
 
-                    if stop_event.is_set():
-                        raise CancelException("Broadphase cancelled by user.")
+                        current_percent = (searches_complete * 100) // search_count
+                        while current_percent >= next_progress_percent:
+                            logger.info(
+                                "Broad search %d%% complete: %d/%d tasks processed",
+                                next_progress_percent,
+                                searches_complete,
+                                search_count,
+                            )
+                            next_progress_percent += 20
 
-                if combine == "intersection":
-                    if rule_candidates is None:
-                        rule_candidates = stage_matches
-                    else:
-                        rule_candidates.intersection_update(stage_matches)
+                        if stop_event.is_set():
+                            raise CancelException("Broadphase cancelled by user.")
 
-                    # Only paths surviving all completed mandatory-string stages
-                    # need configs for narrow phase.
-                    if rule_config:
-                        for path in list(rule_config):
-                            if path not in rule_candidates:
-                                del rule_config[path]
+                        try:
+                            task = next(task_iterator)
+                        except StopIteration:
+                            task = None
 
-                    logger.info(
-                        'Rule "%s": mandatory string %s OR-union produced %d '
-                        "candidates; intersection after %d/%d strings contains %d.",
-                        rule_name,
-                        stage["label"],
-                        len(stage_matches),
-                        stage_number,
-                        len(rule_plan["stages"]),
-                        len(rule_candidates),
-                    )
+                        if task is not None:
+                            pending[executor.submit(_run_bgparse_task_args, task)] = task
+
+                        del new_matches
+                        del task_config
+                        del stderr
+
+            if stage_complete != stage_task_count:
+                raise BiggrepException(
+                    f"Broad-phase stage completed {stage_complete} of {stage_task_count} expected tasks."
+                )
+
+            del pending
+            del task_iterator
+            gc.collect()
+
+            if combine == "intersection":
+                if rule_candidates is None:
+                    rule_candidates = stage_matches
                 else:
-                    if rule_candidates is None:
-                        rule_candidates = stage_matches
-                    else:
-                        rule_candidates.update(stage_matches)
+                    rule_candidates.intersection_update(stage_matches)
 
-                del stage_matches
+                if rule_config:
+                    for path in list(rule_config):
+                        if path not in rule_candidates:
+                            del rule_config[path]
 
-            final_candidates = rule_candidates or set()
-            rule_matches[rule_name] = list(final_candidates)
+                logger.info(
+                    'Rule "%s": mandatory string %s OR-union produced %d '
+                    "relevant candidates; intersection after %d/%d strings "
+                    "contains %d.",
+                    rule_name,
+                    stage["label"],
+                    len(stage_matches),
+                    stage_number,
+                    len(rule_plan["stages"]),
+                    len(rule_candidates),
+                )
+            else:
+                if rule_candidates is None:
+                    rule_candidates = stage_matches
+                else:
+                    rule_candidates.update(stage_matches)
 
-            for path in final_candidates:
-                if path in rule_config:
-                    file_config[path] = rule_config[path]
-
+            del stage_matches
+            gc.collect()
             logger.debug(
-                'Rule "%s": broad-phase mode %s produced %d final candidates',
+                'Rule "%s": broad-phase stage %d executor exited and memory cleanup completed',
                 rule_name,
-                rule_plan["mode"],
-                len(final_candidates),
+                stage_number,
             )
 
-        duration = time.time() - start
-        prom_bgparse_duration.labels(query_hash=query_hash).observe(duration)
-        logger.debug("Total BigGrep parse time: %s", duration)
+        final_candidates = rule_candidates or set()
+        rule_matches[rule_name] = list(final_candidates)
+
+        for path in final_candidates:
+            if path in rule_config:
+                file_config[path] = rule_config[path]
+
+        logger.debug(
+            'Rule "%s": broad-phase mode %s produced %d final candidates',
+            rule_name,
+            rule_plan["mode"],
+            len(final_candidates),
+        )
+
+    duration = time.time() - start
+    prom_bgparse_duration.labels(query_hash=query_hash).observe(duration)
+    logger.debug("Total BigGrep parse time: %s", duration)
 
     logger.debug("All index searches completed")
 
@@ -1028,6 +1085,52 @@ def _broad_phase_search(
         raise NoIndexMatchesException("Search aborted due to no index matches.")
 
     return rule_matches, file_config
+
+
+def _process_bgparse_lines(
+    lines,
+    rule_name: str,
+    file_config: FileConfig,
+    query_hash: str,
+    index_path: str,
+    store_config: bool = True,
+    allowed_paths: set[str] | None = None,
+) -> tuple[list[str], FileConfig]:
+    """Parse an iterable of bgparse output lines incrementally."""
+    new_match_paths = []
+
+    for line in lines:
+        line = line.rstrip()
+        if not line:
+            continue
+
+        parts = line.split(b",")
+        path = parts[0].decode()
+
+        if allowed_paths is not None and path not in allowed_paths:
+            continue
+
+        new_match_paths.append(path)
+
+        if store_config and path not in file_config:
+            cfg = {}
+            for kv in parts[1:-1]:
+                key_value = kv.split(b"=", 1)
+                if len(key_value) != 2:
+                    prom_bgparse_errors.labels(
+                        query_hash=query_hash,
+                        index_path=index_path,
+                        rule_name=rule_name,
+                    ).inc()
+                    raise FileConfigReadException(f"Could not read file config from index for {path}")
+                key, value = key_value
+                cfg[key] = value
+            file_config[path] = cfg
+
+        if stop_event.is_set():
+            raise CancelException("Broadphase cancelled by user.")
+
+    return new_match_paths, file_config
 
 
 def _process_bgparse_output(
@@ -1038,36 +1141,15 @@ def _process_bgparse_output(
     index_path: str,
     store_config: bool = True,
 ) -> tuple[list[str], FileConfig]:
-    """Turn bgparse stdout into a list of matching files and their config."""
-    new_match_paths = []
-
-    if output:
-        for line in output.splitlines():
-            line = line.rstrip()
-            if not line:
-                continue
-
-            parts = line.split(b",")
-            path = parts[0].decode()
-
-            new_match_paths.append(path)
-
-            if store_config and path not in file_config:
-                cfg = {}
-                for kv in parts[1:-1]:
-                    key_value = kv.split(b"=", 1)
-                    if len(key_value) != 2:
-                        prom_bgparse_errors.labels(
-                            query_hash=query_hash,
-                            index_path=index_path,
-                            rule_name=rule_name,
-                        ).inc()
-                        raise FileConfigReadException(f"Could not read file config from index for {path}")
-                    key, value = key_value
-                    cfg[key] = value
-                file_config[path] = cfg
-
-    return new_match_paths, file_config
+    """Compatibility wrapper for tests and callers supplying complete bytes."""
+    return _process_bgparse_lines(
+        output.splitlines(),
+        rule_name,
+        file_config,
+        query_hash=query_hash,
+        index_path=index_path,
+        store_config=store_config,
+    )
 
 
 def yara_callback(_data):
