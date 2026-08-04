@@ -337,6 +337,7 @@ _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH = 4
 _DEFAULT_MAX_REQUIRED_AND_COMBINATIONS = 32
 _DEFAULT_MAX_ATOMS_PER_AND_SEARCH = 16
 _DEFAULT_MAX_BROAD_PHASE_WORKERS = 2
+_DEFAULT_MAX_BROAD_PHASE_TASKS = 10_000
 
 
 def _positive_int_setting(settings, name: str, default: int) -> int:
@@ -560,6 +561,11 @@ def _broad_phase_search(
         settings,
         "max_broad_phase_workers",
         _DEFAULT_MAX_BROAD_PHASE_WORKERS,
+    )
+    max_broad_phase_tasks = _positive_int_setting(
+        settings,
+        "max_broad_phase_tasks",
+        _DEFAULT_MAX_BROAD_PHASE_TASKS,
     )
     broad_phase_workers = min(configured_broad_workers, multiprocessing.cpu_count())
 
@@ -868,6 +874,15 @@ def _broad_phase_search(
             raise NoIndexMatchesException("Search aborted due to no index matches.")
 
         raise NoAtomException("Broad-phase planner generated no usable atom searches.")
+
+    if search_count > max_broad_phase_tasks:
+        raise BiggrepException(
+            f"Broad-phase plan would generate {search_count} tasks across "
+            f"{len(indices)} indexes, exceeding the configured "
+            f"max_broad_phase_tasks limit of {max_broad_phase_tasks}. "
+            "Reduce the number of rules or searchable atom groups, or increase "
+            "the limit if the additional broad-phase load is acceptable."
+        )
 
     def iter_tasks():
         """Yield broad-phase tasks without retaining an index-expanded task list."""
