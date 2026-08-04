@@ -10,8 +10,8 @@ import subprocess  # noqa: S404  # nosec: B404
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
 from itertools import islice, product
+from math import prod
 from threading import Event
 
 import yara
@@ -33,7 +33,7 @@ from . import (
 )
 from .env import executables
 from .suricata_parse import parse_suricata_rules
-from .yara_parse import RuleSearchPlans, parse_yara_rules
+from .yara_parse import AndNode, OrNode, RuleSearchPlans, StringNode, parse_yara_rules
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
@@ -333,13 +333,167 @@ def _format_or_clause_choices(plan, clauses: list[list[int]]) -> str:
     return "; ".join(choices)
 
 
+_DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH = 4
+_DEFAULT_MAX_REQUIRED_AND_COMBINATIONS = 32
+_DEFAULT_MAX_ATOMS_PER_AND_SEARCH = 16
+_DEFAULT_MAX_BROAD_PHASE_WORKERS = 2
+
+
+def _positive_int_setting(settings, name: str, default: int) -> int:
+    """Read a positive integer setting, falling back safely when invalid."""
+    value = getattr(settings, name, default)
+
+    try:
+        parsed_value = int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid %s=%r; using default %d",
+            name,
+            value,
+            default,
+        )
+        return default
+
+    if parsed_value < 1:
+        logger.warning(
+            "Invalid %s=%r; value must be at least 1. Using default %d",
+            name,
+            value,
+            default,
+        )
+        return default
+
+    return parsed_value
+
+
+def _bgparse_search_string(atoms: list[bytes]) -> str:
+    """Return deduplicated bgparse -s arguments for an AND atom group."""
+    unique_atoms = dict.fromkeys(atoms)
+    return "".join(f"-s{binascii.b2a_hex(atom).upper().decode()} " for atom in unique_atoms)
+
+
+def _select_required_string_options(
+    plan,
+    max_strings: int,
+    max_combinations: int,
+    max_atoms: int,
+):
+    """Select a bounded, safe subset of mandatory YARA strings.
+
+    Every returned string is mandatory in the original condition, so searching
+    only this subset can increase narrow-phase candidates but cannot exclude a
+    genuine rule match. Atom usage is estimated as the largest group for each
+    selected string because one group option is used per generated search.
+    """
+    candidates = []
+    unusable_strings = []
+
+    for string_name in sorted(plan.required_strings):
+        valid_group_ids = list(
+            dict.fromkeys(
+                group_idx
+                for group_idx in plan.string_groups.get(string_name, [])
+                if 0 <= group_idx < len(plan.groups) and plan.groups[group_idx]
+            )
+        )
+
+        if not valid_group_ids:
+            unusable_strings.append(string_name)
+            continue
+
+        max_group_atom_count = max(len(plan.groups[group_idx]) for group_idx in valid_group_ids)
+        longest_atom_size = max(len(atom) for group_idx in valid_group_ids for atom in plan.groups[group_idx])
+        first_group_idx = min(valid_group_ids)
+        candidates.append(
+            (
+                string_name,
+                valid_group_ids,
+                max_group_atom_count,
+                longest_atom_size,
+                first_group_idx,
+            )
+        )
+
+    if not candidates:
+        return [], unusable_strings, 0, 0, False
+
+    full_combination_count = prod(len(candidate[1]) for candidate in candidates)
+    full_max_atom_count = sum(candidate[2] for candidate in candidates)
+    full_plan_within_limits = (
+        len(candidates) <= max_strings
+        and full_combination_count <= max_combinations
+        and full_max_atom_count <= max_atoms
+    )
+
+    if full_plan_within_limits:
+        selected = sorted(candidates, key=lambda candidate: (candidate[4], candidate[0]))
+        return (
+            selected,
+            unusable_strings,
+            full_combination_count,
+            full_max_atom_count,
+            False,
+        )
+
+    # Prefer strings with fewer alternatives and fewer atoms. Longer atoms are
+    # used as a stable secondary preference when the search cost is otherwise
+    # equal, followed by parser group order for deterministic output.
+    ranked_candidates = sorted(
+        candidates,
+        key=lambda candidate: (
+            len(candidate[1]),
+            candidate[2],
+            -candidate[3],
+            candidate[4],
+            candidate[0],
+        ),
+    )
+
+    selected = []
+    selected_combination_count = 1
+    selected_max_atom_count = 0
+
+    for candidate in ranked_candidates:
+        if len(selected) >= max_strings:
+            break
+
+        next_combination_count = selected_combination_count * len(candidate[1])
+        next_max_atom_count = selected_max_atom_count + candidate[2]
+
+        if next_combination_count > max_combinations or next_max_atom_count > max_atoms:
+            continue
+
+        selected.append(candidate)
+        selected_combination_count = next_combination_count
+        selected_max_atom_count = next_max_atom_count
+
+    forced_single_string = False
+    if not selected:
+        # The limits are deliberately soft for the first mandatory string. A
+        # usable broad-phase filter is safer than generating no search at all,
+        # and this still avoids the unbounded multi-string Cartesian product.
+        selected = [ranked_candidates[0]]
+        selected_combination_count = len(selected[0][1])
+        selected_max_atom_count = selected[0][2]
+        forced_single_string = True
+
+    selected.sort(key=lambda candidate: (candidate[4], candidate[0]))
+    return (
+        selected,
+        unusable_strings,
+        full_combination_count,
+        full_max_atom_count,
+        forced_single_string,
+    )
+
+
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
 def _run_bgparse_task(
     bgparse_exec,
     index,
     rule_name,
-    group_idx,
+    search_id,
     search_string,
 ):
     """Worker function executed in subprocess pool."""
@@ -356,7 +510,7 @@ def _run_bgparse_task(
 
     return (
         rule_name,
-        group_idx,
+        search_id,
         index,
         search_string,
         process.returncode,
@@ -381,127 +535,362 @@ def _broad_phase_search(
 ) -> tuple[RuleFileMatches, FileConfig]:
 
     if query_type == QueryTypeEnum.SURICATA:
-        # not supporting Suricata yet
-        return
+        raise NotImplementedError("Suricata broad-phase search is not implemented yet.")
 
     bgparse_exec = executables["bgparse"]
-    logger.info("Rule search plans broad phase: %s", rule_search_plans)
+    logger.debug("Rule search plans broad phase: %s", rule_search_plans)
+
+    settings = RetrohuntSettings().search_settings
+    max_required_strings = _positive_int_setting(
+        settings,
+        "max_required_strings_per_and_search",
+        _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH,
+    )
+    max_required_combinations = _positive_int_setting(
+        settings,
+        "max_required_and_combinations",
+        _DEFAULT_MAX_REQUIRED_AND_COMBINATIONS,
+    )
+    max_atoms_per_and_search = _positive_int_setting(
+        settings,
+        "max_atoms_per_and_search",
+        _DEFAULT_MAX_ATOMS_PER_AND_SEARCH,
+    )
+    configured_broad_workers = _positive_int_setting(
+        settings,
+        "max_broad_phase_workers",
+        _DEFAULT_MAX_BROAD_PHASE_WORKERS,
+    )
+    broad_phase_workers = min(configured_broad_workers, multiprocessing.cpu_count())
 
     search_strings: dict[str, list[tuple[int, str]]] = {}
     broad_phase_modes: dict[str, str] = {}
+    selected_required_or_clauses: dict[str, list[int]] = {}
 
     for rule_name, plan in rule_search_plans.items():
         search_strings[rule_name] = []
 
-        required_string_group_options: list[list[int]] = []
-        required_strings_usable = bool(getattr(plan, "required_strings", None))
+        selected_required_strings = []
+        unusable_required_strings = []
+        full_required_combination_count = 0
+        full_required_max_atom_count = 0
+        forced_single_required_string = False
 
-        if required_strings_usable:
-            for string_name in sorted(plan.required_strings):
-                valid_group_ids = [
-                    group_idx
-                    for group_idx in plan.string_groups.get(string_name, [])
-                    if 0 <= group_idx < len(plan.groups)
-                ]
+        if getattr(plan, "required_strings", None):
+            (
+                selected_required_strings,
+                unusable_required_strings,
+                full_required_combination_count,
+                full_required_max_atom_count,
+                forced_single_required_string,
+            ) = _select_required_string_options(
+                plan,
+                max_required_strings,
+                max_required_combinations,
+                max_atoms_per_and_search,
+            )
 
-                if not valid_group_ids:
-                    required_strings_usable = False
-                    logger.warning(
-                        'Rule "%s": required string %s has no usable atom groups',
-                        rule_name,
-                        string_name,
-                    )
-                    break
-
-                required_string_group_options.append(valid_group_ids)
-
-        if required_strings_usable and required_string_group_options:
+        if selected_required_strings:
             broad_phase_modes[rule_name] = "required_strings"
+            selected_string_names = [candidate[0] for candidate in selected_required_strings]
+            required_string_group_options = [candidate[1] for candidate in selected_required_strings]
+            selected_max_atom_count = sum(candidate[2] for candidate in selected_required_strings)
+            selected_combination_count = prod(len(group_ids) for group_ids in required_string_group_options)
 
             for combination_index, group_combination in enumerate(product(*required_string_group_options)):
-                combined_atoms: list[bytes] = []
-
-                for group_idx in group_combination:
-                    combined_atoms.extend(plan.groups[group_idx])
-
-                unique_atoms = list(dict.fromkeys(combined_atoms))
-                hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in unique_atoms]
-
+                combined_atoms = [atom for group_idx in group_combination for atom in plan.groups[group_idx]]
                 search_id = -(combination_index + 1)
-                search_strings[rule_name].append(
-                    (
-                        search_id,
-                        "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
-                    )
+                search_strings[rule_name].append((search_id, _bgparse_search_string(combined_atoms)))
+
+            selected_group_ids = {
+                group_idx for group_options in required_string_group_options for group_idx in group_options
+            }
+            was_limited = (
+                len(selected_required_strings) < len(plan.required_strings)
+                or bool(unusable_required_strings)
+                or selected_combination_count < full_required_combination_count
+                or selected_max_atom_count < full_required_max_atom_count
+            )
+
+            if was_limited:
+                logger.info(
+                    'Rule "%s": the condition has %d mandatory strings. The complete usable '
+                    "required-string plan would generate %d AND searches per index and use up "
+                    "to %d atoms in a search. Limits are %d strings, %d combinations, and %d "
+                    "atoms. Selected %d mandatory strings (%s), generating %d searches per "
+                    "index. This is safe: broad phase may return more candidates, but narrow "
+                    "phase still evaluates the complete YARA rule.",
+                    rule_name,
+                    len(plan.required_strings),
+                    full_required_combination_count,
+                    full_required_max_atom_count,
+                    max_required_strings,
+                    max_required_combinations,
+                    max_atoms_per_and_search,
+                    len(selected_required_strings),
+                    ", ".join(selected_string_names),
+                    selected_combination_count,
                 )
+            else:
+                logger.info(
+                    'Rule "%s": all %d mandatory strings fit the configured AND-search limits; '
+                    "generated %d combined searches per index.",
+                    rule_name,
+                    len(selected_required_strings),
+                    selected_combination_count,
+                )
+
+            if unusable_required_strings:
+                logger.info(
+                    'Rule "%s": mandatory strings without usable atom groups were not used in '
+                    "broad phase: %s. Other mandatory strings remain safe filters, and narrow "
+                    "phase will still verify these omitted strings.",
+                    rule_name,
+                    ", ".join(unusable_required_strings),
+                )
+
+            if forced_single_required_string:
+                logger.warning(
+                    'Rule "%s": even the lowest-cost mandatory string exceeded at least one '
+                    "configured AND-search limit. Selected %s alone to avoid generating no broad "
+                    "search; consider increasing the relevant limit if this search is acceptable.",
+                    rule_name,
+                    selected_string_names[0],
+                )
+
             logger.info(
-                'Rule "%s": required_strings present; generated %d combined AND bgparse searches covering %d required strings',
+                'Rule "%s": exact atom groups selected: %s',
+                rule_name,
+                _format_group_atoms(plan, selected_group_ids),
+            )
+            logger.debug(
+                'Rule "%s": required-string mode generated %d combined AND searches '
+                "covering %d of %d mandatory strings",
                 rule_name,
                 len(search_strings[rule_name]),
+                len(selected_required_strings),
                 len(plan.required_strings),
             )
 
         else:
             required_group_ids: set[int] = set()
+            rule_required_or_clauses: list[list[int]] = []
+            unsafe_required_or_clause = False
 
-            if getattr(plan, "required_groups", None):
-                for required_group in plan.required_groups:
-                    for group_idx, actual_group in enumerate(plan.groups):
-                        if set(actual_group) == set(required_group):
-                            required_group_ids.add(group_idx)
+            # Preserve the direct top-level AND/OR structure from the parser.
+            # For ($a or $b) and ($c or $d), this produces two mandatory OR
+            # clauses instead of flattening all four strings into one large OR.
+            condition_ast = getattr(plan, "condition_ast", None)
+            if isinstance(condition_ast, AndNode):
+                for child in condition_ast.children:
+                    if not isinstance(child, OrNode):
+                        continue
+
+                    if not child.children:
+                        unsafe_required_or_clause = True
+                        continue
+
+                    # Only use a clause when every alternative is a searchable
+                    # string. If no other complete mandatory OR clause can be
+                    # selected, mixed/unknown clauses force the full fallback.
+                    if not all(isinstance(sub, StringNode) for sub in child.children):
+                        unsafe_required_or_clause = True
+                        continue
+
+                    clause_group_ids: list[int] = []
+                    clause_usable = True
+
+                    for sub in child.children:
+                        valid_group_ids = [
+                            group_idx
+                            for group_idx in plan.string_groups.get(sub.string_name, [])
+                            if 0 <= group_idx < len(plan.groups)
+                        ]
+
+                        if not valid_group_ids:
+                            clause_usable = False
+                            unsafe_required_or_clause = True
                             break
 
-            required_group_ids = {group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)}
+                        clause_group_ids.extend(valid_group_ids)
 
-            if required_group_ids:
-                broad_phase_modes[rule_name] = "required_groups"
+                    if clause_usable:
+                        unique_clause_group_ids = list(dict.fromkeys(clause_group_ids))
+                        if unique_clause_group_ids:
+                            rule_required_or_clauses.append(unique_clause_group_ids)
 
-                for group_idx in sorted(required_group_ids):
-                    group = plan.groups[group_idx]
-                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
-                    search_strings[rule_name].append(
-                        (
-                            group_idx,
-                            "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
-                        )
-                    )
+            if rule_required_or_clauses:
+                broad_phase_modes[rule_name] = "required_or_clause"
+
+                # Choose one mandatory OR clause before generating any bgparse
+                # tasks. Fewer atom groups means fewer OR-alternative searches.
+                selected_group_ids = min(
+                    rule_required_or_clauses,
+                    key=lambda clause: (
+                        sum(len(plan.groups[group_idx]) for group_idx in clause),
+                        len(clause),
+                        tuple(clause),
+                    ),
+                )
+                selected_required_or_clauses[rule_name] = selected_group_ids
+
+                for group_idx in sorted(selected_group_ids):
+                    search_strings[rule_name].append((group_idx, _bgparse_search_string(plan.groups[group_idx])))
+
+                selected_clause = _format_or_clause(plan, selected_group_ids)
+                selected_atom_count = sum(len(plan.groups[group_idx]) for group_idx in selected_group_ids)
                 logger.info(
-                    'Rule "%s": no usable required_strings; generated %d required_group searches',
+                    'Rule "%s": broad-phase selection: the condition contains %d complete, '
+                    "directly searchable mandatory OR clause(s): %s. Every final match must "
+                    "satisfy each mandatory clause, so searching any one complete clause is safe. "
+                    "Selected %s because it has the lowest search cost (%d groups, %d atoms). "
+                    "This minimises the number of broad-phase searches; it is a task-cost "
+                    "heuristic and does not assume which clause will return the fewest candidates.",
                     rule_name,
+                    len(rule_required_or_clauses),
+                    _format_or_clause_choices(plan, rule_required_or_clauses),
+                    selected_clause,
+                    len(selected_group_ids),
+                    selected_atom_count,
+                )
+                logger.info(
+                    'Rule "%s": exact atom groups selected for %s: %s',
+                    rule_name,
+                    selected_clause,
+                    _format_group_atoms(plan, selected_group_ids),
+                )
+                logger.debug(
+                    'Rule "%s": selected required OR clause groups %s containing %d atoms; '
+                    "generated %d searches instead of searching all %d mandatory OR clauses",
+                    rule_name,
+                    selected_group_ids,
+                    sum(len(plan.groups[group_idx]) for group_idx in selected_group_ids),
                     len(search_strings[rule_name]),
+                    len(rule_required_or_clauses),
                 )
 
             else:
-                broad_phase_modes[rule_name] = "fallback"
+                if unsafe_required_or_clause:
+                    broad_phase_modes[rule_name] = "fallback"
 
-                for group_idx, group in enumerate(plan.groups):
-                    hex_atoms = [binascii.b2a_hex(atom).upper().decode() for atom in group]
-                    search_strings[rule_name].append(
-                        (
-                            group_idx,
-                            "".join(f"-s{hex_atom} " for hex_atom in hex_atoms),
-                        )
+                    for group_idx, group in enumerate(plan.groups):
+                        search_strings[rule_name].append((group_idx, _bgparse_search_string(group)))
+
+                    fallback_group_ids = set(range(len(plan.groups)))
+                    logger.info(
+                        'Rule "%s": broad-phase selection: no complete mandatory OR clause '
+                        "could be selected because at least one relevant clause contained an "
+                        "unrecognised condition, a non-string alternative, or a string without "
+                        "usable atoms. Falling back to OR-searching every available atom group "
+                        "instead of trusting a partial clause or the parser's required_groups.",
+                        rule_name,
+                    )
+                    logger.info(
+                        'Rule "%s": exact atom groups selected by the full fallback: %s',
+                        rule_name,
+                        _format_group_atoms(plan, fallback_group_ids),
+                    )
+                    logger.debug(
+                        'Rule "%s": unusable mixed/unknown mandatory OR clauses; '
+                        "bypassing required_groups and generated %d fallback OR searches",
+                        rule_name,
+                        len(search_strings[rule_name]),
+                    )
+                    continue
+
+                if getattr(plan, "required_groups", None):
+                    for required_group in plan.required_groups:
+                        for group_idx, actual_group in enumerate(plan.groups):
+                            if set(actual_group) == set(required_group):
+                                required_group_ids.add(group_idx)
+                                break
+
+                required_group_ids = {
+                    group_idx for group_idx in required_group_ids if 0 <= group_idx < len(plan.groups)
+                }
+
+                if required_group_ids:
+                    broad_phase_modes[rule_name] = "required_groups"
+
+                    for group_idx in sorted(required_group_ids):
+                        search_strings[rule_name].append((group_idx, _bgparse_search_string(plan.groups[group_idx])))
+                    logger.info(
+                        'Rule "%s": broad-phase selection: no directly usable required-string '
+                        "plan or complete mandatory OR clause was available. The parser supplied "
+                        "required atom groups, so broad phase will search all of those groups and "
+                        "union their candidate files before narrow-phase verification.",
+                        rule_name,
+                    )
+                    logger.info(
+                        'Rule "%s": exact parser-required atom groups selected: %s',
+                        rule_name,
+                        _format_group_atoms(plan, required_group_ids),
+                    )
+                    logger.debug(
+                        'Rule "%s": no usable required_strings/OR clauses; generated %d required_group searches',
+                        rule_name,
+                        len(search_strings[rule_name]),
                     )
 
-                logger.info(
-                    'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
-                    rule_name,
-                    len(search_strings[rule_name]),
-                )
+                else:
+                    broad_phase_modes[rule_name] = "fallback"
 
-    tasks = []
-    for index in indices:
-        for rule_name, grouped_searches in search_strings.items():
-            for search_id, search_string in grouped_searches:
-                tasks.append((index, rule_name, search_id, search_string))
+                    for group_idx, group in enumerate(plan.groups):
+                        search_strings[rule_name].append((group_idx, _bgparse_search_string(group)))
 
-    logger.info("Broad phase generated %d tasks", len(tasks))
-    search_count = len(tasks)
+                    fallback_group_ids = set(range(len(plan.groups)))
+                    logger.info(
+                        'Rule "%s": broad-phase selection: the condition did not provide any '
+                        "safe required strings, complete mandatory OR clause, or parser-required "
+                        "groups that could reduce the search. Falling back to OR-searching every "
+                        "available atom group so all searchable alternatives are considered.",
+                        rule_name,
+                    )
+                    logger.info(
+                        'Rule "%s": exact atom groups selected by the all-groups fallback: %s',
+                        rule_name,
+                        _format_group_atoms(plan, fallback_group_ids),
+                    )
+                    logger.debug(
+                        'Rule "%s": no required_strings/groups; generated %d fallback OR searches',
+                        rule_name,
+                        len(search_strings[rule_name]),
+                    )
+
+    searches_per_index = sum(len(grouped_searches) for grouped_searches in search_strings.values())
+    search_count = len(indices) * searches_per_index
+
+    if search_count == 0:
+        # Preserve the existing plain-string behaviour. String atoms are parsed,
+        # but plain string queries do not currently produce an optimized search
+        # plan, so broad phase has no index matches to return.
+        if query_type == QueryTypeEnum.STRING:
+            raise NoIndexMatchesException("Search aborted due to no index matches.")
+
+        raise NoAtomException("Broad-phase planner generated no usable atom searches.")
+
+    def iter_tasks():
+        """Yield broad-phase tasks without retaining an index-expanded task list."""
+        for index in indices:
+            for rule_name, grouped_searches in search_strings.items():
+                for search_id, search_string in grouped_searches:
+                    yield (
+                        bgparse_exec,
+                        index,
+                        rule_name,
+                        search_id,
+                        search_string,
+                    )
+
+    logger.info(
+        "Broad search starting: %d tasks across %d indexes using up to %d workers",
+        search_count,
+        len(indices),
+        broad_phase_workers,
+    )
     searches_complete = 0
-    percent_complete = 1
     progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
 
-    worker = partial(_run_bgparse_task, bgparse_exec)
     file_config: FileConfig = {}
     search_matches: dict[str, dict[int, set[str]]] = {
         rule_name: {search_id: set() for search_id, _ in grouped_searches}
@@ -510,37 +899,65 @@ def _broad_phase_search(
 
     start = time.time()
 
-    with multiprocessing.Pool() as pool:
-        result_iterator = pool.starmap_async(worker, tasks)
+    next_progress_percent = 20
 
-        while not result_iterator.ready():
-            # This callback checks Redis for an externally requested cancellation.
-            progress_callback(
-                SearchPhaseEnum.BROAD_PHASE,
-                searches_complete,
-                search_count,
-                None,
-            )
-            time.sleep(0.5)
+    with multiprocessing.Pool(processes=broad_phase_workers) as pool:
+        # Match Pool.map's normal batching while still yielding completed
+        # task results incrementally.
+        chunksize = max(
+            1,
+            (search_count + (broad_phase_workers * 4) - 1) // (broad_phase_workers * 4),
+        )
+        result_iterator = pool.imap_unordered(
+            _run_bgparse_task_args,
+            iter_tasks(),
+            chunksize=chunksize,
+        )
 
-        results = result_iterator.get()
+        while searches_complete < search_count:
+            try:
+                timeout_next = getattr(result_iterator, "next", None)
 
-        for (
-            rule_name,
-            search_id,
-            index,
-            search_string,
-            returncode,
-            stdout,
-            stderr,
-        ) in results:
+                if callable(timeout_next):
+                    # Real multiprocessing IMapIterator supports timeout.
+                    result = timeout_next(timeout=0.5)
+                else:
+                    # Unit tests may return a normal generator.
+                    result = next(result_iterator)
+
+            except multiprocessing.TimeoutError:
+                progress_callback(
+                    SearchPhaseEnum.BROAD_PHASE,
+                    searches_complete,
+                    search_count,
+                    None,
+                )
+
+                if stop_event.is_set():
+                    raise CancelException("Broadphase cancelled by user.") from None
+
+                continue
+
+            except StopIteration as err:
+                raise BiggrepException("Broad-phase result iterator ended before all tasks completed.") from err
+
+            (
+                rule_name,
+                search_id,
+                index,
+                search_string,
+                returncode,
+                stdout,
+                stderr,
+            ) = result
+
             if returncode != 0:
                 raise BiggrepException(
                     f"bgparse returned exit code {returncode}. Args: {search_string}{index}\n{stderr}"
                 )
 
             if b"<error>" in stderr:
-                error_message = stderr.decode().split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
+                error_message = stderr.decode(errors="replace").split("<error>", 1)[1].split(":", 1)[1].split("\n")[0]
                 raise BiggrepException(
                     f"bgparse error:{error_message} - errored while searching for {rule_name} in {index}"
                 )
@@ -556,16 +973,23 @@ def _broad_phase_search(
             search_matches[rule_name][search_id].update(new_matches)
             searches_complete += 1
 
-            if searches_complete * percent_complete >= search_count * 0.2 * percent_complete:
-                logger.info(f"Processed {20 * percent_complete} percent of tasks {searches_complete}/{search_count}")
-                percent_complete += 1
-
             progress_callback(
                 SearchPhaseEnum.BROAD_PHASE,
                 searches_complete,
                 search_count,
                 (rule_name, new_matches),
             )
+
+            current_percent = (searches_complete * 100) // search_count if search_count else 100
+
+            while current_percent >= next_progress_percent:
+                logger.info(
+                    "Broad search %d%% complete: %d/%d tasks processed",
+                    next_progress_percent,
+                    searches_complete,
+                    search_count,
+                )
+                next_progress_percent += 20
 
             if stop_event.is_set():
                 raise CancelException("Broadphase cancelled by user.")
@@ -576,31 +1000,44 @@ def _broad_phase_search(
             query_hash=query_hash,
         ).observe(duration)
 
-        logger.debug(f"Total BigGrep parse time: {duration}")
+        logger.debug("Total BigGrep parse time: %s", duration)
 
     logger.debug("All index searches completed")
     rule_matches: RuleFileMatches = {}
 
-    for rule_name, _plan in rule_search_plans.items():
+    for rule_name in search_strings:
         mode = broad_phase_modes[rule_name]
         result_sets = list(search_matches[rule_name].values())
         final_matches = set.union(*result_sets) if result_sets else set()
 
-        if mode == "required_strings":
-            logger.info(
+        if mode == "string":
+            logger.debug(
+                'String search "%s" produced %d candidates',
+                rule_name,
+                len(final_matches),
+            )
+        elif mode == "required_strings":
+            logger.debug(
                 'Rule "%s": %d combined required-string searches produced %d candidates',
                 rule_name,
                 len(result_sets),
                 len(final_matches),
             )
+        elif mode == "required_or_clause":
+            logger.debug(
+                'Rule "%s": selected required OR clause groups %s produced %d candidates',
+                rule_name,
+                selected_required_or_clauses[rule_name],
+                len(final_matches),
+            )
         elif mode == "required_groups":
-            logger.info(
+            logger.debug(
                 'Rule "%s": required_groups OR broad phase produced %d candidates',
                 rule_name,
                 len(final_matches),
             )
         else:
-            logger.info(
+            logger.debug(
                 'Rule "%s": fallback OR over all groups produced %d candidates',
                 rule_name,
                 len(final_matches),
