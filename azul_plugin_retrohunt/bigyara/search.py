@@ -272,27 +272,21 @@ def search(
 
     logger.info("Starting narrow search")
 
-    try:
-        with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
-            rule_matches = _narrow_phase_search(
-                query_type,
-                rule_matches,
-                rule_content,
-                file_config,
-                checked_data_callback,
-                checked_progress_callback,
-                query_hash=query_hash,
-                data_release_callback=checked_data_release_callback,
-            )
-        return rule_matches
-    finally:
-        # This must also run when the match-limit progress callback raises.
-        # Otherwise broad-phase metadata and YARA source dictionaries remain
-        # reachable through the unwinding search frame.
-        file_config.clear()
-        if isinstance(rule_content, dict):
-            rule_content.clear()
-        release_unused_memory()
+    with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
+        rule_matches = _narrow_phase_search(
+            query_type,
+            rule_matches,
+            rule_content,
+            file_config,
+            checked_data_callback,
+            checked_progress_callback,
+            query_hash=query_hash,
+            data_release_callback=checked_data_release_callback,
+        )
+
+    file_config.clear()
+    release_unused_memory()
+    return rule_matches
 
 
 def _get_index_files(directories: list[str], recursive: bool) -> list[str]:
@@ -1465,96 +1459,78 @@ def _narrow_phase_search(
                     rules_for_file = None
                     task = None
         finally:
-            # If a progress callback raises (including the 200-result limit),
-            # stop queued work and wait for currently running workers to leave
-            # data_callback/YARA before releasing their per-file metadata.
-            remaining_futures = list(futures.items())
-
-            for remaining_future, _remaining_task in remaining_futures:
-                remaining_future.cancel()
-
-            if remaining_futures:
-                wait(tuple(future for future, _task in remaining_futures))
-
-            for _remaining_future, remaining_task in remaining_futures:
-                data_release_callback(remaining_task[0], False)
-
-            remaining_futures.clear()
             futures.clear()
 
     batch_count = 0
-    final_matches: RuleFileMatches = {}
 
-    try:
-        # One executor is reused for the entire hunt. Recreating pools for
-        # every tiny chunk creates new native allocator arenas.
-        with ThreadPoolExecutor(max_workers=active_workers) as executor:
-            for batch_count, batch in enumerate(
-                _pop_dict_chunks(file_to_rules, cleanup_batch_size),
-                start=1,
-            ):
-                logger.debug(
-                    "Starting narrow-phase cleanup batch %d containing %d files",
-                    batch_count,
-                    len(batch),
-                )
-
-                try:
-                    process_batch(executor, batch)
-                finally:
-                    # process_batch may leave by exception at the match limit.
-                    # Do not retain the current batch during stack unwinding.
-                    batch.clear()
-
-                release_unused_memory()
-
-                rss_mib = _current_rss_mib()
-                if rss_mib is not None:
-                    logger.debug(
-                        "Narrow-phase cleanup batch %d completed; process RSS %.1f MiB",
-                        batch_count,
-                        rss_mib,
-                    )
-
-        # Convert back to lists and remove empty rules.
-        final_matches = {rule_name: list(paths) for rule_name, paths in rule_matches_sets.items() if paths}
-
-        if final_matches:
-            confirmed_path_matches = sum(len(paths) for paths in final_matches.values())
-            unique_file_names = {os.path.basename(path) for paths in final_matches.values() for path in paths}
-
-            logger.info(
-                "Found %d confirmed matching paths representing %d unique filenames across %d YARA rules.",
-                confirmed_path_matches,
-                len(unique_file_names),
-                len(final_matches),
+    # One executor is reused for the entire hunt. Recreating pools for every
+    # tiny chunk creates new native allocator arenas and is a major reason RSS
+    # remains high after large-file scans.
+    with ThreadPoolExecutor(max_workers=active_workers) as executor:
+        for batch_count, batch in enumerate(
+            _pop_dict_chunks(file_to_rules, cleanup_batch_size),
+            start=1,
+        ):
+            logger.debug(
+                "Starting narrow-phase cleanup batch %d containing %d files",
+                batch_count,
+                len(batch),
             )
 
-            for rule_name, paths in final_matches.items():
-                for path in sorted(paths):
-                    logger.debug(
-                        'Confirmed narrow match: rule="%s" path="%s" file_id="%s"',
-                        rule_name,
-                        path,
-                        os.path.basename(path),
-                    )
-        else:
-            logger.info("No rules matched after Narrowing.")
+            process_batch(executor, batch)
 
-        return final_matches
-    finally:
-        # This cleanup executes for successful hunts, cancellations, callback
-        # failures, YARA errors, and the 200-result exception.
-        compiled_yara_rules.clear()
-        cpu_duration_metrics.clear()
-        file_config.clear()
-        file_to_rules.clear()
-        rule_matches_sets.clear()
-        release_unused_memory()
+            batch.clear()
+            release_unused_memory()
 
-        rss_mib = _current_rss_mib()
-        if rss_mib is not None:
-            logger.info("Narrow search cleanup completed; process RSS: %.1f MiB", rss_mib)
+            rss_mib = _current_rss_mib()
+            if rss_mib is not None:
+                logger.debug(
+                    "Narrow-phase cleanup batch %d completed; process RSS %.1f MiB",
+                    batch_count,
+                    rss_mib,
+                )
+
+    # Convert back to lists and remove empty rules.
+    final_matches: RuleFileMatches = {
+        rule_name: list(paths) for rule_name, paths in rule_matches_sets.items() if paths
+    }
+
+    if final_matches:
+        confirmed_path_matches = sum(len(paths) for paths in final_matches.values())
+        unique_file_names = {os.path.basename(path) for paths in final_matches.values() for path in paths}
+
+        logger.info(
+            "Found %d confirmed matching paths representing %d unique filenames across %d YARA rules.",
+            confirmed_path_matches,
+            len(unique_file_names),
+            len(final_matches),
+        )
+
+        for rule_name, paths in final_matches.items():
+            for path in sorted(paths):
+                logger.debug(
+                    'Confirmed narrow match: rule="%s" path="%s" file_id="%s"',
+                    rule_name,
+                    path,
+                    os.path.basename(path),
+                )
+    else:
+        logger.info("No rules matched after Narrowing.")
+
+    # Drop native YARA objects and all candidate/config containers before the
+    # final trim. Only the confirmed result lists survive this point.
+    compiled_yara_rules.clear()
+    cpu_duration_metrics.clear()
+    file_config.clear()
+    file_to_rules.clear()
+    rule_matches_sets.clear()
+    release_unused_memory()
+
+    rss_mib = _current_rss_mib()
+    if rss_mib is not None:
+        logger.info("Narrow search cleanup completed; process RSS: %.1f MiB", rss_mib)
+
+    return final_matches
 
 
 def trigger_stop_event():
