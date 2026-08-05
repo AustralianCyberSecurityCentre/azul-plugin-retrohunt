@@ -229,9 +229,13 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
                 job.entity.results.setdefault(new_match[0], []).append(match_result_dict)
 
-                # cancel if the number of matches has exceeded the limit.
+                # Stop the search immediately when the result limit is
+                # reached. Setting the shared event before raising ensures
+                # in-flight narrow workers abort and release their file buffers
+                # instead of continuing to scan the remainder of the batch.
                 if job.entity.tool_match_count >= MATCH_LIMIT:
                     job.entity.status = azm.HuntState.CANCELLED
+                    trigger_stop_event()
                     raise Exception(
                         f"Match count hit threshold of {MATCH_LIMIT}. "
                         "Please try to refine your search terms to match less content."
@@ -352,10 +356,14 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             job.entity.status = azm.HuntState.FAILED
             job.entity.error = exception_str
     finally:
-        job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
-        job = _update_progress(job, logs)
-        match_metadata.clear()
-        release_unused_memory()
+        try:
+            job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
+            job = _update_progress(job, logs)
+        finally:
+            # Cleanup must not depend on the final Redis progress write
+            # succeeding.
+            match_metadata.clear()
+            release_unused_memory()
 
 
 def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
