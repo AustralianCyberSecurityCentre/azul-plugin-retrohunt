@@ -1,6 +1,7 @@
 """High-level search interface for querying across existing .bgi indexes."""
 
 import binascii
+import ctypes
 import gc
 import hashlib
 import logging
@@ -36,6 +37,41 @@ from .yara_parse import AndNode, OrNode, RuleSearchPlans, StringNode, parse_yara
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
+
+# Python's garbage collector does not return most large bytes/native YARA
+# allocations to the operating system. On glibc Linux, malloc_trim() releases
+# free heap pages after a bounded narrow-phase batch has fully drained.
+try:
+    _libc = ctypes.CDLL(None)
+    _malloc_trim = getattr(_libc, "malloc_trim", None)
+    if _malloc_trim is not None:
+        _malloc_trim.argtypes = [ctypes.c_size_t]
+        _malloc_trim.restype = ctypes.c_int
+except (OSError, AttributeError):
+    _malloc_trim = None
+
+
+def release_unused_memory() -> None:
+    """Collect Python garbage and return free glibc heap pages when supported."""
+    gc.collect()
+
+    if _malloc_trim is not None:
+        try:
+            _malloc_trim(0)
+        except (OSError, ValueError):
+            logger.debug("malloc_trim failed", exc_info=True)
+
+
+def _current_rss_mib() -> float | None:
+    """Return current resident memory in MiB on Linux, otherwise None."""
+    try:
+        with open("/proc/self/statm", encoding="utf-8") as statm:
+            resident_pages = int(statm.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -134,6 +170,7 @@ def search(
     data_callback: DataCallback = None,
     progress_callback: ProgressCallback = None,
     recursive: bool = True,
+    data_release_callback=None,
 ) -> RuleFileMatches:
     """Do a BigYara search.
 
@@ -189,6 +226,15 @@ def search(
             raise ValueError("Invalid data callback")
         return data
 
+    def checked_data_release_callback(path: str, matched: bool) -> None:
+        if data_release_callback:
+            try:
+                data_release_callback(path, matched)
+            except CancelException:
+                raise
+            except Exception as e:
+                raise DataCallbackException("Exception in data release callback") from e
+
     if query_type == QueryTypeEnum.STRING:
         # string searches don't actually require the file data to succeed,
         # therefore the data callback is not used.
@@ -217,6 +263,13 @@ def search(
         else:
             rule_matches.pop(rule_name, None)
             logger.info(f'Did not find any indexed file matches for "{rule_name}"')
+
+    # Broad-phase planner structures are no longer needed before file bodies
+    # are downloaded, so release them before narrow-phase memory rises.
+    del rule_atoms
+    del rule_search_plans
+    release_unused_memory()
+
     logger.info("Starting narrow search")
 
     with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
@@ -228,8 +281,11 @@ def search(
             checked_data_callback,
             checked_progress_callback,
             query_hash=query_hash,
+            data_release_callback=checked_data_release_callback,
         )
 
+    file_config.clear()
+    release_unused_memory()
     return rule_matches
 
 
@@ -325,6 +381,8 @@ _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH = 4
 _DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX = 64
 _DEFAULT_MAX_BROAD_PHASE_WORKERS = 1
 _DEFAULT_MAX_BROAD_PHASE_TASKS = 10_000
+_DEFAULT_MAX_NARROW_PHASE_INFLIGHT_FILES = 3
+_DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER = 4
 
 
 def _positive_int_setting(settings, name: str, default: int) -> int:
@@ -1165,21 +1223,30 @@ def _narrow_phase_search(
     data_callback: DataCallback,
     progress_callback: ProgressCallback,
     query_hash: str,
+    data_release_callback=None,
 ) -> RuleFileMatches:
     """Narrow phase search using whichever tool is relevant to the search type."""
     if queryType == QueryTypeEnum.STRING:
         return rule_matches
 
-    # Convert rule_matches to sets for fast removal
-    rule_matches_sets: dict[str, set[str]] = {rule_name: set(paths) for rule_name, paths in rule_matches.items()}
+    if data_release_callback is None:
 
-    # Invert mapping: file → rules
+        def data_release_callback(_path: str, _matched: bool) -> None:
+            return None
+
+    # Convert rule matches to sets, then immediately release the broad-phase
+    # list containers. The path strings themselves are reused by the sets.
+    rule_matches_sets: dict[str, set[str]] = {rule_name: set(paths) for rule_name, paths in rule_matches.items()}
+    rule_matches.clear()
+
+    # Invert mapping: file -> rules. This mapping is destructively drained in
+    # bounded batches so processed candidates do not remain referenced.
     file_to_rules: dict[str, set[str]] = defaultdict(set)
     for rule_name, paths in rule_matches_sets.items():
-        for p in paths:
-            file_to_rules[p].add(rule_name)
+        for file_path in paths:
+            file_to_rules[file_path].add(rule_name)
 
-    # Precompile YARA rules once
+    # Precompile YARA rules once per hunt.
     compiled_yara_rules = {}
     if queryType == QueryTypeEnum.YARA:
         for rule_name, content in rule_content.items():
@@ -1189,6 +1256,8 @@ def _narrow_phase_search(
 
     # Bind metric children once instead of performing label lookups per file.
     missing_files_metric = prom_missing_files.labels(query_hash=query_hash)
+    io_duration_metric = prom_narrow_io_duration.labels(query_hash=query_hash)
+    io_bytes_metric = prom_narrow_io_bytes.labels(query_hash=query_hash)
     cpu_duration_metrics = {
         rule_name: prom_narrow_cpu_duration.labels(
             query_hash=query_hash,
@@ -1197,55 +1266,88 @@ def _narrow_phase_search(
         for rule_name in rule_matches_sets
     }
 
-    settings = RetrohuntSettings()
-    processes = settings.search_settings.max_thread_count
-    # process max_thread_count + 1 files per chunk
-    chunk_size = processes + 1
-    logger.info(f"Processing {chunk_size} files per chunk")
-    # Split the files to process into smaller chunks
-    chunks = chunk_dict(file_to_rules, chunk_size)
+    search_settings = RetrohuntSettings().search_settings
+    configured_threads = _positive_int_setting(
+        search_settings,
+        "max_thread_count",
+        1,
+    )
+    default_inflight_files = min(
+        configured_threads,
+        _DEFAULT_MAX_NARROW_PHASE_INFLIGHT_FILES,
+    )
+    max_inflight_files = _positive_int_setting(
+        search_settings,
+        "max_narrow_phase_inflight_files",
+        default_inflight_files,
+    )
 
-    # Worker function. Exceptions are intentionally allowed to propagate
-    # through the thread pool result iterator, especially CancelException.
+    total_files = len(file_to_rules)
+    active_workers = max(
+        1,
+        min(configured_threads, max_inflight_files, total_files or 1),
+    )
+    cleanup_batch_size = _positive_int_setting(
+        search_settings,
+        "narrow_phase_cleanup_batch_size",
+        active_workers * _DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER,
+    )
+    cleanup_batch_size = max(active_workers, cleanup_batch_size)
+
+    # Worker function. A worker holds at most one complete file body. data is
+    # deleted in finally so YARA timeouts/errors cannot pin a large bytes object
+    # inside a traceback retained by a Future.
     def worker(file_path: str, rules_for_file: set[str]):
         if stop_event.is_set():
             raise CancelException("Narrow phase cancelled by user.")
-        cfg = file_config.get(file_path)
-        io_start = time.time()
-        data = data_callback(file_path, cfg)
-        io_duration = time.time() - io_start
-        # Cancellation may have been requested while the dispatcher call was in progress.
-        if stop_event.is_set():
-            raise CancelException("Narrow phase cancelled by user.")
-        data_len = 0
-        if data:
-            data_len = len(data)
-        else:
-            missing_files_metric.inc()
-            return ("missing", file_path, rules_for_file, None, io_duration, data_len)
 
-        results = []
-        for rule_name in rules_for_file:
+        # Each config entry is needed only until its file has been fetched.
+        # Popping here lets the broad-phase metadata table shrink continuously.
+        cfg = file_config.pop(file_path, None)
+        data = None
+
+        try:
+            io_start = time.time()
+            data = data_callback(file_path, cfg)
+            io_duration = time.time() - io_start
+
+            # Cancellation may have been requested while the dispatcher call
+            # was blocked.
             if stop_event.is_set():
                 raise CancelException("Narrow phase cancelled by user.")
 
-            if queryType == QueryTypeEnum.YARA:
-                with cpu_duration_metrics[rule_name].time():
-                    matched = bool(
-                        compiled_yara_rules[rule_name].match(
-                            data=data,
-                            callback=yara_callback,
-                            which_callbacks=yara.CALLBACK_MATCHES,
-                            fast=True,
-                            timeout=60,
-                        )
-                    )
-            elif queryType == QueryTypeEnum.SURICATA:
-                matched = _run_suricata(rule_content[rule_name], file_path, data)
+            data_len = len(data) if data else 0
+            if not data:
+                missing_files_metric.inc()
+                return ("missing", file_path, rules_for_file, None, io_duration, data_len)
 
-            results.append((rule_name, matched))
-        data = None
-        return ("ok", file_path, rules_for_file, results, io_duration, data_len)
+            results = []
+            for rule_name in rules_for_file:
+                if stop_event.is_set():
+                    raise CancelException("Narrow phase cancelled by user.")
+
+                if queryType == QueryTypeEnum.YARA:
+                    with cpu_duration_metrics[rule_name].time():
+                        matched = bool(
+                            compiled_yara_rules[rule_name].match(
+                                data=data,
+                                callback=yara_callback,
+                                which_callbacks=yara.CALLBACK_MATCHES,
+                                fast=True,
+                                timeout=60,
+                            )
+                        )
+                elif queryType == QueryTypeEnum.SURICATA:
+                    matched = _run_suricata(rule_content[rule_name], file_path, data)
+
+                results.append((rule_name, matched))
+
+            return ("ok", file_path, rules_for_file, results, io_duration, data_len)
+        finally:
+            # bytes objects are not cyclic garbage. Removing the last worker
+            # reference here is what makes the buffer immediately reclaimable.
+            data = None
+            cfg = None
 
     def worker_task(task: tuple[str, set[str]]):
         file_path, rules_for_file = task
@@ -1254,128 +1356,147 @@ def _narrow_phase_search(
     # Precompute progress totals.
     total_jobs = sum(len(paths) for paths in rule_matches_sets.values())
     jobs_complete = 0
-
-    total_files = len(file_to_rules)
     files_complete = 0
     next_progress_percent = 5
 
     progress_callback(SearchPhaseEnum.NARROW_PHASE, 0, total_jobs, None)
 
     logger.info(
-        "Narrow search starting: %d unique files to process across %d rule/file jobs",
+        "Narrow search starting: %d unique files across %d rule/file jobs; "
+        "%d threads configured, %d large files allowed in flight, cleanup every %d files.",
         total_files,
         total_jobs,
+        configured_threads,
+        active_workers,
+        cleanup_batch_size,
     )
 
-    # Stream completed results from a fixed-size thread pool.
-    # Number of threads used based on available memory in the container.
-    logger.debug("Initiating narrow search with %d threads", processes)
+    rss_mib = _current_rss_mib()
+    if rss_mib is not None:
+        logger.info("Narrow search starting process RSS: %.1f MiB", rss_mib)
 
-    def process_chunk(chunk: dict[str, set[str]]) -> None:
-        """Process exactly one chunk using one temporary thread pool."""
+    def process_batch(
+        executor: ThreadPoolExecutor,
+        batch: dict[str, set[str]],
+    ) -> None:
+        """Process one bounded batch and release per-file metadata immediately."""
         nonlocal jobs_complete
         nonlocal total_jobs
         nonlocal files_complete
         nonlocal next_progress_percent
-        nonlocal query_hash
 
-        futures = {}
+        futures = {executor.submit(worker_task, item): item for item in batch.items()}
 
-        with ThreadPoolExecutor(max_workers=processes) as executor:
-            futures = {executor.submit(worker_task, item): item for item in chunk.items()}
+        try:
+            for future in as_completed(tuple(futures)):
+                task = futures.pop(future, None)
 
-            for future in as_completed(futures):
                 try:
                     status, file_path, rules_for_file, results, io_duration, data_len = future.result()
+                except Exception:
+                    # The worker may have fetched metadata before failing. Do
+                    # not leave it retained for the rest of the hunt.
+                    if task is not None:
+                        data_release_callback(task[0], False)
+                    raise
+
+                file_matched = False
+
+                try:
+                    io_duration_metric.observe(io_duration)
+                    io_bytes_metric.inc(data_len)
+
+                    if stop_event.is_set():
+                        raise CancelException("Narrow phase cancelled by user.")
+
+                    files_complete += 1
+                    current_percent = (files_complete * 100) // total_files if total_files else 100
+
+                    while current_percent >= next_progress_percent:
+                        logger.info(
+                            "Narrow search %d%% complete: %d/%d files processed",
+                            next_progress_percent,
+                            files_complete,
+                            total_files,
+                        )
+                        next_progress_percent += 5
+
+                    if status == "missing":
+                        for rule_name in rules_for_file:
+                            total_jobs -= 1
+                            rule_matches_sets[rule_name].discard(file_path)
+
+                        progress_callback(
+                            SearchPhaseEnum.NARROW_PHASE,
+                            jobs_complete,
+                            total_jobs,
+                            None,
+                        )
+                    else:
+                        for rule_name, matched in results:
+                            jobs_complete += 1
+                            file_matched = file_matched or matched
+
+                            completed_item = (
+                                rule_name,
+                                [file_path] if matched else [],
+                            )
+
+                            progress_callback(
+                                SearchPhaseEnum.NARROW_PHASE,
+                                jobs_complete,
+                                total_jobs,
+                                completed_item,
+                            )
+
+                            if not matched:
+                                rule_matches_sets[rule_name].discard(file_path)
                 finally:
-                    # Do not retain completed Future objects and their results.
-                    futures.pop(future, None)
+                    # The worker-level callback stores metadata only long
+                    # enough for matched progress callbacks to consume it.
+                    data_release_callback(file_path, file_matched)
+                    results = None
+                    rules_for_file = None
+                    task = None
+        finally:
+            futures.clear()
 
-                prom_narrow_io_duration.labels(
-                    query_hash=query_hash,
-                ).observe(io_duration)
+    batch_count = 0
 
-                prom_narrow_io_bytes.labels(
-                    query_hash=query_hash,
-                ).inc(data_len)
+    # One executor is reused for the entire hunt. Recreating pools for every
+    # tiny chunk creates new native allocator arenas and is a major reason RSS
+    # remains high after large-file scans.
+    with ThreadPoolExecutor(max_workers=active_workers) as executor:
+        for batch_count, batch in enumerate(
+            _pop_dict_chunks(file_to_rules, cleanup_batch_size),
+            start=1,
+        ):
+            logger.debug(
+                "Starting narrow-phase cleanup batch %d containing %d files",
+                batch_count,
+                len(batch),
+            )
 
-                if stop_event.is_set():
-                    raise CancelException("Narrow phase cancelled by user.")
+            process_batch(executor, batch)
 
-                files_complete += 1
-                current_percent = (files_complete * 100) // total_files if total_files else 100
+            batch.clear()
+            release_unused_memory()
 
-                while current_percent >= next_progress_percent:
-                    logger.info(
-                        "Narrow search %d%% complete: %d/%d files processed",
-                        next_progress_percent,
-                        files_complete,
-                        total_files,
-                    )
-                    next_progress_percent += 5
+            rss_mib = _current_rss_mib()
+            if rss_mib is not None:
+                logger.debug(
+                    "Narrow-phase cleanup batch %d completed; process RSS %.1f MiB",
+                    batch_count,
+                    rss_mib,
+                )
 
-                if status == "missing":
-                    for rule_name in rules_for_file:
-                        total_jobs -= 1
-                        rule_matches_sets[rule_name].discard(file_path)
-
-                    progress_callback(
-                        SearchPhaseEnum.NARROW_PHASE,
-                        jobs_complete,
-                        total_jobs,
-                        None,
-                    )
-                    continue
-
-                for rule_name, matched in results:
-                    jobs_complete += 1
-
-                    completed_item = (
-                        rule_name,
-                        [file_path] if matched else [],
-                    )
-
-                    progress_callback(
-                        SearchPhaseEnum.NARROW_PHASE,
-                        jobs_complete,
-                        total_jobs,
-                        completed_item,
-                    )
-
-                    if not matched:
-                        rule_matches_sets[rule_name].discard(file_path)
-
-                # Explicitly release the current Future result.
-                del results
-
-    for chunk_number, chunk in enumerate(chunks, start=1):
-        logger.debug(
-            "Starting narrow-phase chunks %d containing %d files",
-            chunk_number,
-            len(chunk),
-        )
-
-        process_chunk(chunk)
-
-        # process_chunk cannot return until ThreadPoolExecutor.__exit__ has run
-        # and all worker threads from this chunk have terminated.
-        del chunk
-        gc.collect()
-        logger.debug(
-            "Narrow-phase chunk %d pool exited and memory cleanup completed",
-            chunk_number,
-        )
-
-    # Convert back to lists and remove empty rules
-    final_matches: RuleFileMatches = {}
-
-    for rule_name, paths in rule_matches_sets.items():
-        if paths:
-            final_matches[rule_name] = list(paths)
+    # Convert back to lists and remove empty rules.
+    final_matches: RuleFileMatches = {
+        rule_name: list(paths) for rule_name, paths in rule_matches_sets.items() if paths
+    }
 
     if final_matches:
         confirmed_path_matches = sum(len(paths) for paths in final_matches.values())
-
         unique_file_names = {os.path.basename(path) for paths in final_matches.values() for path in paths}
 
         logger.info(
@@ -1396,6 +1517,19 @@ def _narrow_phase_search(
     else:
         logger.info("No rules matched after Narrowing.")
 
+    # Drop native YARA objects and all candidate/config containers before the
+    # final trim. Only the confirmed result lists survive this point.
+    compiled_yara_rules.clear()
+    cpu_duration_metrics.clear()
+    file_config.clear()
+    file_to_rules.clear()
+    rule_matches_sets.clear()
+    release_unused_memory()
+
+    rss_mib = _current_rss_mib()
+    if rss_mib is not None:
+        logger.info("Narrow search cleanup completed; process RSS: %.1f MiB", rss_mib)
+
     return final_matches
 
 
@@ -1407,6 +1541,22 @@ def trigger_stop_event():
 def clear_stop_event():
     """Clear the stop event flag."""
     stop_event.clear()
+
+
+def _pop_dict_chunks(
+    d: dict[str, set[str]],
+    chunk_size: int,
+):
+    """Yield bounded dictionaries while removing entries from the source."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
+
+    while d:
+        batch = {}
+        for _ in range(min(chunk_size, len(d))):
+            file_path, rules_for_file = d.popitem()
+            batch[file_path] = rules_for_file
+        yield batch
 
 
 def chunk_dict(

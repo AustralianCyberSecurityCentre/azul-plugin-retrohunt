@@ -20,6 +20,7 @@ from azul_plugin_retrohunt.bigyara.search import (
     QueryTypeEnum,
     SearchPhaseEnum,
     clear_stop_event,
+    release_unused_memory,
     search,
     trigger_stop_event,
 )
@@ -245,7 +246,12 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
         periodic_check_is_cancelled()
         data: bytes = None
+        response = None
         match_hash = match_path.rsplit("/", 1)[-1]
+
+        if not config:
+            logger.error("Missing index metadata for %s", match_hash)
+            return None
 
         label_raw = config.get(b"stream_label")
         source_raw = config.get(b"stream_source")
@@ -263,15 +269,27 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
         try:
             response = dp.get_binary(source=source, label=label, sha256=match_hash)
+            data = response.content
+
+            # This entry now exists only while the file is in flight. The
+            # search layer removes it immediately after all rule callbacks for
+            # this file have completed.
+            match_metadata[match_path] = config
         except dispatcher.DispatcherApiException:
             pass
-        else:
-            data = response.content
-            match_metadata[match_path] = config
+        finally:
+            close_response = getattr(response, "close", None)
+            if close_response is not None:
+                close_response()
+            response = None
 
         # The API may have cancelled the hunt while get_binary was blocked.
         periodic_check_is_cancelled()
         return data
+
+    def release_data_from_azul(match_path: str, _matched: bool) -> None:
+        """Release per-file metadata once its progress callbacks are complete."""
+        match_metadata.pop(match_path, None)
 
     try:
         # add path info to job
@@ -307,6 +325,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
             get_data_from_azul,
             update_job,
             recursive=True,
+            data_release_callback=release_data_from_azul,
         )
 
         periodic_check_is_cancelled(force=True)
@@ -335,6 +354,8 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
     finally:
         job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
         job = _update_progress(job, logs)
+        match_metadata.clear()
+        release_unused_memory()
 
 
 def acquire_lock(redis_client, job_id: str, worker_id: str, ttl_seconds: int) -> bool:
@@ -482,9 +503,15 @@ def main():
                 # Another worker is running this hunt
                 continue
 
-            # Start heartbeat
-            stop_event = threading.Event()
-            start_heartbeat(job_id, worker_id, ttl_seconds=LOCK_TTL, stop_event=stop_event)
+            # Start heartbeat. It must be explicitly stopped after the hunt;
+            # otherwise one sleeping thread can linger per completed job.
+            heartbeat_stop_event = threading.Event()
+            heartbeat_thread = start_heartbeat(
+                job_id,
+                worker_id,
+                ttl_seconds=LOCK_TTL,
+                stop_event=heartbeat_stop_event,
+            )
 
             bgi_folders = []
             for _name, indexer_cfg in settings.indexers.items():
@@ -510,7 +537,10 @@ def main():
                 continue
             finally:
                 clear_stop_event()
+                heartbeat_stop_event.set()
+                heartbeat_thread.join(timeout=1.0)
                 rs.redis.delete(f"retrohunt:{job_id}:lock")
+                release_unused_memory()
         # used by tests
         except FatalException:
             raise

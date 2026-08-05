@@ -365,7 +365,15 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             return SimpleNamespace(content=test_content[sha256])
 
         # Mock BigYara search to reproduce expected results
-        def fake_search(query, query_type, index_dirs, get_data, update_job, recursive):
+        def fake_search(
+            query,
+            query_type,
+            index_dirs,
+            get_data,
+            update_job,
+            recursive,
+            data_release_callback=None,
+        ):
             # Simulate parsing rules
             update_job(SearchPhaseEnum.ATOM_PARSE, 1, 1, ("r", [sha1]))
 
@@ -387,9 +395,15 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
             }
             get_data(sha3, cfg2)
 
-            # Simulate narrow phase: 2 tool matches
+            # Simulate narrow phase: 2 tool matches. Release each metadata
+            # entry only after update_job has consumed it.
             update_job(SearchPhaseEnum.NARROW_PHASE, 1, 2, ("r", [sha1]))
+            if data_release_callback:
+                data_release_callback(sha1, True)
+
             update_job(SearchPhaseEnum.NARROW_PHASE, 2, 2, ("r", [sha3]))
+            if data_release_callback:
+                data_release_callback(sha3, True)
 
         with mock.patch("azul_plugin_retrohunt.worker.dp.get_binary", side_effect=fake_get_binary):
             with mock.patch("azul_plugin_retrohunt.worker.search", side_effect=fake_search):
