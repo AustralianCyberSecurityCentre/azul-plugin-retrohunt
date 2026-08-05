@@ -698,6 +698,17 @@ def _parse_partial_condition(expr: str) -> ConditionNode:
     if re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", expr):
         return StringNode(string_name=expr)
 
+    # Positional string predicates still guarantee that the named string
+    # occurs. Broad phase may safely ignore the position/range and search the
+    # string itself; full YARA verifies the positional requirement later.
+    positional_match = re.match(
+        r"^(\$[A-Za-z_][A-Za-z0-9_]*)\s+(?:at|in)\b",
+        expr,
+        flags=re.IGNORECASE,
+    )
+    if positional_match:
+        return StringNode(string_name=positional_match.group(1))
+
     return UnknownNode(raw_text=expr)
 
 
@@ -1029,17 +1040,17 @@ def parse_yara_rules(
                 )
 
             if len(yara_string.atoms) == 0:
-                logger.error(
-                    "No atoms found: rule=%s string=%s modifiers=%s regex=%r",
+                logger.warning(
+                    "No usable broad-phase atoms found: rule=%s string=%s "
+                    "modifiers=%s regex=%r. The string remains in the condition "
+                    "AST, but broad phase will treat it as unsearchable and only "
+                    "use other condition structures when that is provably safe.",
                     yara_rules[rule_index].name,
                     yara_string.name,
                     yara_string.modifiers,
                     yara_string.re,
                 )
-
-                raise YaraStringNoAtomException(
-                    f"Failed to find any valid atoms for string {yara_string.name} in {yara_rules[rule_index].name}"
-                )
+                continue
 
             for yara_atom in yara_string.atoms:
                 if yara_atom not in new_atoms:
@@ -1179,10 +1190,9 @@ def _yara_process_flags(current_rule: YaraRule, current_string: YaraString, flag
 def _yara_finish_string(current_rule: YaraRule, current_string: YaraString) -> tuple[YaraRule, YaraString]:
     """String is complete so add to rule."""
     if current_string:
-        # if "nocase" string, yara must give us the atoms
-        if "nocase" in current_string.modifiers and len(current_string.atoms) == 0:
-            raise YaraStringNoAtomException(f"Yara did not output any atoms for nocase string {current_string.name}")
-
+        # Strings without usable atoms are still retained in the parsed rule.
+        # The broad-phase planner treats them as unsearchable and only filters
+        # on sibling structures when doing so is provably safe.
         current_rule.strings.append(current_string)
         current_string = None
     return current_rule, current_string
