@@ -33,7 +33,15 @@ from . import (
 )
 from .env import executables
 from .suricata_parse import parse_suricata_rules
-from .yara_parse import AndNode, OrNode, RuleSearchPlans, StringNode, parse_yara_rules
+from .yara_parse import (
+    AndNode,
+    NOfNode,
+    OrNode,
+    RuleSearchPlans,
+    StringNode,
+    UnknownNode,
+    parse_yara_rules,
+)
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
@@ -523,6 +531,781 @@ def _select_required_string_stages(
     return selected, unusable_strings, total_available_searches, forced_single_string
 
 
+# Boolean broad-phase expressions are safe upper approximations of the YARA
+# condition. TRUE means "this subtree cannot safely restrict candidates".
+# FALSE means the subtree cannot match. Stage nodes reference one searchable
+# YARA string, where the string's alternative atom groups are OR-unioned.
+_BOOL_TRUE = ("true",)
+_BOOL_FALSE = ("false",)
+
+
+def _make_bool_and(children):
+    """Return a flattened and simplified boolean AND expression."""
+    flattened = []
+
+    for child in children:
+        if child == _BOOL_FALSE:
+            return _BOOL_FALSE
+        if child == _BOOL_TRUE:
+            continue
+        if child[0] == "and":
+            flattened.extend(child[1])
+        else:
+            flattened.append(child)
+
+    unique_children = list(dict.fromkeys(flattened))
+    if not unique_children:
+        return _BOOL_TRUE
+    if len(unique_children) == 1:
+        return unique_children[0]
+    return ("and", tuple(unique_children))
+
+
+def _make_bool_or(children):
+    """Return a flattened and simplified boolean OR expression."""
+    flattened = []
+
+    for child in children:
+        if child == _BOOL_TRUE:
+            return _BOOL_TRUE
+        if child == _BOOL_FALSE:
+            continue
+        if child[0] == "or":
+            flattened.extend(child[1])
+        else:
+            flattened.append(child)
+
+    unique_children = list(dict.fromkeys(flattened))
+    if not unique_children:
+        return _BOOL_FALSE
+    if len(unique_children) == 1:
+        return unique_children[0]
+    return ("or", tuple(unique_children))
+
+
+def _make_bool_threshold(required: int, children):
+    """Return a simplified at-least-N boolean expression."""
+    if required <= 0:
+        return _BOOL_TRUE
+
+    true_children = 0
+    remaining_children = []
+
+    for child in children:
+        if child == _BOOL_TRUE:
+            true_children += 1
+        elif child != _BOOL_FALSE:
+            remaining_children.append(child)
+
+    required -= true_children
+    if required <= 0:
+        return _BOOL_TRUE
+    if required > len(remaining_children):
+        return _BOOL_FALSE
+    if required == 1:
+        return _make_bool_or(remaining_children)
+    if required == len(remaining_children):
+        return _make_bool_and(remaining_children)
+
+    # Do not deduplicate threshold children. Distinct YARA strings can have
+    # identical atom searches and still count as separate N-of alternatives.
+    return ("threshold", required, tuple(remaining_children))
+
+
+def _register_string_stage(plan, string_name: str, stage_registry: dict):
+    """Register one string's OR-of-atom-groups stage and return its key."""
+    valid_group_ids = _valid_group_ids(
+        plan,
+        plan.string_groups.get(string_name, []),
+    )
+    if not valid_group_ids:
+        return None
+
+    alternatives_by_atoms = {}
+    for group_idx in valid_group_ids:
+        atoms = tuple(sorted(plan.groups[group_idx]))
+        if atoms:
+            alternatives_by_atoms.setdefault(atoms, group_idx)
+
+    if not alternatives_by_atoms:
+        return None
+
+    alternatives = tuple(sorted(alternatives_by_atoms))
+    stage_key = alternatives
+    stage = stage_registry.get(stage_key)
+
+    if stage is None:
+        representative_group_ids = [alternatives_by_atoms[atoms] for atoms in alternatives]
+        longest_atom = max(len(atom) for atoms in alternatives for atom in atoms)
+        max_group_atom_count = max(len(atoms) for atoms in alternatives)
+
+        stage = {
+            "key": stage_key,
+            "labels": set(),
+            "group_ids": representative_group_ids,
+            "alternatives": alternatives,
+            "searches": [
+                (
+                    group_idx,
+                    _bgparse_search_string(list(atoms)),
+                )
+                for group_idx, atoms in zip(
+                    representative_group_ids,
+                    alternatives,
+                    strict=True,
+                )
+            ],
+            "cost": len(alternatives),
+            "longest_atom": longest_atom,
+            "max_group_atom_count": max_group_atom_count,
+        }
+        stage_registry[stage_key] = stage
+
+    stage["labels"].add(string_name)
+    return stage_key
+
+
+def _build_searchable_boolean_expression(node, plan, stage_registry: dict):
+    """Build a safe atom-search upper approximation of a condition AST.
+
+    Unsupported predicates are represented as TRUE. This is deliberately
+    conservative:
+
+      unknown AND $a -> $a
+      unknown OR  $a -> TRUE (no safe atom-only restriction)
+
+    Therefore the returned expression can only contain the same files or more
+    files than the real YARA condition.
+    """
+    if node is None:
+        return _BOOL_TRUE
+
+    if isinstance(node, UnknownNode):
+        raw_text = (node.raw_text or "").strip().lower()
+        if raw_text == "false":
+            return _BOOL_FALSE
+        return _BOOL_TRUE
+
+    if isinstance(node, StringNode):
+        stage_key = _register_string_stage(
+            plan,
+            node.string_name,
+            stage_registry,
+        )
+        if stage_key is None:
+            return _BOOL_TRUE
+        return ("stage", stage_key)
+
+    if isinstance(node, AndNode):
+        return _make_bool_and(
+            _build_searchable_boolean_expression(
+                child,
+                plan,
+                stage_registry,
+            )
+            for child in node.children
+        )
+
+    if isinstance(node, OrNode):
+        return _make_bool_or(
+            _build_searchable_boolean_expression(
+                child,
+                plan,
+                stage_registry,
+            )
+            for child in node.children
+        )
+
+    if isinstance(node, NOfNode):
+        return _make_bool_threshold(
+            node.required,
+            [
+                _build_searchable_boolean_expression(
+                    child,
+                    plan,
+                    stage_registry,
+                )
+                for child in node.children
+            ],
+        )
+
+    # A new parser node must never accidentally become a restrictive filter.
+    return _BOOL_TRUE
+
+
+def _expression_stage_keys(expression) -> set:
+    """Return all stage keys referenced by a boolean expression."""
+    operator = expression[0]
+
+    if operator == "stage":
+        return {expression[1]}
+    if operator in {"true", "false"}:
+        return set()
+    if operator in {"and", "or"}:
+        children = expression[1]
+    elif operator == "threshold":
+        children = expression[2]
+    else:
+        raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
+
+    stage_keys = set()
+    for child in children:
+        stage_keys.update(_expression_stage_keys(child))
+    return stage_keys
+
+
+def _restrict_expression_to_stages(expression, selected_stage_keys: set):
+    """Replace unselected stages with TRUE and simplify safely."""
+    operator = expression[0]
+
+    if operator == "stage":
+        if expression[1] in selected_stage_keys:
+            return expression
+        return _BOOL_TRUE
+    if operator in {"true", "false"}:
+        return expression
+    if operator == "and":
+        return _make_bool_and(_restrict_expression_to_stages(child, selected_stage_keys) for child in expression[1])
+    if operator == "or":
+        return _make_bool_or(_restrict_expression_to_stages(child, selected_stage_keys) for child in expression[1])
+    if operator == "threshold":
+        return _make_bool_threshold(
+            expression[1],
+            [
+                _restrict_expression_to_stages(
+                    child,
+                    selected_stage_keys,
+                )
+                for child in expression[2]
+            ],
+        )
+
+    raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
+
+
+def _stage_set_cost(stage_keys: set, stage_registry: dict) -> int:
+    """Return searches-per-index needed for a set of stages."""
+    return sum(stage_registry[stage_key]["cost"] for stage_key in stage_keys)
+
+
+def _minimum_restrictive_stage_set(expression, stage_registry: dict):
+    """Return a low-cost stage set that keeps expression non-TRUE.
+
+    This is used only when the complete condition exceeds configured broad
+    search limits. Replacing every omitted stage with TRUE broadens the
+    condition, so any returned subset remains safe.
+    """
+    operator = expression[0]
+
+    if operator == "true":
+        return None
+    if operator == "false":
+        return set()
+    if operator == "stage":
+        return {expression[1]}
+
+    if operator == "and":
+        candidates = [_minimum_restrictive_stage_set(child, stage_registry) for child in expression[1]]
+        candidates = [candidate for candidate in candidates if candidate is not None]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda candidate: (
+                _stage_set_cost(candidate, stage_registry),
+                len(candidate),
+                repr(sorted(candidate, key=repr)),
+            ),
+        )
+
+    if operator == "or":
+        selected = set()
+        for child in expression[1]:
+            child_selection = _minimum_restrictive_stage_set(
+                child,
+                stage_registry,
+            )
+            if child_selection is None:
+                return None
+            selected.update(child_selection)
+        return selected
+
+    if operator == "threshold":
+        required = expression[1]
+        children = expression[2]
+
+        # If U children are replaced by TRUE, the threshold becomes
+        # nonrestrictive when U >= required. Therefore at least
+        # len(children) - required + 1 children must remain restrictive.
+        children_needed = len(children) - required + 1
+        child_options = []
+
+        for child in children:
+            child_selection = _minimum_restrictive_stage_set(
+                child,
+                stage_registry,
+            )
+            if child_selection is not None:
+                child_options.append(child_selection)
+
+        if len(child_options) < children_needed:
+            return None
+
+        selected = set()
+        remaining_options = list(child_options)
+
+        for _ in range(children_needed):
+            best_option = min(
+                remaining_options,
+                key=lambda option: (
+                    _stage_set_cost(option - selected, stage_registry),
+                    _stage_set_cost(option, stage_registry),
+                    len(option),
+                    repr(sorted(option, key=repr)),
+                ),
+            )
+            selected.update(best_option)
+            remaining_options.remove(best_option)
+
+        return selected
+
+    raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
+
+
+def _collect_activation_bundles(expression, stage_registry: dict) -> list[set]:
+    """Return useful stage bundles for progressively strengthening a plan."""
+    bundles = []
+    seen = set()
+
+    def visit(node):
+        minimum = _minimum_restrictive_stage_set(node, stage_registry)
+        if minimum:
+            frozen = frozenset(minimum)
+            if frozen not in seen:
+                seen.add(frozen)
+                bundles.append(set(minimum))
+
+        operator = node[0]
+        if operator in {"and", "or"}:
+            for child in node[1]:
+                visit(child)
+        elif operator == "threshold":
+            for child in node[2]:
+                visit(child)
+
+    visit(expression)
+    return bundles
+
+
+def _stage_strength(stage: dict) -> tuple:
+    """Return a deterministic approximation of atom selectivity."""
+    return (
+        stage["longest_atom"],
+        stage["max_group_atom_count"],
+        -stage["cost"],
+        tuple(sorted(stage["labels"])),
+    )
+
+
+def _and_child_strength(expression, stage_registry: dict) -> tuple:
+    """Estimate which AND operand is most useful to retain.
+
+    This affects only which safe conjuncts are selected when an AND node
+    exceeds its configured operand limit. It cannot affect correctness:
+    omitted operands are replaced with TRUE, which only broadens candidates.
+    """
+    operator = expression[0]
+    stage_keys = _expression_stage_keys(expression)
+    total_cost = _stage_set_cost(stage_keys, stage_registry)
+
+    if operator == "stage":
+        stage = stage_registry[expression[1]]
+        return (
+            stage["longest_atom"],
+            stage["max_group_atom_count"],
+            -total_cost,
+            -1,
+            0,
+        )
+
+    if operator in {"true", "false"}:
+        return (0, 0, 0, 0, 0)
+
+    if operator in {"and", "or"}:
+        children = expression[1]
+    elif operator == "threshold":
+        children = expression[2]
+    else:
+        raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
+
+    child_scores = [_and_child_strength(child, stage_registry) for child in children]
+    if not child_scores:
+        return (0, 0, -total_cost, -len(stage_keys), 0)
+
+    if operator == "or":
+        # An OR is only as selective as its broadest-looking alternative.
+        representative = min(child_scores)
+    elif operator == "threshold":
+        # For N-of, use the Nth strongest child as a conservative proxy for
+        # the selectivity gained by retaining the complete threshold operand.
+        required = max(1, min(expression[1], len(child_scores)))
+        representative = sorted(child_scores, reverse=True)[required - 1]
+    else:
+        # Nested ANDs are normally flattened, but use the strongest child if
+        # one remains inside another expression type.
+        representative = max(child_scores)
+
+    return (
+        representative[0],
+        representative[1],
+        -total_cost,
+        -len(stage_keys),
+        -len(children),
+    )
+
+
+def _limit_boolean_and_children(
+    expression,
+    stage_registry: dict,
+    max_and_children: int,
+):
+    """Limit every Boolean AND node to its strongest safe operands.
+
+    Every omitted operand is replaced with TRUE. For an original expression:
+
+        A AND B AND C AND D AND E
+
+    retaining only A, B, C, and D produces a superset of the original matches.
+    This can increase narrow-phase candidates, but cannot exclude a real YARA
+    match. OR and threshold breadth are not capped by this setting.
+    """
+    limit_events = []
+
+    def visit(node):
+        operator = node[0]
+
+        if operator in {"true", "false", "stage"}:
+            return node
+
+        if operator == "or":
+            return _make_bool_or(visit(child) for child in node[1])
+
+        if operator == "threshold":
+            return _make_bool_threshold(
+                node[1],
+                [visit(child) for child in node[2]],
+            )
+
+        if operator != "and":
+            raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
+
+        simplified = _make_bool_and(visit(child) for child in node[1])
+        if simplified[0] != "and":
+            return simplified
+
+        children = list(simplified[1])
+        if len(children) <= max_and_children:
+            return simplified
+
+        ranked_children = sorted(
+            children,
+            key=lambda child: (
+                _and_child_strength(child, stage_registry),
+                repr(child),
+            ),
+            reverse=True,
+        )
+        selected_set = set(ranked_children[:max_and_children])
+        kept_children = [child for child in children if child in selected_set]
+        omitted_children = [child for child in children if child not in selected_set]
+
+        limit_events.append(
+            {
+                "original_count": len(children),
+                "kept_count": len(kept_children),
+                "kept": tuple(kept_children),
+                "omitted": tuple(omitted_children),
+            }
+        )
+        return _make_bool_and(kept_children)
+
+    return visit(expression), limit_events
+
+
+def _choose_boolean_stages(
+    expression,
+    stage_registry: dict,
+    preferred_searches_per_index: int,
+    hard_searches_per_index: int,
+):
+    """Select as much of a safe boolean expression as configured limits allow."""
+    all_stage_keys = _expression_stage_keys(expression)
+    full_cost = _stage_set_cost(all_stage_keys, stage_registry)
+
+    if full_cost <= preferred_searches_per_index and full_cost <= hard_searches_per_index:
+        return expression, all_stage_keys, full_cost, False
+
+    minimum_selection = _minimum_restrictive_stage_set(
+        expression,
+        stage_registry,
+    )
+    if minimum_selection is None:
+        return _BOOL_TRUE, set(), 0, False
+
+    minimum_cost = _stage_set_cost(minimum_selection, stage_registry)
+    if minimum_cost > hard_searches_per_index:
+        raise BiggrepException(
+            "The smallest safe boolean broad-phase plan needs "
+            f"{minimum_cost} searches per index, but the global task limit "
+            f"allows only {hard_searches_per_index} searches per index."
+        )
+
+    # The per-index setting is a preferred cap. As with the previous mandatory
+    # string implementation, exceed it only when that is required to retain one
+    # safe filter. The global task limit remains hard.
+    target_budget = min(
+        hard_searches_per_index,
+        max(preferred_searches_per_index, minimum_cost),
+    )
+
+    selected = set(minimum_selection)
+    current_expression = _restrict_expression_to_stages(
+        expression,
+        selected,
+    )
+
+    bundles = _collect_activation_bundles(expression, stage_registry)
+    bundles.extend({stage_key} for stage_key in all_stage_keys)
+
+    while True:
+        best = None
+
+        for bundle in bundles:
+            candidate_keys = selected | bundle
+            if candidate_keys == selected:
+                continue
+
+            candidate_cost = _stage_set_cost(
+                candidate_keys,
+                stage_registry,
+            )
+            if candidate_cost > target_budget:
+                continue
+
+            candidate_expression = _restrict_expression_to_stages(
+                expression,
+                candidate_keys,
+            )
+            if candidate_expression == current_expression:
+                continue
+
+            added_keys = candidate_keys - selected
+            aggregate_strength = tuple(
+                sum(_stage_strength(stage_registry[key])[index] for key in added_keys) for index in range(3)
+            )
+            score = (
+                aggregate_strength,
+                len(added_keys),
+                -_stage_set_cost(added_keys, stage_registry),
+                repr(candidate_expression),
+            )
+
+            if best is None or score > best[0]:
+                best = (
+                    score,
+                    candidate_keys,
+                    candidate_expression,
+                )
+
+        if best is None:
+            break
+
+        _score, selected, current_expression = best
+
+        # Remove any selected stages simplified out of the expression so their
+        # task budget can be reused by another useful structure.
+        selected = _expression_stage_keys(current_expression)
+
+    selected_cost = _stage_set_cost(selected, stage_registry)
+    return current_expression, selected, selected_cost, selected != all_stage_keys
+
+
+def _format_boolean_expression(expression, stage_registry: dict) -> str:
+    """Return a readable description of a boolean broad-phase expression."""
+    operator = expression[0]
+
+    if operator == "true":
+        return "TRUE (no safe atom restriction)"
+    if operator == "false":
+        return "FALSE"
+    if operator == "stage":
+        labels = sorted(stage_registry[expression[1]]["labels"])
+        return "/".join(labels)
+    if operator == "and":
+        return "(" + " AND ".join(_format_boolean_expression(child, stage_registry) for child in expression[1]) + ")"
+    if operator == "or":
+        return "(" + " OR ".join(_format_boolean_expression(child, stage_registry) for child in expression[1]) + ")"
+    if operator == "threshold":
+        children = ", ".join(_format_boolean_expression(child, stage_registry) for child in expression[2])
+        return f"AT_LEAST_{expression[1]}({children})"
+
+    raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
+
+
+def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
+    """Evaluate a planned boolean expression over broad-phase candidate sets."""
+    operator = expression[0]
+
+    if operator == "false":
+        return set()
+    if operator == "true":
+        raise BiggrepException("Attempted to evaluate a nonrestrictive TRUE broad-phase plan.")
+    if operator == "stage":
+        return set(stage_matches.get(expression[1], set()))
+
+    if operator == "and":
+        child_results = [_evaluate_boolean_expression(child, stage_matches) for child in expression[1]]
+        if not child_results:
+            raise BiggrepException("Boolean AND plan contained no children.")
+
+        child_results.sort(key=len)
+        result = child_results[0]
+        for child_result in child_results[1:]:
+            result.intersection_update(child_result)
+            if not result:
+                break
+        return result
+
+    if operator == "or":
+        result = set()
+        for child in expression[1]:
+            result.update(
+                _evaluate_boolean_expression(
+                    child,
+                    stage_matches,
+                )
+            )
+        return result
+
+    if operator == "threshold":
+        required = expression[1]
+        counts: dict[str, int] = {}
+
+        for child in expression[2]:
+            for path in _evaluate_boolean_expression(child, stage_matches):
+                counts[path] = counts.get(path, 0) + 1
+
+        return {path for path, count in counts.items() if count >= required}
+
+    raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
+
+
+def _build_rule_boolean_plan(
+    rule_name: str,
+    plan,
+    max_required_strings: int,
+    preferred_searches_per_index: int,
+    hard_searches_per_index: int,
+):
+    """Build the strongest safe boolean broad-phase plan within limits.
+
+    max_required_strings retains its existing public/configuration name for
+    compatibility. In the recursive planner it is also the maximum number of
+    operands retained at every AND node.
+    """
+    stage_registry = {}
+    condition_ast = getattr(plan, "condition_ast", None)
+    expression = _build_searchable_boolean_expression(
+        condition_ast,
+        plan,
+        stage_registry,
+    )
+    mode = "boolean_expression"
+
+    # Compatibility fallback for a parser that could not build an AST but did
+    # identify strings guaranteed by the condition. This remains safe because
+    # every selected string is mandatory.
+    if expression == _BOOL_TRUE and getattr(plan, "required_strings", None):
+        (
+            selected_required_strings,
+            _unusable_required_strings,
+            _total_required_searches,
+            _forced_single_required_string,
+        ) = _select_required_string_stages(
+            plan,
+            max_required_strings,
+            preferred_searches_per_index,
+        )
+
+        legacy_children = []
+        for string_name, _group_ids, _atom_count, _longest_atom, _first_group in selected_required_strings:
+            stage_key = _register_string_stage(
+                plan,
+                string_name,
+                stage_registry,
+            )
+            if stage_key is not None:
+                legacy_children.append(("stage", stage_key))
+
+        expression = _make_bool_and(legacy_children)
+        mode = "legacy_required_strings"
+
+    expression, and_limit_events = _limit_boolean_and_children(
+        expression,
+        stage_registry,
+        max_required_strings,
+    )
+
+    if expression == _BOOL_TRUE:
+        return None
+
+    if expression == _BOOL_FALSE:
+        return {
+            "mode": mode,
+            "expression": expression,
+            "stages": [],
+            "stage_registry": stage_registry,
+            "searches_per_index": 0,
+            "pruned": False,
+            "and_limit_events": and_limit_events,
+        }
+
+    (
+        selected_expression,
+        selected_stage_keys,
+        selected_searches_per_index,
+        pruned,
+    ) = _choose_boolean_stages(
+        expression,
+        stage_registry,
+        preferred_searches_per_index,
+        hard_searches_per_index,
+    )
+
+    if selected_expression == _BOOL_TRUE:
+        return None
+
+    stages = [stage_registry[stage_key] for stage_key in selected_stage_keys]
+    stages.sort(
+        key=lambda stage: (
+            -stage["longest_atom"],
+            -stage["max_group_atom_count"],
+            stage["cost"],
+            tuple(sorted(stage["labels"])),
+        )
+    )
+
+    return {
+        "mode": mode,
+        "expression": selected_expression,
+        "stages": stages,
+        "stage_registry": stage_registry,
+        "searches_per_index": selected_searches_per_index,
+        "pruned": pruned,
+        "and_limit_events": and_limit_events,
+    }
+
+
 # FUTURE: investigate whether there is an alternative to biggrep that allows
 #         batched searches as an OR on those searches.
 def _run_bgparse_task(
@@ -603,11 +1386,16 @@ def _broad_phase_search(
     progress_callback: ProgressCallback,
     query_hash: str,
 ) -> tuple[RuleFileMatches, FileConfig]:
-    """Run resource-bounded broad-phase searches and combine their candidates.
+    """Search every safely representable condition structure in broad phase.
 
-    A search stage is an OR of alternative atom groups. Required-string stages
-    are intersected because every selected string is mandatory. All other modes
-    preserve the existing union behaviour.
+    Each YARA string is represented as an OR-union of its alternative atom
+    groups. The condition AST is then evaluated recursively with AND, OR, and
+    at-least-N set operations. Unsupported predicates are treated as TRUE,
+    which can only broaden candidates.
+
+    If an unsupported or unsearchable OR branch could satisfy the rule by
+    itself, no atom-only filter is safe and the planner refuses to run rather
+    than silently omit real matches.
     """
     if query_type == QueryTypeEnum.SURICATA:
         raise NotImplementedError("Suricata broad-phase search is not implemented yet.")
@@ -616,12 +1404,12 @@ def _broad_phase_search(
     logger.debug("Rule search plans broad phase: %s", rule_search_plans)
 
     settings = RetrohuntSettings().search_settings
-    max_required_strings = _positive_int_setting(
+    max_and_children = _positive_int_setting(
         settings,
         "max_required_strings_per_and_search",
         _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH,
     )
-    max_required_string_searches = _positive_int_setting(
+    preferred_searches_per_index = _positive_int_setting(
         settings,
         "max_required_string_searches_per_index",
         _DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX,
@@ -636,287 +1424,115 @@ def _broad_phase_search(
         "max_broad_phase_tasks",
         _DEFAULT_MAX_BROAD_PHASE_TASKS,
     )
-    broad_phase_workers = min(configured_broad_workers, os.cpu_count() or 1)
+    broad_phase_workers = min(
+        configured_broad_workers,
+        os.cpu_count() or 1,
+    )
 
-    # Each rule plan contains one or more stages. Searches within a stage are
-    # OR alternatives. Required-string stages are intersected with one another.
+    if len(indices) > max_broad_phase_tasks:
+        raise BiggrepException(
+            f"{len(indices)} indexes already exceed max_broad_phase_tasks="
+            f"{max_broad_phase_tasks}; even one search per index is impossible."
+        )
+
+    hard_searches_per_index = max_broad_phase_tasks // len(indices)
     broad_plans: dict[str, dict] = {}
 
     for rule_name, plan in rule_search_plans.items():
-        required_string_stages = []
-        unusable_required_strings = []
-        total_required_searches = 0
-        forced_single_required_string = False
-
-        if getattr(plan, "required_strings", None):
-            (
-                selected_required_strings,
-                unusable_required_strings,
-                total_required_searches,
-                forced_single_required_string,
-            ) = _select_required_string_stages(
-                plan,
-                max_required_strings,
-                max_required_string_searches,
-            )
-
-            for string_name, group_ids, _atom_count, _longest_atom, _first_group in selected_required_strings:
-                required_string_stages.append(
-                    {
-                        "label": string_name,
-                        "group_ids": group_ids,
-                        "searches": [
-                            (group_idx, _bgparse_search_string(plan.groups[group_idx])) for group_idx in group_ids
-                        ],
-                    }
-                )
-
-        if required_string_stages:
-            broad_plans[rule_name] = {
-                "mode": "required_strings",
-                "combine": "intersection",
-                "stages": required_string_stages,
-            }
-
-            selected_names = [stage["label"] for stage in required_string_stages]
-            selected_searches = sum(len(stage["searches"]) for stage in required_string_stages)
-            selected_group_ids = {group_idx for stage in required_string_stages for group_idx in stage["group_ids"]}
-
-            logger.info(
-                'Rule "%s": selected %d of %d mandatory strings (%s). '
-                "Their %d alternative atom-group searches per index will be unioned "
-                "within each string and intersected across strings. The complete usable "
-                "mandatory-string plan contains %d searches per index; configured limits "
-                "are %d strings and %d searches per index.",
-                rule_name,
-                len(required_string_stages),
-                len(plan.required_strings),
-                ", ".join(selected_names),
-                selected_searches,
-                total_required_searches,
-                max_required_strings,
-                max_required_string_searches,
-            )
-
-            if unusable_required_strings:
-                logger.info(
-                    'Rule "%s": mandatory strings without usable atom groups were omitted '
-                    "from broad phase: %s. Narrow phase still evaluates the complete rule.",
-                    rule_name,
-                    ", ".join(unusable_required_strings),
-                )
-
-            if forced_single_required_string:
-                logger.warning(
-                    'Rule "%s": the lowest-cost mandatory string exceeds '
-                    "max_required_string_searches_per_index=%d. It was selected alone; "
-                    "the global max_broad_phase_tasks limit still applies.",
-                    rule_name,
-                    max_required_string_searches,
-                )
-
-            logger.info(
-                'Rule "%s": exact atom groups selected: %s',
-                rule_name,
-                _format_group_atoms(plan, selected_group_ids),
-            )
-            continue
-
-        required_or_clauses: list[list[int]] = []
-        unsafe_required_or_clause = False
-        condition_ast = getattr(plan, "condition_ast", None)
-
-        # For ($a or $b) and ($c or $d), each direct OR child is mandatory.
-        # A complete clause is safe to search because every final match must
-        # satisfy that whole clause.
-        if isinstance(condition_ast, AndNode):
-            for child in condition_ast.children:
-                if not isinstance(child, OrNode):
-                    continue
-
-                if not child.children or not all(isinstance(sub, StringNode) for sub in child.children):
-                    unsafe_required_or_clause = True
-                    continue
-
-                clause_group_ids = []
-                clause_usable = True
-
-                for sub in child.children:
-                    valid_group_ids = _valid_group_ids(
-                        plan,
-                        plan.string_groups.get(sub.string_name, []),
-                    )
-                    if not valid_group_ids:
-                        clause_usable = False
-                        unsafe_required_or_clause = True
-                        break
-                    clause_group_ids.extend(valid_group_ids)
-
-                if clause_usable:
-                    clause_group_ids = list(dict.fromkeys(clause_group_ids))
-                    if clause_group_ids:
-                        required_or_clauses.append(clause_group_ids)
-
-        if required_or_clauses:
-            selected_group_ids = min(
-                required_or_clauses,
-                key=lambda clause: (
-                    sum(len(plan.groups[group_idx]) for group_idx in clause),
-                    len(clause),
-                    tuple(clause),
-                ),
-            )
-            selected_clause = _format_or_clause(plan, selected_group_ids)
-
-            broad_plans[rule_name] = {
-                "mode": "required_or_clause",
-                "combine": "union",
-                "stages": [
-                    {
-                        "label": selected_clause,
-                        "group_ids": selected_group_ids,
-                        "searches": [
-                            (group_idx, _bgparse_search_string(plan.groups[group_idx]))
-                            for group_idx in selected_group_ids
-                        ],
-                    }
-                ],
-            }
-
-            logger.info(
-                'Rule "%s": selected mandatory OR clause %s from %d complete '
-                "searchable clause(s). Its %d atom-group alternatives will be unioned.",
-                rule_name,
-                selected_clause,
-                len(required_or_clauses),
-                len(selected_group_ids),
-            )
-            logger.info(
-                'Rule "%s": exact atom groups selected for %s: %s',
-                rule_name,
-                selected_clause,
-                _format_group_atoms(plan, selected_group_ids),
-            )
-            continue
-
-        if unsafe_required_or_clause:
-            fallback_group_ids = [group_idx for group_idx, group in enumerate(plan.groups) if group]
-            broad_plans[rule_name] = {
-                "mode": "fallback",
-                "combine": "union",
-                "stages": [
-                    {
-                        "label": "all searchable atom groups",
-                        "group_ids": fallback_group_ids,
-                        "searches": [
-                            (group_idx, _bgparse_search_string(plan.groups[group_idx]))
-                            for group_idx in fallback_group_ids
-                        ],
-                    }
-                ],
-            }
-
-            logger.info(
-                'Rule "%s": a mandatory OR clause contained an unrecognised, '
-                "non-string, or unsearchable alternative. Falling back to OR-searching "
-                "all %d non-empty atom groups.",
-                rule_name,
-                len(fallback_group_ids),
-            )
-            logger.info(
-                'Rule "%s": exact atom groups selected by fallback: %s',
-                rule_name,
-                _format_group_atoms(plan, fallback_group_ids),
-            )
-            continue
-
-        required_group_ids: set[int] = set()
-        for required_group in getattr(plan, "required_groups", None) or []:
-            if not required_group:
-                continue
-            for group_idx, actual_group in enumerate(plan.groups):
-                if actual_group and set(actual_group) == set(required_group):
-                    required_group_ids.add(group_idx)
-                    break
-
-        if required_group_ids:
-            selected_group_ids = sorted(required_group_ids)
-            broad_plans[rule_name] = {
-                "mode": "required_groups",
-                "combine": "union",
-                "stages": [
-                    {
-                        "label": "parser-required groups",
-                        "group_ids": selected_group_ids,
-                        "searches": [
-                            (group_idx, _bgparse_search_string(plan.groups[group_idx]))
-                            for group_idx in selected_group_ids
-                        ],
-                    }
-                ],
-            }
-
-            logger.info(
-                'Rule "%s": using %d parser-required atom groups and unioning their candidate files.',
-                rule_name,
-                len(selected_group_ids),
-            )
-            logger.info(
-                'Rule "%s": exact parser-required atom groups selected: %s',
-                rule_name,
-                _format_group_atoms(plan, selected_group_ids),
-            )
-            continue
-
-        fallback_group_ids = [group_idx for group_idx, group in enumerate(plan.groups) if group]
-        broad_plans[rule_name] = {
-            "mode": "fallback",
-            "combine": "union",
-            "stages": [
-                {
-                    "label": "all searchable atom groups",
-                    "group_ids": fallback_group_ids,
-                    "searches": [
-                        (group_idx, _bgparse_search_string(plan.groups[group_idx])) for group_idx in fallback_group_ids
-                    ],
-                }
-            ],
-        }
-
-        logger.info(
-            'Rule "%s": no safe mandatory-string, mandatory-OR, or parser-required '
-            "filter was available. Falling back to OR-searching all %d non-empty "
-            "atom groups.",
+        rule_plan = _build_rule_boolean_plan(
             rule_name,
-            len(fallback_group_ids),
-        )
-        logger.info(
-            'Rule "%s": exact atom groups selected by fallback: %s',
-            rule_name,
-            _format_group_atoms(plan, fallback_group_ids),
+            plan,
+            max_and_children,
+            preferred_searches_per_index,
+            hard_searches_per_index,
         )
 
-    searches_per_index = sum(
-        len(stage["searches"]) for rule_plan in broad_plans.values() for stage in rule_plan["stages"]
-    )
+        if rule_plan is None:
+            raise BiggrepException(
+                f'Rule "{rule_name}" has a condition branch that can succeed '
+                "without any recognised searchable string. An atom-only broad "
+                "phase cannot safely restrict that rule, so the search was "
+                "stopped instead of using an unsafe OR-all fallback."
+            )
+
+        broad_plans[rule_name] = rule_plan
+
+        expression_text = _format_boolean_expression(
+            rule_plan["expression"],
+            rule_plan["stage_registry"],
+        )
+        logger.info(
+            'Rule "%s": broad phase will evaluate %s using %d unique '
+            "string stages and %d atom-group searches per index.",
+            rule_name,
+            expression_text,
+            len(rule_plan["stages"]),
+            rule_plan["searches_per_index"],
+        )
+
+        for and_number, limit_event in enumerate(
+            rule_plan["and_limit_events"],
+            start=1,
+        ):
+            kept_text = " AND ".join(
+                _format_boolean_expression(
+                    child,
+                    rule_plan["stage_registry"],
+                )
+                for child in limit_event["kept"]
+            )
+            logger.warning(
+                'Rule "%s": AND node %d contained %d operands; retained the '
+                "strongest %d because max_required_strings_per_and_search=%d. "
+                "Kept: %s. The other %d operands were replaced with TRUE, "
+                "which can only add narrow-phase candidates.",
+                rule_name,
+                and_number,
+                limit_event["original_count"],
+                limit_event["kept_count"],
+                max_and_children,
+                kept_text,
+                len(limit_event["omitted"]),
+            )
+
+        if rule_plan["pruned"]:
+            logger.warning(
+                'Rule "%s": the complete safe boolean plan exceeded configured '
+                "search limits. Omitted stages were replaced with TRUE, which "
+                "can only add narrow-phase candidates. Active plan: %s",
+                rule_name,
+                expression_text,
+            )
+
+        for stage_number, stage in enumerate(rule_plan["stages"], start=1):
+            logger.info(
+                'Rule "%s": boolean stage %d/%d represents %s with %d alternative atom-group searches: %s',
+                rule_name,
+                stage_number,
+                len(rule_plan["stages"]),
+                "/".join(sorted(stage["labels"])),
+                stage["cost"],
+                "; ".join("[" + ", ".join(repr(atom) for atom in atoms) + "]" for atoms in stage["alternatives"]),
+            )
+
+    searches_per_index = sum(rule_plan["searches_per_index"] for rule_plan in broad_plans.values())
     search_count = len(indices) * searches_per_index
-
-    if search_count == 0:
-        # Preserve established plain-string behaviour: plain string atoms are
-        # parsed but do not currently produce an optimised broad-phase plan.
-        if query_type == QueryTypeEnum.STRING:
-            raise NoIndexMatchesException("Search aborted due to no index matches.")
-
-        raise NoAtomException("Broad-phase planner generated no usable atom searches.")
 
     if search_count > max_broad_phase_tasks:
         raise BiggrepException(
             f"Broad-phase plan would generate {search_count} tasks across "
-            f"{len(indices)} indexes, exceeding the configured "
-            f"max_broad_phase_tasks limit of {max_broad_phase_tasks}. "
-            "Reduce the number of rules or selected atom groups, or increase "
-            "the limit if the additional broad-phase load is acceptable."
+            f"{len(indices)} indexes, exceeding max_broad_phase_tasks="
+            f"{max_broad_phase_tasks}. Reduce the number of rules or increase "
+            "the task limit. The planner will not use an unsafe fallback."
         )
+
+    if search_count == 0:
+        if any(rule_plan["expression"] != _BOOL_FALSE for rule_plan in broad_plans.values()):
+            if query_type == QueryTypeEnum.STRING:
+                raise NoIndexMatchesException("Search aborted due to no index matches.")
+            raise NoAtomException("Broad-phase planner generated no usable atom searches.")
+
+        raise NoIndexMatchesException("All rule conditions reduced to FALSE.")
 
     logger.info(
         "Broad search starting: %d tasks across %d indexes using up to %d workers",
@@ -927,33 +1543,31 @@ def _broad_phase_search(
 
     searches_complete = 0
     next_progress_percent = 20
-    progress_callback(SearchPhaseEnum.BROAD_PHASE, 0, search_count, None)
+    progress_callback(
+        SearchPhaseEnum.BROAD_PHASE,
+        0,
+        search_count,
+        None,
+    )
 
     file_config: FileConfig = {}
     rule_matches: RuleFileMatches = {}
-    start = time.time()
+    start_time = time.time()
 
     for rule_name, rule_plan in broad_plans.items():
-        combine = rule_plan["combine"]
-        rule_candidates: set[str] | None = None
+        stage_matches_by_key: dict[tuple, set[str]] = {}
         rule_config: FileConfig = {}
 
-        for stage_number, stage in enumerate(rule_plan["stages"], start=1):
-            stage_searches = stage["searches"]
-            stage_task_count = len(indices) * len(stage_searches)
+        for stage_number, stage in enumerate(
+            rule_plan["stages"],
+            start=1,
+        ):
+            stage_task_count = len(indices) * len(stage["searches"])
             stage_matches: set[str] = set()
-            collect_stage_config = combine == "union" or stage_number == 1
-
-            # For later mandatory-string stages, paths outside the current
-            # intersection can never reach narrow phase. Filtering them while
-            # stdout is streamed prevents large temporary stage result sets.
-            allowed_paths = rule_candidates if combine == "intersection" and rule_candidates is not None else None
 
             def iter_stage_tasks(
-                stage_searches=stage_searches,
+                stage_searches=stage["searches"],
                 rule_name=rule_name,
-                collect_stage_config=collect_stage_config,
-                allowed_paths=allowed_paths,
             ):
                 for index in indices:
                     for search_id, search_string in stage_searches:
@@ -964,25 +1578,25 @@ def _broad_phase_search(
                             search_id,
                             search_string,
                             query_hash,
-                            collect_stage_config,
-                            allowed_paths,
+                            True,
+                            None,
                         )
 
             task_iterator = iter(iter_stage_tasks())
             pending = {}
 
-            # Use threads only to wait on independent bgparse subprocesses.
-            # Unlike multiprocessing.Pool, this does not retain forked Python
-            # workers or pickle complete stdout buffers between processes.
-            # The executor is deliberately recreated for every stage so any
-            # Future-held memory is released before the next intersection.
             with ThreadPoolExecutor(max_workers=broad_phase_workers) as executor:
                 for _ in range(min(broad_phase_workers, stage_task_count)):
                     try:
                         task = next(task_iterator)
                     except StopIteration:
                         break
-                    pending[executor.submit(_run_bgparse_task_args, task)] = task
+                    pending[
+                        executor.submit(
+                            _run_bgparse_task_args,
+                            task,
+                        )
+                    ] = task
 
                 stage_complete = 0
 
@@ -1024,20 +1638,29 @@ def _broad_phase_search(
 
                         if b"<error>" in stderr:
                             error_text = stderr.decode(errors="replace")
-                            error_message = error_text.split("<error>", 1)[1]
+                            error_message = error_text.split(
+                                "<error>",
+                                1,
+                            )[1]
                             if ":" in error_message:
-                                error_message = error_message.split(":", 1)[1]
-                            error_message = error_message.split("\n", 1)[0]
+                                error_message = error_message.split(
+                                    ":",
+                                    1,
+                                )[1]
+                            error_message = error_message.split(
+                                "\n",
+                                1,
+                            )[0]
                             raise BiggrepException(
-                                f"bgparse error:{error_message} - errored while "
-                                f"searching for {completed_rule_name} in {index}"
+                                f"bgparse error:{error_message} - errored "
+                                f"while searching for {completed_rule_name} "
+                                f"in {index}"
                             )
 
                         stage_matches.update(new_matches)
 
-                        if task_config:
-                            for path, cfg in task_config.items():
-                                rule_config.setdefault(path, cfg)
+                        for path, cfg in task_config.items():
+                            rule_config.setdefault(path, cfg)
 
                         stage_complete += 1
                         searches_complete += 1
@@ -1046,7 +1669,10 @@ def _broad_phase_search(
                             SearchPhaseEnum.BROAD_PHASE,
                             searches_complete,
                             search_count,
-                            (completed_rule_name, new_matches),
+                            (
+                                completed_rule_name,
+                                new_matches,
+                            ),
                         )
 
                         current_percent = (searches_complete * 100) // search_count
@@ -1068,7 +1694,12 @@ def _broad_phase_search(
                             task = None
 
                         if task is not None:
-                            pending[executor.submit(_run_bgparse_task_args, task)] = task
+                            pending[
+                                executor.submit(
+                                    _run_bgparse_task_args,
+                                    task,
+                                )
+                            ] = task
 
                         del new_matches
                         del task_config
@@ -1079,64 +1710,45 @@ def _broad_phase_search(
                     f"Broad-phase stage completed {stage_complete} of {stage_task_count} expected tasks."
                 )
 
-            del pending
-            del task_iterator
-            gc.collect()
+            stage_matches_by_key[stage["key"]] = stage_matches
 
-            if combine == "intersection":
-                if rule_candidates is None:
-                    rule_candidates = stage_matches
-                else:
-                    rule_candidates.intersection_update(stage_matches)
-
-                if rule_config:
-                    for path in list(rule_config):
-                        if path not in rule_candidates:
-                            del rule_config[path]
-
-                logger.info(
-                    'Rule "%s": mandatory string %s OR-union produced %d '
-                    "relevant candidates; intersection after %d/%d strings "
-                    "contains %d.",
-                    rule_name,
-                    stage["label"],
-                    len(stage_matches),
-                    stage_number,
-                    len(rule_plan["stages"]),
-                    len(rule_candidates),
-                )
-            else:
-                if rule_candidates is None:
-                    rule_candidates = stage_matches
-                else:
-                    rule_candidates.update(stage_matches)
-
-            del stage_matches
-            gc.collect()
-            logger.debug(
-                'Rule "%s": broad-phase stage %d executor exited and memory cleanup completed',
+            logger.info(
+                'Rule "%s": boolean stage %d/%d (%s) produced %d candidates.',
                 rule_name,
                 stage_number,
+                len(rule_plan["stages"]),
+                "/".join(sorted(stage["labels"])),
+                len(stage_matches),
             )
 
-        final_candidates = rule_candidates or set()
+            del pending
+            del task_iterator
+            release_unused_memory()
+
+        final_candidates = _evaluate_boolean_expression(
+            rule_plan["expression"],
+            stage_matches_by_key,
+        )
         rule_matches[rule_name] = list(final_candidates)
 
         for path in final_candidates:
-            if path in rule_config:
-                file_config[path] = rule_config[path]
+            cfg = rule_config.get(path)
+            if cfg is not None:
+                file_config[path] = cfg
 
-        logger.debug(
-            'Rule "%s": broad-phase mode %s produced %d final candidates',
+        logger.info(
+            'Rule "%s": final boolean broad-phase evaluation returned %d candidates for narrow phase.',
             rule_name,
-            rule_plan["mode"],
             len(final_candidates),
         )
 
-    duration = time.time() - start
+        stage_matches_by_key.clear()
+        rule_config.clear()
+        release_unused_memory()
+
+    duration = time.time() - start_time
     prom_bgparse_duration.labels(query_hash=query_hash).observe(duration)
     logger.debug("Total BigGrep parse time: %s", duration)
-
     logger.debug("All index searches completed")
 
     if all(len(matches) == 0 for matches in rule_matches.values()):
