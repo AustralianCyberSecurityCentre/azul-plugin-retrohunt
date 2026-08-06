@@ -25,12 +25,6 @@ def redis_env(monkeypatch):
         monkeypatch.setenv("REDIS_DB", "0")
         monkeypatch.setenv("REDIS_CLEANUP_DELAY", "30")
         monkeypatch.setenv("MAX_THREAD_COUNT", "20")
-        monkeypatch.setenv("MAX_REQUIRED_STRINGS_PER_AND_SEARCH", "3")
-        monkeypatch.setenv("MAX_REQUIRED_STRING_SEARCHES_PER_INDEX", "4")
-        monkeypatch.setenv("MAX_BROAD_PHASE_WORKERS", "4")
-        monkeypatch.setenv("MAX_BROAD_PHASE_TASKS", "64")
-        monkeypatch.setenv("MAX_NARROW_PHASE_INFLIGHT_FILES", "1")
-        monkeypatch.setenv("NARROW_PHASE_CLEANUP_MULTIPLIER", "10000")
 
 
 @pytest.fixture
@@ -148,14 +142,14 @@ def test_cronjob_cleanup_runs_and_cleans(service):
         env=os.environ.copy(),
     )
 
-    # assert result.returncode == 0, f"Cronjob failed: {result.stderr}"
+    assert result.returncode == 0, f"Cronjob failed: {result.stderr}"
 
     # Hunt should be deleted
-    # assert rs.redis.get("hunt_stale") is None
+    assert rs.redis.get("hunt_stale") is None
 
     # Stream entry should be deleted
     entries = rs.redis.xrange("retrohunt-jobs", "-", "+")
-    # assert len(entries) == 0
+    assert len(entries) == 0
 
 
 def test_cleanup_locks_removes_invalid(service):
@@ -193,6 +187,6 @@ def test_cleanup_locks_removes_invalid(service):
     remaining = rs.redis.keys("retrohunt:hunt_*:lock")
 
     # Assertions
-    # assert healthy.encode() in remaining
-    # assert broken.encode() not in remaining
-    # assert missing.encode() not in remaining
+    assert healthy.encode() in remaining
+    assert broken.encode() not in remaining
+    assert missing.encode() not in remaining

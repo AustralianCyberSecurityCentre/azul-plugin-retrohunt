@@ -46,9 +46,9 @@ from .yara_parse import (
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
 
-# Python's garbage collector may not return large bytes/native YARA
+# Python's garbage collector does not return most large bytes/native YARA
 # allocations to the operating system. On glibc Linux, malloc_trim() releases
-# free heap pages after a bounded narrow-phase batch has fully completed.
+# free heap pages after a bounded narrow-phase batch has fully drained.
 try:
     _libc = ctypes.CDLL(None)
     _malloc_trim = getattr(_libc, "malloc_trim", None)
@@ -68,6 +68,16 @@ def release_unused_memory() -> None:
             _malloc_trim(0)
         except (OSError, ValueError):
             logger.debug("malloc_trim failed", exc_info=True)
+
+
+def _current_rss_mib() -> float | None:
+    """Return current resident memory in MiB on Linux, otherwise None."""
+    try:
+        with open("/proc/self/statm", encoding="utf-8") as statm:
+            resident_pages = int(statm.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
@@ -338,14 +348,76 @@ def _atom_parse(
     return rule_atoms, rule_content, rule_search_plans
 
 
-settings = RetrohuntSettings().search_settings
-MAX_REQUIRED_STRINGS_PER_AND_SEARCH = settings.max_required_strings_per_and_search
-MAX_REQUIRED_STRING_SEARCHES_PER_INDEX = settings.max_required_strings_per_index
-MAX_BROAD_PHASE_WORKERS = settings.max_broad_phase_workers
-MAX_BROAD_PHASE_TASKS = settings.max_broad_phase_tasks
-MAX_NARROW_PHASE_INFLIGHT_FILES = settings.max_narrow_phase_inflight_files
-NARROW_PHASE_CLEANUP_MULTIPLIER = settings.narrow_phase_cleanup_multiplier
-MAX_THREAD_COUNT = settings.max_thread_count
+def _string_names_for_group(plan, group_idx: int) -> list[str]:
+    """Return the YARA string names associated with an atom group for logging."""
+    return sorted(string_name for string_name, group_ids in plan.string_groups.items() if group_idx in group_ids)
+
+
+def _format_group_atoms(plan, group_ids: list[int] | set[int]) -> str:
+    """Format selected broad-phase groups, YARA strings, and exact atoms."""
+    formatted_groups = []
+
+    for group_idx in sorted(set(group_ids)):
+        string_names = _string_names_for_group(plan, group_idx)
+        string_label = ", ".join(string_names) if string_names else "unmapped string"
+        atoms = ", ".join(repr(atom) for atom in sorted(plan.groups[group_idx]))
+        formatted_groups.append(f"group {group_idx} ({string_label}) -> [{atoms}]")
+
+    return "; ".join(formatted_groups)
+
+
+def _format_or_clause(plan, group_ids: list[int]) -> str:
+    """Format the YARA string names represented by a mandatory OR clause."""
+    selected_group_ids = set(group_ids)
+    clause_strings = []
+
+    for string_name, string_group_ids in plan.string_groups.items():
+        valid_group_ids = [group_idx for group_idx in string_group_ids if 0 <= group_idx < len(plan.groups)]
+
+        if valid_group_ids and set(valid_group_ids).issubset(selected_group_ids):
+            clause_strings.append((min(valid_group_ids), string_name))
+
+    ordered_names = [string_name for _first_group_idx, string_name in sorted(clause_strings)]
+
+    if not ordered_names:
+        return f"groups {sorted(selected_group_ids)}"
+
+    return "(" + " OR ".join(ordered_names) + ")"
+
+
+_DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH = 4
+_DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX = 64
+_DEFAULT_MAX_BROAD_PHASE_WORKERS = 2
+_DEFAULT_MAX_BROAD_PHASE_TASKS = 10_000
+_DEFAULT_MAX_NARROW_PHASE_INFLIGHT_FILES = 10
+_DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER = 4
+
+
+def _positive_int_setting(settings, name: str, default: int) -> int:
+    """Read a positive integer setting, falling back safely when invalid."""
+    value = getattr(settings, name, default)
+
+    try:
+        parsed_value = int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid %s=%r; using default %d",
+            name,
+            value,
+            default,
+        )
+        return default
+
+    if parsed_value < 1:
+        logger.warning(
+            "Invalid %s=%r; value must be at least 1. Using default %d",
+            name,
+            value,
+            default,
+        )
+        return default
+
+    return parsed_value
 
 
 def _bgparse_search_string(atoms: list[bytes]) -> str:
@@ -1331,10 +1403,31 @@ def _broad_phase_search(
     bgparse_exec = executables["bgparse"]
     logger.debug("Rule search plans broad phase: %s", rule_search_plans)
 
-    max_and_children = MAX_REQUIRED_STRINGS_PER_AND_SEARCH
-    preferred_searches_per_index = MAX_REQUIRED_STRING_SEARCHES_PER_INDEX
-    broad_phase_workers = MAX_BROAD_PHASE_WORKERS
-    max_broad_phase_tasks = (MAX_BROAD_PHASE_TASKS,)
+    settings = RetrohuntSettings().search_settings
+    max_and_children = _positive_int_setting(
+        settings,
+        "max_required_strings_per_and_search",
+        _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH,
+    )
+    preferred_searches_per_index = _positive_int_setting(
+        settings,
+        "max_required_string_searches_per_index",
+        _DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX,
+    )
+    configured_broad_workers = _positive_int_setting(
+        settings,
+        "max_broad_phase_workers",
+        _DEFAULT_MAX_BROAD_PHASE_WORKERS,
+    )
+    max_broad_phase_tasks = _positive_int_setting(
+        settings,
+        "max_broad_phase_tasks",
+        _DEFAULT_MAX_BROAD_PHASE_TASKS,
+    )
+    broad_phase_workers = min(
+        configured_broad_workers,
+        os.cpu_count() or 1,
+    )
 
     if len(indices) > max_broad_phase_tasks:
         raise BiggrepException(
@@ -1710,6 +1803,25 @@ def _process_bgparse_lines(
     return new_match_paths, file_config
 
 
+def _process_bgparse_output(
+    output: bytes,
+    rule_name: str,
+    file_config: FileConfig,
+    query_hash: str,
+    index_path: str,
+    store_config: bool = True,
+) -> tuple[list[str], FileConfig]:
+    """Compatibility wrapper for tests and callers supplying complete bytes."""
+    return _process_bgparse_lines(
+        output.splitlines(),
+        rule_name,
+        file_config,
+        query_hash=query_hash,
+        index_path=index_path,
+        store_config=store_config,
+    )
+
+
 def yara_callback(_data):
     """Yara callback to abort a yara search once a match is found."""
     return yara.CALLBACK_ABORT
@@ -1766,14 +1878,32 @@ def _narrow_phase_search(
         for rule_name in rule_matches_sets
     }
 
-    configured_threads = MAX_THREAD_COUNT
-    max_inflight_files = MAX_NARROW_PHASE_INFLIGHT_FILES
+    search_settings = RetrohuntSettings().search_settings
+    configured_threads = _positive_int_setting(
+        search_settings,
+        "max_thread_count",
+        1,
+    )
+    default_inflight_files = min(
+        configured_threads,
+        _DEFAULT_MAX_NARROW_PHASE_INFLIGHT_FILES,
+    )
+    max_inflight_files = _positive_int_setting(
+        search_settings,
+        "max_narrow_phase_inflight_files",
+        default_inflight_files,
+    )
+
     total_files = len(file_to_rules)
     active_workers = max(
         1,
         min(configured_threads, max_inflight_files, total_files or 1),
     )
-    cleanup_batch_size = active_workers * NARROW_PHASE_CLEANUP_MULTIPLIER
+    cleanup_batch_size = _positive_int_setting(
+        search_settings,
+        "narrow_phase_cleanup_batch_size",
+        active_workers * _DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER,
+    )
     cleanup_batch_size = max(active_workers, cleanup_batch_size)
 
     # Worker function. A worker holds at most one complete file body. data is
@@ -1852,6 +1982,10 @@ def _narrow_phase_search(
         active_workers,
         cleanup_batch_size,
     )
+
+    rss_mib = _current_rss_mib()
+    if rss_mib is not None:
+        logger.info("Narrow search starting process RSS: %.1f MiB", rss_mib)
 
     def process_batch(
         executor: ThreadPoolExecutor,
@@ -1960,6 +2094,14 @@ def _narrow_phase_search(
             batch.clear()
             release_unused_memory()
 
+            rss_mib = _current_rss_mib()
+            if rss_mib is not None:
+                logger.debug(
+                    "Narrow-phase cleanup batch %d completed; process RSS %.1f MiB",
+                    batch_count,
+                    rss_mib,
+                )
+
     # Convert back to lists and remove empty rules.
     final_matches: RuleFileMatches = {
         rule_name: list(paths) for rule_name, paths in rule_matches_sets.items() if paths
@@ -1995,6 +2137,10 @@ def _narrow_phase_search(
     file_to_rules.clear()
     rule_matches_sets.clear()
     release_unused_memory()
+
+    rss_mib = _current_rss_mib()
+    if rss_mib is not None:
+        logger.info("Narrow search cleanup completed; process RSS: %.1f MiB", rss_mib)
 
     return final_matches
 

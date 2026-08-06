@@ -44,7 +44,7 @@ class RetrohuntService:
     def redis(self):
         """Start redis client if not in memory. Returns client."""
         if self._redis_client is None:
-            settings = RetrohuntSettings().redis
+            settings = RetrohuntSettings().RedisSettings()
             self._redis_client = redis.Redis(
                 host=settings.endpoint,
                 port=settings.port,
@@ -239,9 +239,8 @@ class RetrohuntService:
     def run_periodic_tasks(self):
         """Used in cronjob to remove redis jobs and entries older than cleanup_delay days."""
         now = datetime.now(timezone.utc)
-        settings = RetrohuntSettings.redis
-        cutoff_long = settings.cleanup_delay
-        cutoff_short = settings.cleanup_running_delay
+        cutoff_long = RetrohuntSettings().RedisSettings().cleanup_delay
+        cutoff_short = RetrohuntSettings().RedisSettings().cleanup_running_delay
         cutoff_30d = now - timedelta(days=cutoff_long)
         cutoff_3d = now - timedelta(days=cutoff_short)
         self._cleanup_hunts(cutoff_30d, cutoff_3d)
