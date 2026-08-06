@@ -69,17 +69,6 @@ def release_unused_memory() -> None:
         except (OSError, ValueError):
             logger.debug("malloc_trim failed", exc_info=True)
 
-
-def _current_rss_mib() -> float | None:
-    """Return current resident memory in MiB on Linux, otherwise None."""
-    try:
-        with open("/proc/self/statm", encoding="utf-8") as statm:
-            resident_pages = int(statm.read().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
-    except (OSError, ValueError, IndexError):
-        return None
-
-
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
@@ -1863,10 +1852,6 @@ def _narrow_phase_search(
         cleanup_batch_size,
     )
 
-    rss_mib = _current_rss_mib()
-    if rss_mib is not None:
-        logger.info("Narrow search starting process RSS: %.1f MiB", rss_mib)
-
     def process_batch(
         executor: ThreadPoolExecutor,
         batch: dict[str, set[str]],
@@ -1974,14 +1959,6 @@ def _narrow_phase_search(
             batch.clear()
             release_unused_memory()
 
-            rss_mib = _current_rss_mib()
-            if rss_mib is not None:
-                logger.debug(
-                    "Narrow-phase cleanup batch %d completed; process RSS %.1f MiB",
-                    batch_count,
-                    rss_mib,
-                )
-
     # Convert back to lists and remove empty rules.
     final_matches: RuleFileMatches = {
         rule_name: list(paths) for rule_name, paths in rule_matches_sets.items() if paths
@@ -2017,10 +1994,6 @@ def _narrow_phase_search(
     file_to_rules.clear()
     rule_matches_sets.clear()
     release_unused_memory()
-
-    rss_mib = _current_rss_mib()
-    if rss_mib is not None:
-        logger.info("Narrow search cleanup completed; process RSS: %.1f MiB", rss_mib)
 
     return final_matches
 
