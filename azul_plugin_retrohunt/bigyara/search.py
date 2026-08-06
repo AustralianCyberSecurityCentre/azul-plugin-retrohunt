@@ -46,9 +46,9 @@ from .yara_parse import (
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
 
-# Python's garbage collector does not return most large bytes/native YARA
+# Python's garbage collector may not return large bytes/native YARA
 # allocations to the operating system. On glibc Linux, malloc_trim() releases
-# free heap pages after a bounded narrow-phase batch has fully drained.
+# free heap pages after a bounded narrow-phase batch has fully completed.
 try:
     _libc = ctypes.CDLL(None)
     _malloc_trim = getattr(_libc, "malloc_trim", None)
