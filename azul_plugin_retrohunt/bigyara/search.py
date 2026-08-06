@@ -385,41 +385,6 @@ def _format_or_clause(plan, group_ids: list[int]) -> str:
     return "(" + " OR ".join(ordered_names) + ")"
 
 
-_DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH = 4
-_DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX = 64
-_DEFAULT_MAX_BROAD_PHASE_WORKERS = 2
-_DEFAULT_MAX_BROAD_PHASE_TASKS = 10_000
-_DEFAULT_MAX_NARROW_PHASE_INFLIGHT_FILES = 10
-_DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER = 4
-
-
-def _positive_int_setting(settings, name: str, default: int) -> int:
-    """Read a positive integer setting, falling back safely when invalid."""
-    value = getattr(settings, name, default)
-
-    try:
-        parsed_value = int(value)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Invalid %s=%r; using default %d",
-            name,
-            value,
-            default,
-        )
-        return default
-
-    if parsed_value < 1:
-        logger.warning(
-            "Invalid %s=%r; value must be at least 1. Using default %d",
-            name,
-            value,
-            default,
-        )
-        return default
-
-    return parsed_value
-
-
 def _bgparse_search_string(atoms: list[bytes]) -> str:
     """Return deduplicated bgparse -s arguments for an AND atom group."""
     unique_atoms = dict.fromkeys(atoms)
@@ -1404,30 +1369,35 @@ def _broad_phase_search(
     logger.debug("Rule search plans broad phase: %s", rule_search_plans)
 
     settings = RetrohuntSettings().search_settings
-    max_and_children = _positive_int_setting(
-        settings,
-        "max_required_strings_per_and_search",
-        _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH,
-    )
-    preferred_searches_per_index = _positive_int_setting(
-        settings,
-        "max_required_string_searches_per_index",
-        _DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX,
-    )
-    configured_broad_workers = _positive_int_setting(
-        settings,
-        "max_broad_phase_workers",
-        _DEFAULT_MAX_BROAD_PHASE_WORKERS,
-    )
-    max_broad_phase_tasks = _positive_int_setting(
-        settings,
-        "max_broad_phase_tasks",
-        _DEFAULT_MAX_BROAD_PHASE_TASKS,
-    )
-    broad_phase_workers = min(
-        configured_broad_workers,
-        os.cpu_count() or 1,
-    )
+    max_and_children = settings.max_required_strings_per_and_search
+    preferred_searches_per_index = settings.max_required_string_searches_per_index
+    broad_phase_workers = settings.max_required_broad_phase_workers
+    max_broad_phase_tasks = settings.max_broad_phase_tasks
+
+    # max_and_children = _positive_int_setting(
+    #    settings,
+    #    "max_required_strings_per_and_search",
+    #    _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH,
+    # )
+    # preferred_searches_per_index = _positive_int_setting(
+    #    settings,
+    #    "max_required_string_searches_per_index",
+    #    _DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX,
+    # )
+    # configured_broad_workers = _positive_int_setting(
+    #    settings,
+    #    "max_broad_phase_workers",
+    #    _DEFAULT_MAX_BROAD_PHASE_WORKERS,
+    # )
+    # max_broad_phase_tasks = _positive_int_setting(
+    #    settings,
+    #    "max_broad_phase_tasks",
+    #    _DEFAULT_MAX_BROAD_PHASE_TASKS,
+    # )
+    # broad_phase_workers = min(
+    #    configured_broad_workers,
+    #    os.cpu_count() or 1,
+    # )
 
     if len(indices) > max_broad_phase_tasks:
         raise BiggrepException(
@@ -1878,33 +1848,37 @@ def _narrow_phase_search(
         for rule_name in rule_matches_sets
     }
 
-    search_settings = RetrohuntSettings().search_settings
-    configured_threads = _positive_int_setting(
-        search_settings,
-        "max_thread_count",
-        1,
-    )
-    default_inflight_files = min(
-        configured_threads,
-        _DEFAULT_MAX_NARROW_PHASE_INFLIGHT_FILES,
-    )
-    max_inflight_files = _positive_int_setting(
-        search_settings,
-        "max_narrow_phase_inflight_files",
-        default_inflight_files,
-    )
-
     total_files = len(file_to_rules)
-    active_workers = max(
-        1,
-        min(configured_threads, max_inflight_files, total_files or 1),
-    )
-    cleanup_batch_size = _positive_int_setting(
-        search_settings,
-        "narrow_phase_cleanup_batch_size",
-        active_workers * _DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER,
-    )
-    cleanup_batch_size = max(active_workers, cleanup_batch_size)
+    settings = RetrohuntSettings().search_settings
+    configured_threads = settings.max_thread_count
+    # max_inflight_files = settings.max_narrow_phase_inflight_files
+    active_workers = min(configured_threads, total_files)
+    cleanup_batch_size = active_workers * settings.default_narrow_phase_cleanup_multiplier
+    # configured_threads = _positive_int_setting(
+    #    search_settings,
+    #    "max_thread_count",
+    #    1,
+    # )
+    # default_inflight_files = min(
+    #    configured_threads,
+    #    _DEFAULT_MAX_NARROW_PHASE_INFLIGHT_FILES,
+    # )
+    # max_inflight_files = _positive_int_setting(
+    #    search_settings,
+    #    "max_narrow_phase_inflight_files",
+    #    default_inflight_files,
+    # )
+
+    # active_workers = max(
+    #    1,
+    #    min(configured_threads, max_inflight_files, total_files or 1),
+    # )
+    # cleanup_batch_size = _positive_int_setting(
+    #    search_settings,
+    #    "narrow_phase_cleanup_batch_size",
+    #    active_workers * _DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER,
+    # )
+    # cleanup_batch_size = max(active_workers, cleanup_batch_size)
 
     # Worker function. A worker holds at most one complete file body. data is
     # deleted in finally so YARA timeouts/errors cannot pin a large bytes object
