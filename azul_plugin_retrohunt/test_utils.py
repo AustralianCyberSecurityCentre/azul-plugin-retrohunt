@@ -41,6 +41,12 @@ class RetrohuntBaseTest:
         os.environ["REDIS_TTL"] = "21600000"
         os.environ["REDIS_EXCEPTION_WAIT"] = "60"
         os.environ["MAX_THREAD_COUNT"] = "20"
+        os.environ["MAX_REQUIRED_STRINGS_PER_AND_SEARCH"] = "3"
+        os.environ["MAX_REQUIRED_STRING_SEARCHES_PER_INDEX"] = "4"
+        os.environ["MAX_BROAD_PHASE_WORKERS"] = "4"
+        os.environ["MAX_BROAD_PHASE_TASKS"] = "64"
+        os.environ["MAX_NARROW_PHASE_INFLIGHT_FILES"] = "1"
+        os.environ["NARROW_PHASE_CLEANUP_MULTIPLIER"] = "10000"
         self.indexer_cfg_name = "content"
         self.indexers_cfg = {
             self.indexer_cfg_name: RetrohuntSettings.Indexer(
