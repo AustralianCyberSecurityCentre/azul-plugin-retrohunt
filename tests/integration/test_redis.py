@@ -25,6 +25,12 @@ def redis_env(monkeypatch):
         monkeypatch.setenv("REDIS_DB", "0")
         monkeypatch.setenv("REDIS_CLEANUP_DELAY", "30")
         monkeypatch.setenv("MAX_THREAD_COUNT", "20")
+        monkeypatch.setenv("MAX_REQUIRED_STRINGS_PER_AND_SEARCH", "3")
+        monkeypatch.setenv("MAX_REQUIRED_STRING_SEARCHES_PER_INDEX", "4")
+        monkeypatch.setenv("MAX_BROAD_PHASE_WORKERS", "4")
+        monkeypatch.setenv("MAX_BROAD_PHASE_TASKS", "64")
+        monkeypatch.setenv("MAX_NARROW_PHASE_INFLIGHT_FILES", "1")
+        monkeypatch.setenv("NARROW_PHASE_CLEANUP_MULTIPLIER", "10000")
 
 
 @pytest.fixture
