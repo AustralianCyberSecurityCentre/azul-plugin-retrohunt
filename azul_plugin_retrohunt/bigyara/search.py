@@ -348,43 +348,6 @@ def _atom_parse(
     return rule_atoms, rule_content, rule_search_plans
 
 
-def _string_names_for_group(plan, group_idx: int) -> list[str]:
-    """Return the YARA string names associated with an atom group for logging."""
-    return sorted(string_name for string_name, group_ids in plan.string_groups.items() if group_idx in group_ids)
-
-
-def _format_group_atoms(plan, group_ids: list[int] | set[int]) -> str:
-    """Format selected broad-phase groups, YARA strings, and exact atoms."""
-    formatted_groups = []
-
-    for group_idx in sorted(set(group_ids)):
-        string_names = _string_names_for_group(plan, group_idx)
-        string_label = ", ".join(string_names) if string_names else "unmapped string"
-        atoms = ", ".join(repr(atom) for atom in sorted(plan.groups[group_idx]))
-        formatted_groups.append(f"group {group_idx} ({string_label}) -> [{atoms}]")
-
-    return "; ".join(formatted_groups)
-
-
-def _format_or_clause(plan, group_ids: list[int]) -> str:
-    """Format the YARA string names represented by a mandatory OR clause."""
-    selected_group_ids = set(group_ids)
-    clause_strings = []
-
-    for string_name, string_group_ids in plan.string_groups.items():
-        valid_group_ids = [group_idx for group_idx in string_group_ids if 0 <= group_idx < len(plan.groups)]
-
-        if valid_group_ids and set(valid_group_ids).issubset(selected_group_ids):
-            clause_strings.append((min(valid_group_ids), string_name))
-
-    ordered_names = [string_name for _first_group_idx, string_name in sorted(clause_strings)]
-
-    if not ordered_names:
-        return f"groups {sorted(selected_group_ids)}"
-
-    return "(" + " OR ".join(ordered_names) + ")"
-
-
 def _bgparse_search_string(atoms: list[bytes]) -> str:
     """Return deduplicated bgparse -s arguments for an AND atom group."""
     unique_atoms = dict.fromkeys(atoms)
@@ -1185,6 +1148,7 @@ def _build_rule_boolean_plan(
         plan,
         stage_registry,
     )
+    print("THIS IS EXPRESSION: ", expression)
     mode = "boolean_expression"
 
     # Compatibility fallback for a parser that could not build an AST but did
@@ -1369,6 +1333,31 @@ def _broad_phase_search(
     logger.debug("Rule search plans broad phase: %s", rule_search_plans)
 
     settings = RetrohuntSettings().search_settings
+    logger.warning(
+        "Search settings types: "
+        "max_required_strings_per_and_search=%r (%s), "
+        "max_required_string_searches_per_index=%r (%s), "
+        "max_required_broad_phase_workers=%r (%s), "
+        "max_broad_phase_tasks=%r (%s), "
+        "max_thread_count=%r (%s), "
+        "max_narrow_phase_inflight_files=%r (%s), "
+        "default_narrow_phase_cleanup_multiplier=%r (%s)",
+        settings.max_required_strings_per_and_search,
+        type(settings.max_required_strings_per_and_search).__name__,
+        settings.max_required_string_searches_per_index,
+        type(settings.max_required_string_searches_per_index).__name__,
+        settings.max_required_broad_phase_workers,
+        type(settings.max_required_broad_phase_workers).__name__,
+        settings.max_broad_phase_tasks,
+        type(settings.max_broad_phase_tasks).__name__,
+        settings.max_thread_count,
+        type(settings.max_thread_count).__name__,
+        settings.max_narrow_phase_inflight_files,
+        type(settings.max_narrow_phase_inflight_files).__name__,
+        settings.default_narrow_phase_cleanup_multiplier,
+        type(settings.default_narrow_phase_cleanup_multiplier).__name__,
+    )
+
     max_and_children = settings.max_required_strings_per_and_search
     preferred_searches_per_index = settings.max_required_string_searches_per_index
     broad_phase_workers = settings.max_required_broad_phase_workers
@@ -1419,7 +1408,7 @@ def _broad_phase_search(
 
         if rule_plan is None:
             raise BiggrepException(
-                f'Rule "{rule_name}" has a condition branch that can succeed '
+                f'Rule "{rule_name}" has a condition branch that can succeed {rule_search_plans}'
                 "without any recognised searchable string. An atom-only broad "
                 "phase cannot safely restrict that rule, so the search was "
                 "stopped instead of using an unsafe OR-all fallback."
@@ -1850,10 +1839,38 @@ def _narrow_phase_search(
 
     total_files = len(file_to_rules)
     settings = RetrohuntSettings().search_settings
+    logger.warning(
+        "Search settings types: "
+        "max_required_strings_per_and_search=%r (%s), "
+        "max_required_string_searches_per_index=%r (%s), "
+        "max_required_broad_phase_workers=%r (%s), "
+        "max_broad_phase_tasks=%r (%s), "
+        "max_thread_count=%r (%s), "
+        "max_narrow_phase_inflight_files=%r (%s), "
+        "default_narrow_phase_cleanup_multiplier=%r (%s)",
+        settings.max_required_strings_per_and_search,
+        type(settings.max_required_strings_per_and_search).__name__,
+        settings.max_required_string_searches_per_index,
+        type(settings.max_required_string_searches_per_index).__name__,
+        settings.max_required_broad_phase_workers,
+        type(settings.max_required_broad_phase_workers).__name__,
+        settings.max_broad_phase_tasks,
+        type(settings.max_broad_phase_tasks).__name__,
+        settings.max_thread_count,
+        type(settings.max_thread_count).__name__,
+        settings.max_narrow_phase_inflight_files,
+        type(settings.max_narrow_phase_inflight_files).__name__,
+        settings.default_narrow_phase_cleanup_multiplier,
+        type(settings.default_narrow_phase_cleanup_multiplier).__name__,
+    )
     configured_threads = settings.max_thread_count
     # max_inflight_files = settings.max_narrow_phase_inflight_files
     active_workers = min(configured_threads, total_files)
     cleanup_batch_size = active_workers * settings.default_narrow_phase_cleanup_multiplier
+
+    print("configured threads: ", configured_threads)
+    print("active workers: ", active_workers)
+    print(" cleanup batch size: ", cleanup_batch_size)
     # configured_threads = _positive_int_setting(
     #    search_settings,
     #    "max_thread_count",

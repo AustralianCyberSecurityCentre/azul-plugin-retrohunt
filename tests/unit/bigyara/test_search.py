@@ -210,7 +210,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
                 $a = "abcd"
                 $b = "notfound"
             condition:
-                #a == 1 or $b
+                #a == 1 and $a or $b
         }
         """
         results: RuleFileMatches = search(

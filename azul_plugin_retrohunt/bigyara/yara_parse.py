@@ -1040,17 +1040,17 @@ def parse_yara_rules(
                 )
 
             if len(yara_string.atoms) == 0:
-                logger.warning(
-                    "No usable broad-phase atoms found: rule=%s string=%s "
-                    "modifiers=%s regex=%r. The string remains in the condition "
-                    "AST, but broad phase will treat it as unsearchable and only "
-                    "use other condition structures when that is provably safe.",
+                logger.error(
+                    "No atoms found: rule=%s string=%s modifiers=%s regex=%r",
                     yara_rules[rule_index].name,
                     yara_string.name,
                     yara_string.modifiers,
                     yara_string.re,
                 )
-                continue
+
+                raise YaraStringNoAtomException(
+                    f"Failed to find any valid atoms for string {yara_string.name} in {yara_rules[rule_index].name}"
+                )
 
             for yara_atom in yara_string.atoms:
                 if yara_atom not in new_atoms:
