@@ -69,6 +69,7 @@ def release_unused_memory() -> None:
         except (OSError, ValueError):
             logger.debug("malloc_trim failed", exc_info=True)
 
+
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
 
 prom_broad_phase_duration = Histogram(
