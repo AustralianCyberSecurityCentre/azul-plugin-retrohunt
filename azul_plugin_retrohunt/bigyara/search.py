@@ -593,6 +593,70 @@ def _register_string_stage(plan, string_name: str, stage_registry: dict):
     return stage_key
 
 
+def _build_or_all_atoms_fallback_plan(plan):
+    """Return a broad-phase plan that OR-searches every usable extracted atom.
+
+    This is a compatibility fallback for valid YARA rules whose condition
+    cannot be represented by the recursive broad-phase condition planner.
+    Each unique atom is searched independently and all atom results are
+    unioned. Narrow-phase YARA remains responsible for exact rule evaluation.
+    """
+    stage_registry = {}
+
+    for string_name in sorted(plan.string_groups):
+        for group_idx in _valid_group_ids(
+            plan,
+            plan.string_groups.get(string_name, []),
+        ):
+            for atom in plan.groups[group_idx]:
+                stage_key = ((atom,),)
+                stage = stage_registry.get(stage_key)
+
+                if stage is None:
+                    stage = {
+                        "key": stage_key,
+                        "labels": set(),
+                        "group_ids": [group_idx],
+                        "alternatives": ((atom,),),
+                        "searches": [
+                            (
+                                group_idx,
+                                _bgparse_search_string([atom]),
+                            )
+                        ],
+                        "cost": 1,
+                        "longest_atom": len(atom),
+                        "max_group_atom_count": 1,
+                    }
+                    stage_registry[stage_key] = stage
+
+                stage["labels"].add(string_name)
+
+    if not stage_registry:
+        return None
+
+    stages = list(stage_registry.values())
+    stages.sort(
+        key=lambda stage: (
+            -stage["longest_atom"],
+            tuple(sorted(stage["labels"])),
+            stage["key"],
+        )
+    )
+
+    expression = _make_bool_or(("stage", stage["key"]) for stage in stages)
+
+    return {
+        "mode": "fallback_or_all_atoms",
+        "expression": expression,
+        "stages": stages,
+        "stage_registry": stage_registry,
+        "searches_per_index": len(stages),
+        "pruned": False,
+        "and_limit_events": [],
+    }
+
+
 def _build_searchable_boolean_expression(node, plan, stage_registry: dict):
     """Build a safe atom-search upper approximation of a condition AST.
 
@@ -1151,33 +1215,11 @@ def _build_rule_boolean_plan(
     print("THIS IS EXPRESSION: ", expression)
     mode = "boolean_expression"
 
-    # Compatibility fallback for a parser that could not build an AST but did
-    # identify strings guaranteed by the condition. This remains safe because
-    # every selected string is mandatory.
-    if expression == _BOOL_TRUE and getattr(plan, "required_strings", None):
-        (
-            selected_required_strings,
-            _unusable_required_strings,
-            _total_required_searches,
-            _forced_single_required_string,
-        ) = _select_required_string_stages(
-            plan,
-            max_required_strings,
-            preferred_searches_per_index,
-        )
-
-        legacy_children = []
-        for string_name, _group_ids, _atom_count, _longest_atom, _first_group in selected_required_strings:
-            stage_key = _register_string_stage(
-                plan,
-                string_name,
-                stage_registry,
-            )
-            if stage_key is not None:
-                legacy_children.append(("stage", stage_key))
-
-        expression = _make_bool_and(legacy_children)
-        mode = "legacy_required_strings"
+    # If YARA atom extraction succeeded but our condition planner could not
+    # derive any restrictive expression, fall back to OR-searching every
+    # usable extracted atom. Narrow-phase YARA still decides exact matches.
+    if expression == _BOOL_TRUE:
+        return _build_or_all_atoms_fallback_plan(plan)
 
     expression, and_limit_events = _limit_boolean_and_children(
         expression,
@@ -1212,7 +1254,7 @@ def _build_rule_boolean_plan(
     )
 
     if selected_expression == _BOOL_TRUE:
-        return None
+        return _build_or_all_atoms_fallback_plan(plan)
 
     stages = [stage_registry[stage_key] for stage_key in selected_stage_keys]
     stages.sort(
@@ -1407,14 +1449,19 @@ def _broad_phase_search(
         )
 
         if rule_plan is None:
-            raise BiggrepException(
-                f'Rule "{rule_name}" has a condition branch that can succeed {rule_search_plans}'
-                "without any recognised searchable string. An atom-only broad "
-                "phase cannot safely restrict that rule, so the search was "
-                "stopped instead of using an unsafe OR-all fallback."
-            )
+            raise NoAtomException(f'Rule "{rule_name}" has no usable extracted atoms for broad-phase fallback.')
 
         broad_plans[rule_name] = rule_plan
+
+        if rule_plan["mode"] == "fallback_or_all_atoms":
+            logger.warning(
+                'Rule "%s": the YARA rule produced valid atoms, but its '
+                "condition could not be represented safely by the broad-phase "
+                "planner. Falling back to OR-searching all %d unique extracted "
+                "atoms; narrow-phase YARA will evaluate the original condition.",
+                rule_name,
+                len(rule_plan["stages"]),
+            )
 
         expression_text = _format_boolean_expression(
             rule_plan["expression"],
