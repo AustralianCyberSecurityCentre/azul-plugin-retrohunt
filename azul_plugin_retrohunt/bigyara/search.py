@@ -1034,17 +1034,7 @@ def _choose_boolean_stages(
     all_stage_keys = _expression_stage_keys(expression)
     full_cost = _stage_set_cost(all_stage_keys, stage_registry)
 
-    # Narrow phase is substantially more expensive than broad phase, so keep
-    # the complete safe Boolean plan whenever it fits under the hard global
-    # task limit. The preferred per-index search count is only used when the
-    # complete plan itself cannot fit under that hard limit.
-    #
-    # This preserves searchable threshold/OR branches such as:
-    #   all of ($eml*) and 1 of ($subject*) and 4 of ($body*)
-    # instead of dropping them merely because the plan exceeds the preferred
-    # per-index search count. Evaluating more of the real condition in broad
-    # phase can substantially reduce narrow-phase candidates.
-    if full_cost <= hard_searches_per_index:
+    if full_cost <= preferred_searches_per_index and full_cost <= hard_searches_per_index:
         return expression, all_stage_keys, full_cost, False
 
     minimum_selection = _minimum_restrictive_stage_set(
