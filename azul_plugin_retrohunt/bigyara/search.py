@@ -1191,7 +1191,7 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
                 counts[path] = counts.get(path, 0) + 1
         print("Result: ", {path for path, count in counts.items() if count >= required})
         return {path for path, count in counts.items() if count >= required}
-    
+
     raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
 
 
