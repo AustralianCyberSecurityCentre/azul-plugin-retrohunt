@@ -252,6 +252,37 @@ class TestConditionAstParsing(ConditionAstTestCase):
             ),
         )
 
+    def test_positional_at_predicate_becomes_string_node(self):
+        """A positional `at` predicate still guarantees the string exists."""
+        self.assertEqual(
+            self.build_ast("$a at entrypoint"),
+            StringNode("$a"),
+        )
+
+    def test_positional_in_predicate_becomes_string_node(self):
+        """A positional `in` predicate still guarantees the string exists."""
+        self.assertEqual(
+            self.build_ast("$a in (entrypoint..entrypoint + 10)"),
+            StringNode("$a"),
+        )
+
+    def test_for_any_positional_branch_is_retained_as_unknown(self):
+        """Unsupported for-of syntax must stay conservative while siblings parse."""
+        condition_ast = _build_condition_ast(
+            "(for any of ($fpu*) : ($ at entrypoint)) or $fpu2 in (entrypoint..entrypoint + 10)",
+            {"$fpu1", "$fpu2", "$fpu3"},
+        )
+
+        self.assertEqual(
+            condition_ast,
+            OrNode(
+                children=[
+                    UnknownNode(raw_text=("for ($fpu1 or $fpu2 or $fpu3) : ($ at entrypoint)")),
+                    StringNode("$fpu2"),
+                ]
+            ),
+        )
+
     def test_condition_metadata(self):
         cases = (
             ("any of them", 4, ("any", 1)),
@@ -327,6 +358,13 @@ class TestRequiredStrings(ConditionAstTestCase):
         self.assertSetEqual(
             self.required_strings("4 of them"),
             {"$a", "$b", "$c", "$d"},
+        )
+
+    def test_positional_string_is_still_required(self):
+        """Ignoring position in broad phase must not lose string requirement."""
+        self.assertSetEqual(
+            self.required_strings("$a at entrypoint and $b"),
+            {"$a", "$b"},
         )
 
     def test_none_ast_has_no_required_strings(self):
@@ -586,6 +624,155 @@ class TestRuleSearchPlanIntegration(unittest.TestCase):
         yara_string.modifiers = []
         yara_string.re = b""
         return yara_string
+
+    def test_parse_yara_rules_nocase_uses_small_atom_pass_only(self):
+        """Nocase rules must keep the small-atom result and skip yarac-large."""
+        parsed_rule = yara_parse.YaraRule()
+        parsed_rule.name = "NoCaseRule"
+
+        yara_string = self.make_yara_string("$a", b"aaaa")
+        yara_string.modifiers = ["nocase"]
+        parsed_rule.strings = [yara_string]
+
+        rule_text = """
+        rule NoCaseRule
+        {
+            strings:
+                $a = "aaaa" nocase
+            condition:
+                $a
+        }
+        """
+
+        with mock.patch.object(
+            yara_parse,
+            "_parse_yara_with_exe",
+            return_value=[parsed_rule],
+        ) as parse_mock:
+            rule_atoms, _rule_content, plans = parse_yara_rules(
+                rule_text,
+                lambda *_args: None,
+            )
+
+        self.assertEqual(parse_mock.call_count, 1)
+        self.assertEqual(
+            parse_mock.call_args.args[0],
+            yara_parse.executables["yarac-small"],
+        )
+        self.assertEqual(rule_atoms["NoCaseRule"], [b"aaaa"])
+        self.assertDictEqual(
+            plans["NoCaseRule"].string_groups,
+            {"$a": [0]},
+        )
+        self.assertEqual(
+            plans["NoCaseRule"].condition_ast,
+            StringNode("$a"),
+        )
+
+    def test_parse_yara_rules_renames_anonymous_strings(self):
+        """Anonymous `$ = ...` strings must remain distinct in the search plan."""
+        parsed_rule = yara_parse.YaraRule()
+        parsed_rule.name = "AnonymousRule"
+        parsed_rule.strings = [
+            self.make_yara_string("$", b"aaaa"),
+            self.make_yara_string("$", b"bbbb"),
+        ]
+
+        rule_text = """
+        rule AnonymousRule
+        {
+            strings:
+                $ = "aaaa"
+                $ = "bbbb"
+            condition:
+                2 of them
+        }
+        """
+
+        with mock.patch.object(
+            yara_parse,
+            "_parse_yara_with_exe",
+            return_value=[parsed_rule],
+        ):
+            rule_atoms, _rule_content, plans = parse_yara_rules(
+                rule_text,
+                lambda *_args: None,
+            )
+
+        self.assertCountEqual(
+            rule_atoms["AnonymousRule"],
+            [b"aaaa", b"bbbb"],
+        )
+
+        plan = plans["AnonymousRule"]
+        self.assertDictEqual(
+            plan.string_groups,
+            {
+                "$anon_0": [0],
+                "$anon_1": [1],
+            },
+        )
+        self.assertEqual(
+            plan.condition_ast,
+            NOfNode(
+                required=2,
+                children=[
+                    StringNode("$anon_0"),
+                    StringNode("$anon_1"),
+                ],
+            ),
+        )
+        self.assertSetEqual(
+            plan.required_strings,
+            {"$anon_0", "$anon_1"},
+        )
+
+    def test_parse_yara_rules_stores_raw_condition(self):
+        """The exact parsed condition text should be retained on the plan."""
+        parsed_rule = yara_parse.YaraRule()
+        parsed_rule.name = "RawConditionRule"
+        parsed_rule.strings = [
+            self.make_yara_string("$a", b"aaaa"),
+        ]
+
+        rule_text = """
+        rule RawConditionRule
+        {
+            strings:
+                $a = "aaaa"
+            condition:
+                filesize > 1MB and $a
+        }
+        """
+
+        with mock.patch.object(
+            yara_parse,
+            "_parse_yara_with_exe",
+            return_value=[parsed_rule],
+        ):
+            _rule_atoms, _rule_content, plans = parse_yara_rules(
+                rule_text,
+                lambda *_args: None,
+            )
+
+        plan = plans["RawConditionRule"]
+        self.assertEqual(
+            plan.raw_condition,
+            "filesize > 1MB and $a",
+        )
+        self.assertEqual(
+            plan.condition_ast,
+            AndNode(
+                children=[
+                    UnknownNode("filesize > 1MB"),
+                    StringNode("$a"),
+                ]
+            ),
+        )
+        self.assertSetEqual(
+            plan.required_strings,
+            {"$a"},
+        )
 
     def test_parse_yara_rules_populates_plan_fields(self):
         parsed_rule = yara_parse.YaraRule()

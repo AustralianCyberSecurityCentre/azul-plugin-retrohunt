@@ -1125,7 +1125,8 @@ def _choose_boolean_stages(
 def _format_boolean_expression(expression, stage_registry: dict) -> str:
     """Return a readable description of a boolean broad-phase expression."""
     operator = expression[0]
-
+    logger.info("non readable expression: ", expression)
+    logger.info("stage registry ", stage_registry)
     if operator == "true":
         return "TRUE (no safe atom restriction)"
     if operator == "false":
@@ -2113,9 +2114,6 @@ def _narrow_phase_search(
 
     batch_count = 0
 
-    # One executor is reused for the entire hunt. Recreating pools for every
-    # tiny chunk creates new native allocator arenas and is a major reason RSS
-    # remains high after large-file scans.
     with ThreadPoolExecutor(max_workers=active_workers) as executor:
         for batch_count, batch in enumerate(
             _pop_dict_chunks(file_to_rules, cleanup_batch_size),
