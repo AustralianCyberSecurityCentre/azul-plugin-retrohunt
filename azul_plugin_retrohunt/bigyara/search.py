@@ -1300,7 +1300,7 @@ def _run_bgparse_task(
     """
     cmd = f"{bgparse_exec} {search_string}{index}"
     task_config: FileConfig = {}
-    logger.info("Command line biggrep ")
+    logger.info(f'Command line biggrep {search_string}')
     logger.info(cmd)
     with tempfile.TemporaryFile() as stderr_file:
         process = subprocess.Popen(  # noqa: S602  # nosec: B602
