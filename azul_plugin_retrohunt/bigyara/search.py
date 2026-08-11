@@ -593,6 +593,14 @@ def _register_string_stage(plan, string_name: str, stage_registry: dict):
     return stage_key
 
 
+def _stage_label_text(stage: dict) -> str:
+    """Return a readable description of the YARA strings represented by a stage."""
+    if stage.get("combined_and"):
+        return " AND ".join("/".join(label_group) for label_group in stage["label_groups"])
+
+    return "/".join(sorted(stage["labels"]))
+
+
 def _build_or_all_atoms_fallback_plan(plan):
     """Return a broad-phase plan that OR-searches every usable extracted atom.
 
@@ -1024,6 +1032,122 @@ def _limit_boolean_and_children(
     return visit(expression), limit_events
 
 
+def _combine_single_search_and_stages(
+    expression,
+    stage_registry: dict,
+):
+    """Batch direct single-search AND operands into one bgparse search.
+
+    A stage with exactly one physical search already represents one mandatory
+    atom group. For a direct Boolean AND such as:
+
+        $a AND $b AND $c
+
+    where each string has one physical atom-group search, running:
+
+        bgparse -s<A> -s<B> -s<C> <index>
+
+    is exactly equivalent to running the three searches independently and
+    intersecting their result sets afterwards.
+
+    Only direct AND children with exactly one physical search are combined.
+    Stages with multiple alternatives (for example nocase expansions) remain
+    separate because combining them would require a Cartesian product of their
+    alternatives. OR and threshold structure is preserved unchanged.
+    """
+    operator = expression[0]
+
+    if operator in {"true", "false", "stage"}:
+        return expression
+
+    if operator == "or":
+        return _make_bool_or(_combine_single_search_and_stages(child, stage_registry) for child in expression[1])
+
+    if operator == "threshold":
+        return _make_bool_threshold(
+            expression[1],
+            [_combine_single_search_and_stages(child, stage_registry) for child in expression[2]],
+        )
+
+    if operator != "and":
+        raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
+
+    simplified = _make_bool_and(_combine_single_search_and_stages(child, stage_registry) for child in expression[1])
+    if simplified[0] != "and":
+        return simplified
+
+    children = list(simplified[1])
+    batchable_children = [
+        child
+        for child in children
+        if child[0] == "stage"
+        and stage_registry[child[1]]["cost"] == 1
+        and len(stage_registry[child[1]]["searches"]) == 1
+    ]
+
+    if len(batchable_children) < 2:
+        return simplified
+
+    # Canonicalise the constituent keys so the same logical AND batch can be
+    # reused if it appears elsewhere in the expression in a different order.
+    constituent_keys = tuple(
+        sorted(
+            (child[1] for child in batchable_children),
+            key=repr,
+        )
+    )
+    combined_stage_key = ("combined_and", constituent_keys)
+    combined_stage = stage_registry.get(combined_stage_key)
+
+    if combined_stage is None:
+        constituent_stages = [stage_registry[stage_key] for stage_key in constituent_keys]
+
+        combined_atoms = tuple(
+            dict.fromkeys(atom for stage in constituent_stages for atom in stage["alternatives"][0])
+        )
+        if not combined_atoms:
+            return simplified
+
+        combined_group_ids = [group_id for stage in constituent_stages for group_id in stage["group_ids"]]
+        combined_labels = set().union(*(stage["labels"] for stage in constituent_stages))
+        label_groups = tuple(tuple(sorted(stage["labels"])) for stage in constituent_stages)
+
+        combined_stage = {
+            "key": combined_stage_key,
+            "labels": combined_labels,
+            "label_groups": label_groups,
+            "combined_and": True,
+            "group_ids": combined_group_ids,
+            "alternatives": (combined_atoms,),
+            "searches": [
+                (
+                    combined_group_ids[0],
+                    _bgparse_search_string(list(combined_atoms)),
+                )
+            ],
+            "cost": 1,
+            "longest_atom": max(len(atom) for atom in combined_atoms),
+            "max_group_atom_count": len(combined_atoms),
+        }
+        stage_registry[combined_stage_key] = combined_stage
+
+    batchable_set = set(batchable_children)
+    combined_child = ("stage", combined_stage_key)
+    new_children = []
+    combined_inserted = False
+
+    for child in children:
+        if child in batchable_set:
+            if not combined_inserted:
+                new_children.append(combined_child)
+                combined_inserted = True
+            continue
+
+        new_children.append(child)
+
+    return _make_bool_and(new_children)
+
+
 def _choose_boolean_stages(
     expression,
     stage_registry: dict,
@@ -1132,8 +1256,7 @@ def _format_boolean_expression(expression, stage_registry: dict) -> str:
     if operator == "false":
         return "FALSE"
     if operator == "stage":
-        labels = sorted(stage_registry[expression[1]]["labels"])
-        return "/".join(labels)
+        return _stage_label_text(stage_registry[expression[1]])
     if operator == "and":
         return "(" + " AND ".join(_format_boolean_expression(child, stage_registry) for child in expression[1]) + ")"
     if operator == "or":
@@ -1228,6 +1351,15 @@ def _build_rule_boolean_plan(
         expression,
         stage_registry,
         max_required_strings,
+    )
+
+    # Direct mandatory strings with one physical atom-group search each can be
+    # executed as one bgparse command containing multiple -s arguments. This
+    # preserves exact AND semantics while avoiding separate broad result sets
+    # and a later Python-side intersection.
+    expression = _combine_single_search_and_stages(
+        expression,
+        stage_registry,
     )
 
     if expression == _BOOL_TRUE:
@@ -1515,15 +1647,25 @@ def _broad_phase_search(
             )
 
         for stage_number, stage in enumerate(rule_plan["stages"], start=1):
-            logger.info(
-                'Rule "%s": boolean stage %d/%d represents %s with %d alternative atom-group searches: %s',
-                rule_name,
-                stage_number,
-                len(rule_plan["stages"]),
-                "/".join(sorted(stage["labels"])),
-                stage["cost"],
-                "; ".join("[" + ", ".join(repr(atom) for atom in atoms) + "]" for atoms in stage["alternatives"]),
-            )
+            if stage.get("combined_and"):
+                logger.info(
+                    'Rule "%s": boolean stage %d/%d batches mandatory AND strings %s into one bgparse search: %s',
+                    rule_name,
+                    stage_number,
+                    len(rule_plan["stages"]),
+                    _stage_label_text(stage),
+                    stage["searches"][0][1].strip(),
+                )
+            else:
+                logger.info(
+                    'Rule "%s": boolean stage %d/%d represents %s with %d alternative atom-group searches: %s',
+                    rule_name,
+                    stage_number,
+                    len(rule_plan["stages"]),
+                    _stage_label_text(stage),
+                    stage["cost"],
+                    "; ".join("[" + ", ".join(repr(atom) for atom in atoms) + "]" for atoms in stage["alternatives"]),
+                )
 
     searches_per_index = sum(rule_plan["searches_per_index"] for rule_plan in broad_plans.values())
     search_count = len(indices) * searches_per_index
@@ -1727,7 +1869,7 @@ def _broad_phase_search(
                 rule_name,
                 stage_number,
                 len(rule_plan["stages"]),
-                "/".join(sorted(stage["labels"])),
+                _stage_label_text(stage),
                 len(stage_matches),
             )
 
