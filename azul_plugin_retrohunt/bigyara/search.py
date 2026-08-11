@@ -769,16 +769,18 @@ def _restrict_expression_to_stages(expression, selected_stage_keys: set):
     if operator == "or":
         return _make_bool_or(_restrict_expression_to_stages(child, selected_stage_keys) for child in expression[1])
     if operator == "threshold":
-        return _make_bool_threshold(
-            expression[1],
-            [
-                _restrict_expression_to_stages(
-                    child,
-                    selected_stage_keys,
-                )
-                for child in expression[2]
-            ],
-        )
+        # Keep N-of expressions atomic during budget pruning. Partially
+        # selecting a threshold and replacing omitted children with TRUE would
+        # lower the required count (for example, 3-of-8 could become 2-of-7).
+        # That is a safe broad approximation, but it obscures the original
+        # YARA semantics and weakens the filter. Either retain every searchable
+        # stage referenced by this threshold, preserving the original N, or
+        # replace the whole threshold with TRUE and let a sibling condition
+        # provide the safe broad-phase restriction.
+        threshold_stage_keys = _expression_stage_keys(expression)
+        if not threshold_stage_keys.issubset(selected_stage_keys):
+            return _BOOL_TRUE
+        return expression
 
     raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
 
@@ -831,43 +833,18 @@ def _minimum_restrictive_stage_set(expression, stage_registry: dict):
         return selected
 
     if operator == "threshold":
-        required = expression[1]
-        children = expression[2]
-
-        # If U children are replaced by TRUE, the threshold becomes
-        # nonrestrictive when U >= required. Therefore at least
-        # len(children) - required + 1 children must remain restrictive.
-        children_needed = len(children) - required + 1
-        child_options = []
-
-        for child in children:
-            child_selection = _minimum_restrictive_stage_set(
-                child,
-                stage_registry,
-            )
-            if child_selection is not None:
-                child_options.append(child_selection)
-
-        if len(child_options) < children_needed:
+        # Thresholds are atomic for pruning. To preserve the original YARA
+        # requirement exactly (for example 3 of 8 stays 3 of 8), every
+        # searchable stage referenced by the threshold must be selected.
+        #
+        # If the complete threshold is too expensive, an enclosing AND may
+        # safely choose another conjunct instead. An enclosing OR will require
+        # this complete threshold because every OR branch must remain
+        # restrictive to avoid false negatives.
+        threshold_stage_keys = _expression_stage_keys(expression)
+        if not threshold_stage_keys:
             return None
-
-        selected = set()
-        remaining_options = list(child_options)
-
-        for _ in range(children_needed):
-            best_option = min(
-                remaining_options,
-                key=lambda option: (
-                    _stage_set_cost(option - selected, stage_registry),
-                    _stage_set_cost(option, stage_registry),
-                    len(option),
-                    repr(sorted(option, key=repr)),
-                ),
-            )
-            selected.update(best_option)
-            remaining_options.remove(best_option)
-
-        return selected
+        return threshold_stage_keys
 
     raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
 
