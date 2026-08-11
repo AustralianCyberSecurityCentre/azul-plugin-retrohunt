@@ -1167,6 +1167,7 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
             result.intersection_update(child_result)
             if not result:
                 break
+        logger.info("Result: ", result)
         return result
 
     if operator == "or":
@@ -1178,6 +1179,7 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
                     stage_matches,
                 )
             )
+        logger.info("Result: ", result)
         return result
 
     if operator == "threshold":
@@ -1187,7 +1189,7 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
         for child in expression[2]:
             for path in _evaluate_boolean_expression(child, stage_matches):
                 counts[path] = counts.get(path, 0) + 1
-
+        logger.info("Result: ", {path for path, count in counts.items() if count >= required})
         return {path for path, count in counts.items() if count >= required}
 
     raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
