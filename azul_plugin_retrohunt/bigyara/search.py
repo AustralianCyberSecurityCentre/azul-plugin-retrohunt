@@ -1125,8 +1125,8 @@ def _choose_boolean_stages(
 def _format_boolean_expression(expression, stage_registry: dict) -> str:
     """Return a readable description of a boolean broad-phase expression."""
     operator = expression[0]
-    logger.info("non readable expression: ", expression)
-    logger.info("stage registry ", stage_registry)
+    print("non readable expression: ", expression)
+    print("stage registry ", stage_registry)
     if operator == "true":
         return "TRUE (no safe atom restriction)"
     if operator == "false":
@@ -1167,7 +1167,7 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
             result.intersection_update(child_result)
             if not result:
                 break
-        logger.info("Result: ", result)
+        print("Result: ", result)
         return result
 
     if operator == "or":
@@ -1179,7 +1179,7 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
                     stage_matches,
                 )
             )
-        logger.info("Result: ", result)
+        print("Result: ", result)
         return result
 
     if operator == "threshold":
@@ -1189,9 +1189,9 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
         for child in expression[2]:
             for path in _evaluate_boolean_expression(child, stage_matches):
                 counts[path] = counts.get(path, 0) + 1
-        logger.info("Result: ", {path for path, count in counts.items() if count >= required})
+        print("Result: ", {path for path, count in counts.items() if count >= required})
         return {path for path, count in counts.items() if count >= required}
-
+    
     raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
 
 
