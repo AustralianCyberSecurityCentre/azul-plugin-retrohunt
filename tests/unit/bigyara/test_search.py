@@ -22,6 +22,7 @@ from azul_plugin_retrohunt.bigyara.search import (
     _expression_stage_keys,
     _limit_boolean_and_children,
     _make_bool_and,
+    _make_bool_or,
     _make_bool_threshold,
     clear_stop_event,
     search,
@@ -631,8 +632,8 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         self.assertEqual(limit_events[0]["kept_count"], 2)
         self.assertEqual(len(limit_events[0]["omitted"]), 2)
 
-    def test_preferred_searches_per_index_prunes_full_plan(self):
-        """The preferred per-index search budget should affect stage selection."""
+    def test_preferred_searches_per_index_does_not_prune_direct_string_and(self):
+        """The preferred budget must not remove strings from a direct AND clause."""
         stage_keys = [((f"budget-{index}".encode(),),) for index in range(4)]
         stage_registry = {
             stage_key: {
@@ -658,12 +659,65 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
             hard_searches_per_index=100,
         )
 
-        self.assertTrue(pruned)
-        self.assertLessEqual(selected_cost, 2)
-        self.assertLess(
-            len(selected_stage_keys),
-            len(stage_keys),
+        # max_required_strings_per_and_search is responsible for deciding how
+        # many strings remain in a direct AND. Once that decision has been
+        # made, the preferred searches-per-index budget must not silently
+        # remove more strings from the clause.
+        self.assertFalse(pruned)
+        self.assertEqual(selected_cost, 4)
+        self.assertSetEqual(selected_stage_keys, set(stage_keys))
+        self.assertEqual(selected_expression, expression)
+
+    def test_preferred_searches_per_index_prunes_complex_boolean_plan(self):
+        """The preferred budget should still prune complete Boolean operands."""
+        stage_keys = [((f"budget-{index}".encode(),),) for index in range(4)]
+        stage_registry = {
+            stage_key: {
+                "key": stage_key,
+                "labels": {f"$s{index}"},
+                "cost": 1,
+                "longest_atom": 10 + index,
+                "max_group_atom_count": 1,
+            }
+            for index, stage_key in enumerate(stage_keys)
+        }
+
+        # Each OR branch must stay intact to remain restrictive. The outer AND
+        # may safely retain one complete OR operand and replace the other with
+        # TRUE when the preferred budget is only two searches.
+        expression = _make_bool_and(
+            [
+                _make_bool_or(
+                    [
+                        ("stage", stage_keys[0]),
+                        ("stage", stage_keys[1]),
+                    ]
+                ),
+                _make_bool_or(
+                    [
+                        ("stage", stage_keys[2]),
+                        ("stage", stage_keys[3]),
+                    ]
+                ),
+            ]
         )
+
+        (
+            selected_expression,
+            selected_stage_keys,
+            selected_cost,
+            pruned,
+        ) = _choose_boolean_stages(
+            expression,
+            stage_registry,
+            preferred_searches_per_index=2,
+            hard_searches_per_index=100,
+        )
+
+        self.assertTrue(pruned)
+        self.assertEqual(selected_cost, 2)
+        self.assertEqual(len(selected_stage_keys), 2)
+        self.assertEqual(selected_expression[0], "or")
         self.assertSetEqual(
             _expression_stage_keys(selected_expression),
             selected_stage_keys,

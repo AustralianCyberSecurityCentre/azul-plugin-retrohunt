@@ -669,7 +669,24 @@ def _restrict_expression_to_stages(expression, selected_stage_keys: set):
     if operator in {"true", "false"}:
         return expression
     if operator == "and":
-        return _make_bool_and(_restrict_expression_to_stages(child, selected_stage_keys) for child in expression[1])
+        children = expression[1]
+
+        # A direct AND of string stages is an indivisible mandatory-string
+        # clause for budget pruning. max_required_strings_per_and_search has
+        # already decided how many strings may be retained in this clause.
+        # Do not let max_required_string_searches_per_index silently remove
+        # additional strings from it.
+        #
+        # If every selected string stage is available, preserve the complete
+        # AND. Otherwise omit the whole clause by replacing it with TRUE.
+        # This is conservative and cannot create a broad-phase false negative.
+        if children and all(child[0] == "stage" for child in children):
+            and_stage_keys = _expression_stage_keys(expression)
+            if not and_stage_keys.issubset(selected_stage_keys):
+                return _BOOL_TRUE
+            return expression
+
+        return _make_bool_and(_restrict_expression_to_stages(child, selected_stage_keys) for child in children)
     if operator == "or":
         return _make_bool_or(_restrict_expression_to_stages(child, selected_stage_keys) for child in expression[1])
     if operator == "threshold":
@@ -711,7 +728,17 @@ def _minimum_restrictive_stage_set(expression, stage_registry: dict):
         return {expression[1]}
 
     if operator == "and":
-        candidates = [_minimum_restrictive_stage_set(child, stage_registry) for child in expression[1]]
+        children = expression[1]
+
+        # Direct string ANDs are kept intact after
+        # max_required_strings_per_and_search has limited their size. This
+        # keeps the configuration variable tied to the number of mandatory
+        # strings in the AND clause instead of allowing the preferred
+        # searches-per-index budget to prune more strings afterwards.
+        if children and all(child[0] == "stage" for child in children):
+            return _expression_stage_keys(expression)
+
+        candidates = [_minimum_restrictive_stage_set(child, stage_registry) for child in children]
         candidates = [candidate for candidate in candidates if candidate is not None]
         if not candidates:
             return None
@@ -850,15 +877,20 @@ def _limit_boolean_and_children(
     stage_registry: dict,
     max_and_children: int,
 ):
-    """Limit every Boolean AND node to its strongest safe operands.
+    """Limit direct string operands in each Boolean AND clause.
 
-    Every omitted operand is replaced with TRUE. For an original expression:
+    max_required_strings_per_and_search applies to strings that participate
+    directly in an AND clause and may therefore be grouped into a BigGrep
+    search. Complex operands such as OR and N-of/threshold clauses do not count
+    toward this string limit.
+
+    Every omitted direct string operand is replaced with TRUE. For:
 
         A AND B AND C AND D AND E
 
     retaining only A, B, C, and D produces a superset of the original matches.
     This can increase narrow-phase candidates, but cannot exclude a real YARA
-    match. OR and threshold breadth are not capped by this setting.
+    match.
     """
     limit_events = []
 
@@ -885,26 +917,33 @@ def _limit_boolean_and_children(
             return simplified
 
         children = list(simplified[1])
-        if len(children) <= max_and_children:
+
+        # This setting limits strings participating directly in an AND search,
+        # not complex Boolean operands. Thresholds and OR clauses are evaluated
+        # separately and must not consume this string count.
+        direct_stage_children = [child for child in children if child[0] == "stage"]
+
+        if len(direct_stage_children) <= max_and_children:
             return simplified
 
-        ranked_children = sorted(
-            children,
+        ranked_stage_children = sorted(
+            direct_stage_children,
             key=lambda child: (
                 _and_child_strength(child, stage_registry),
                 repr(child),
             ),
             reverse=True,
         )
-        selected_set = set(ranked_children[:max_and_children])
-        kept_children = [child for child in children if child in selected_set]
-        omitted_children = [child for child in children if child not in selected_set]
+        selected_stage_set = set(ranked_stage_children[:max_and_children])
+
+        kept_children = [child for child in children if child[0] != "stage" or child in selected_stage_set]
+        omitted_children = [child for child in direct_stage_children if child not in selected_stage_set]
 
         limit_events.append(
             {
-                "original_count": len(children),
-                "kept_count": len(kept_children),
-                "kept": tuple(kept_children),
+                "original_count": len(direct_stage_children),
+                "kept_count": len(selected_stage_set),
+                "kept": tuple(child for child in children if child[0] == "stage" and child in selected_stage_set),
                 "omitted": tuple(omitted_children),
             }
         )
