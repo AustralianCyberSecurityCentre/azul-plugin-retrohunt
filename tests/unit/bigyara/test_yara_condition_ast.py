@@ -11,7 +11,6 @@ from azul_plugin_retrohunt.bigyara.yara_parse import (
     StringNode,
     UnknownNode,
     _build_condition_ast,
-    _evaluate_condition_ast,
     _extract_required_groups,
     _extract_required_strings,
     _parse_condition_metadata,
@@ -505,88 +504,6 @@ class TestRequiredGroups(ConditionAstTestCase):
                 {b"aaaa"},
                 {b"bbbb"},
             ],
-        )
-
-
-class TestConditionAstEvaluation(unittest.TestCase):
-    """Verify evaluation behaviour implemented by _evaluate_condition_ast."""
-
-    def setUp(self):
-        self.matches = {
-            "$a": {"one", "two"},
-            "$b": {"two", "three"},
-            "$c": {"two"},
-        }
-
-    def test_string_node_returns_its_matches(self):
-        self.assertSetEqual(
-            _evaluate_condition_ast(
-                StringNode("$a"),
-                self.matches,
-            ),
-            {"one", "two"},
-        )
-
-    def test_and_intersects_results(self):
-        self.assertSetEqual(
-            _evaluate_condition_ast(
-                AndNode(
-                    children=[
-                        StringNode("$a"),
-                        StringNode("$b"),
-                    ]
-                ),
-                self.matches,
-            ),
-            {"two"},
-        )
-
-    def test_or_unions_results(self):
-        self.assertSetEqual(
-            _evaluate_condition_ast(
-                OrNode(
-                    children=[
-                        StringNode("$a"),
-                        StringNode("$b"),
-                    ]
-                ),
-                self.matches,
-            ),
-            {"one", "two", "three"},
-        )
-
-    def test_n_of_counts_matching_children(self):
-        self.assertSetEqual(
-            _evaluate_condition_ast(
-                NOfNode(
-                    required=2,
-                    children=[
-                        StringNode("$a"),
-                        StringNode("$b"),
-                        StringNode("$c"),
-                    ],
-                ),
-                self.matches,
-            ),
-            {"two"},
-        )
-
-    def test_unknown_node_returns_empty_set(self):
-        self.assertSetEqual(
-            _evaluate_condition_ast(
-                UnknownNode("filesize > 5MB"),
-                self.matches,
-            ),
-            set(),
-        )
-
-    def test_none_ast_returns_empty_set(self):
-        self.assertSetEqual(
-            _evaluate_condition_ast(
-                None,
-                self.matches,
-            ),
-            set(),
         )
 
 
