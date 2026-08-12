@@ -458,9 +458,10 @@ def _make_bool_or(children):
 
     TRUE short-circuits the entire OR to TRUE because an unrestricted branch can
     satisfy the broad approximation.  FALSE children are discarded, nested OR
-    nodes are flattened, and duplicate child expressions are removed.  An empty
-    OR becomes FALSE, one remaining child is returned directly, and multiple
-    children become ``("or", children)``.
+    nodes are flattened, duplicate child expressions are removed, and absorbed
+    AND branches are discarded using ``A OR (A AND B) == A``.  An empty OR becomes
+    FALSE, one remaining child is returned directly, and multiple children become
+    ``("or", children)``.
 
     This normalisation is important because OR is the dangerous operator for a
     conservative broad-phase approximation: if any branch becomes TRUE, no
@@ -479,6 +480,13 @@ def _make_bool_or(children):
             flattened.append(child)
 
     unique_children = list(dict.fromkeys(flattened))
+    child_set = set(unique_children)
+    unique_children = [
+        child
+        for child in unique_children
+        if child[0] != "and" or not any(and_child in child_set for and_child in child[1])
+    ]
+
     if not unique_children:
         return _BOOL_FALSE
     if len(unique_children) == 1:
