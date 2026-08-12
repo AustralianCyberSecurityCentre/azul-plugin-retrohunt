@@ -18,6 +18,7 @@ from azul_plugin_retrohunt.bigyara.search import (
     SearchPhaseEnum,
     _build_rule_boolean_plan,
     _choose_boolean_stages,
+    _combine_single_search_and_stages,
     _evaluate_boolean_expression,
     _expression_stage_keys,
     _limit_boolean_and_children,
@@ -722,6 +723,195 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
             _expression_stage_keys(selected_expression),
             selected_stage_keys,
         )
+
+    def test_boolean_or_absorption_removes_redundant_and_branch(self):
+        """A OR (A AND B) should simplify to A regardless of child order."""
+        stage_a = ("stage", ((b"absorb-a",),))
+        stage_b = ("stage", ((b"absorb-b",),))
+        redundant_and = _make_bool_and([stage_a, stage_b])
+
+        self.assertEqual(
+            _make_bool_or([stage_a, redundant_and]),
+            stage_a,
+        )
+        self.assertEqual(
+            _make_bool_or([redundant_and, stage_a]),
+            stage_a,
+        )
+
+    def test_boolean_or_absorption_does_not_remove_unrelated_and_branches(self):
+        """Absorption must not simplify OR branches unless one contains a full sibling."""
+        stage_a = ("stage", ((b"absorb-a",),))
+        stage_b = ("stage", ((b"absorb-b",),))
+        stage_c = ("stage", ((b"absorb-c",),))
+
+        unrelated_and = _make_bool_and([stage_b, stage_c])
+        expected = ("or", (stage_a, unrelated_and))
+        self.assertEqual(
+            _make_bool_or([stage_a, unrelated_and]),
+            expected,
+        )
+
+        left_and = _make_bool_and([stage_a, stage_b])
+        right_and = _make_bool_and([stage_a, stage_c])
+        expected_two_ands = ("or", (left_and, right_and))
+        self.assertEqual(
+            _make_bool_or([left_and, right_and]),
+            expected_two_ands,
+        )
+
+    def test_and_limit_counts_only_direct_string_stages(self):
+        """Nested OR and threshold operands must not consume the direct-string AND limit."""
+        stage_keys = [((f"direct-{index}".encode(),),) for index in range(7)]
+        stage_registry = {
+            stage_key: {
+                "key": stage_key,
+                "labels": {f"$s{index}"},
+                "cost": 1,
+                "longest_atom": 10 + index,
+                "max_group_atom_count": 1,
+            }
+            for index, stage_key in enumerate(stage_keys)
+        }
+
+        nested_or = _make_bool_or(
+            [
+                ("stage", stage_keys[2]),
+                ("stage", stage_keys[3]),
+            ]
+        )
+        nested_threshold = _make_bool_threshold(
+            2,
+            [
+                ("stage", stage_keys[4]),
+                ("stage", stage_keys[5]),
+                ("stage", stage_keys[6]),
+            ],
+        )
+        expression = _make_bool_and(
+            [
+                ("stage", stage_keys[0]),
+                ("stage", stage_keys[1]),
+                nested_or,
+                nested_threshold,
+            ]
+        )
+
+        limited_expression, limit_events = _limit_boolean_and_children(
+            expression,
+            stage_registry,
+            max_and_children=1,
+        )
+
+        self.assertEqual(limited_expression[0], "and")
+        self.assertEqual(len(limit_events), 1)
+        self.assertEqual(limit_events[0]["original_count"], 2)
+        self.assertEqual(limit_events[0]["kept_count"], 1)
+
+        limited_children = limited_expression[1]
+        self.assertEqual(
+            sum(child[0] == "stage" for child in limited_children),
+            1,
+        )
+        self.assertIn(nested_or, limited_children)
+        self.assertIn(nested_threshold, limited_children)
+
+    def test_preferred_budget_does_not_partially_prune_threshold(self):
+        """A threshold must stay complete even when its cost exceeds the preferred budget."""
+        stage_keys = [((f"threshold-{index}".encode(),),) for index in range(4)]
+        stage_registry = {
+            stage_key: {
+                "key": stage_key,
+                "labels": {f"$item{index}"},
+                "cost": 1,
+                "longest_atom": 10 + index,
+                "max_group_atom_count": 1,
+            }
+            for index, stage_key in enumerate(stage_keys)
+        }
+        expression = _make_bool_threshold(
+            2,
+            [("stage", stage_key) for stage_key in stage_keys],
+        )
+
+        (
+            selected_expression,
+            selected_stage_keys,
+            selected_cost,
+            pruned,
+        ) = _choose_boolean_stages(
+            expression,
+            stage_registry,
+            preferred_searches_per_index=2,
+            hard_searches_per_index=100,
+        )
+
+        self.assertFalse(pruned)
+        self.assertEqual(selected_expression, expression)
+        self.assertSetEqual(selected_stage_keys, set(stage_keys))
+        self.assertEqual(selected_cost, 4)
+        self.assertEqual(selected_expression[0], "threshold")
+        self.assertEqual(selected_expression[1], 2)
+
+    def test_single_search_and_batching_preserves_or_boundary(self):
+        """Batch direct AND strings, but never combine strings across an OR boundary."""
+
+        def make_stage(stage_key, label, group_id):
+            atom = stage_key[0][0]
+            return {
+                "key": stage_key,
+                "labels": {label},
+                "group_ids": [group_id],
+                "alternatives": ((atom,),),
+                "searches": [(group_id, f"-s{atom.hex().upper()} ")],
+                "cost": 1,
+                "longest_atom": len(atom),
+                "max_group_atom_count": 1,
+            }
+
+        stage_a = ((b"batch-alpha",),)
+        stage_b = ((b"batch-bravo",),)
+        stage_c = ((b"outside-or",),)
+        stage_registry = {
+            stage_a: make_stage(stage_a, "$a", 0),
+            stage_b: make_stage(stage_b, "$b", 1),
+            stage_c: make_stage(stage_c, "$c", 2),
+        }
+
+        expression = _make_bool_or(
+            [
+                _make_bool_and(
+                    [
+                        ("stage", stage_a),
+                        ("stage", stage_b),
+                    ]
+                ),
+                ("stage", stage_c),
+            ]
+        )
+
+        combined_expression = _combine_single_search_and_stages(
+            expression,
+            stage_registry,
+        )
+
+        self.assertEqual(combined_expression[0], "or")
+        self.assertEqual(len(combined_expression[1]), 2)
+
+        combined_children = [
+            child
+            for child in combined_expression[1]
+            if child[0] == "stage" and isinstance(child[1], tuple) and child[1] and child[1][0] == "combined_and"
+        ]
+        self.assertEqual(len(combined_children), 1)
+
+        combined_stage = stage_registry[combined_children[0][1]]
+        self.assertTrue(combined_stage["combined_and"])
+        self.assertSetEqual(combined_stage["labels"], {"$a", "$b"})
+        self.assertEqual(combined_stage["cost"], 1)
+
+        self.assertIn(("stage", stage_c), combined_expression[1])
+        self.assertNotIn("$c", combined_stage["labels"])
 
     def test_suricata_search(self):
         """Test that a snort search succeeds."""
