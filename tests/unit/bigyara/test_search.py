@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from hashlib import sha256
+from types import SimpleNamespace
 
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
@@ -15,6 +16,15 @@ from azul_plugin_retrohunt.bigyara.search import (
     QueryTypeEnum,
     RuleFileMatches,
     SearchPhaseEnum,
+    _build_rule_boolean_plan,
+    _choose_boolean_stages,
+    _combine_single_search_and_stages,
+    _evaluate_boolean_expression,
+    _expression_stage_keys,
+    _limit_boolean_and_children,
+    _make_bool_and,
+    _make_bool_or,
+    _make_bool_threshold,
     clear_stop_event,
     search,
 )
@@ -210,7 +220,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
                 $a = "abcd"
                 $b = "notfound"
             condition:
-                #a == 1 or $b
+                #a == 1 and $a or $b
         }
         """
         results: RuleFileMatches = search(
@@ -437,6 +447,471 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         )
         self.assertEqual(global_total_complete, 2)
         self.assertEqual(global_total, 2)
+
+    def test_yara_nested_and_or_condition(self):
+        """Broad/narrow search should preserve nested AND/OR semantics."""
+        data = [
+            b"ALPHA_ONE BRAVO_TWO",
+            b"ALPHA_ONE CHARLIE_THREE",
+            b"ALPHA_ONE only",
+            b"BRAVO_TWO CHARLIE_THREE",
+        ]
+
+        global content_dict
+        content_dict = to_hash_dict(data)
+        self.index_data(data)
+
+        yara_rule = """
+        rule NestedBoolean
+        {
+            strings:
+                $a = "ALPHA_ONE"
+                $b = "BRAVO_TWO"
+                $c = "CHARLIE_THREE"
+            condition:
+                $a and ($b or $c)
+        }
+        """
+
+        results = search(
+            yara_rule,
+            QueryTypeEnum.YARA,
+            self.base_temp_dir,
+            fetch_from_dict,
+        )
+
+        expected = [
+            os.path.join(
+                self.base_temp_dir,
+                f"content/cache/{sha256(content).hexdigest()}",
+            )
+            for content in data[:2]
+        ]
+
+        self.assert_rule_matches_equal(
+            results,
+            {"NestedBoolean": expected},
+        )
+
+    def test_yara_n_of_threshold_condition(self):
+        """Broad/narrow search should preserve N-of threshold semantics."""
+        data = [
+            b"ALPHA_ONE BRAVO_TWO",
+            b"ALPHA_ONE CHARLIE_THREE",
+            b"BRAVO_TWO CHARLIE_THREE",
+            b"ALPHA_ONE only",
+        ]
+
+        global content_dict
+        content_dict = to_hash_dict(data)
+        self.index_data(data)
+
+        yara_rule = """
+        rule ThresholdRule
+        {
+            strings:
+                $item1 = "ALPHA_ONE"
+                $item2 = "BRAVO_TWO"
+                $item3 = "CHARLIE_THREE"
+            condition:
+                2 of ($item*)
+        }
+        """
+
+        results = search(
+            yara_rule,
+            QueryTypeEnum.YARA,
+            self.base_temp_dir,
+            fetch_from_dict,
+        )
+
+        expected = [
+            os.path.join(
+                self.base_temp_dir,
+                f"content/cache/{sha256(content).hexdigest()}",
+            )
+            for content in data[:3]
+        ]
+
+        self.assert_rule_matches_equal(
+            results,
+            {"ThresholdRule": expected},
+        )
+
+    def test_boolean_fallback_or_searches_every_extracted_atom(self):
+        """An unusable condition plan should fall back to OR-ing every atom."""
+        plan = SimpleNamespace(
+            condition_ast=None,
+            string_groups={
+                "$a": [0],
+                "$b": [1],
+            },
+            groups=[
+                [b"alpha_atom", b"second_atom"],
+                [b"bravo_atom"],
+            ],
+        )
+
+        rule_plan = _build_rule_boolean_plan(
+            "FallbackRule",
+            plan,
+            max_required_strings=40,
+            preferred_searches_per_index=64,
+            hard_searches_per_index=1000,
+        )
+
+        self.assertIsNotNone(rule_plan)
+        self.assertEqual(rule_plan["mode"], "fallback_or_all_atoms")
+        self.assertEqual(rule_plan["searches_per_index"], 3)
+        self.assertEqual(rule_plan["expression"][0], "or")
+
+        searched_atoms = {stage["alternatives"][0][0] for stage in rule_plan["stages"]}
+        self.assertSetEqual(
+            searched_atoms,
+            {
+                b"alpha_atom",
+                b"second_atom",
+                b"bravo_atom",
+            },
+        )
+
+    def test_threshold_preserves_duplicate_shared_stage_votes(self):
+        """Distinct YARA strings sharing one atom stage must still count separately."""
+        shared_stage = ((b"shared_atom",),)
+        other_stage = ((b"other_atom",),)
+
+        expression = _make_bool_threshold(
+            2,
+            [
+                ("stage", shared_stage),
+                ("stage", shared_stage),
+                ("stage", other_stage),
+            ],
+        )
+
+        self.assertEqual(expression[0], "threshold")
+        self.assertEqual(len(expression[2]), 3)
+        self.assertEqual(expression[2][0], expression[2][1])
+
+        matches = _evaluate_boolean_expression(
+            expression,
+            {
+                shared_stage: {"shared-file"},
+                other_stage: set(),
+            },
+        )
+
+        self.assertSetEqual(matches, {"shared-file"})
+
+    def test_and_limit_retains_only_configured_number_of_operands(self):
+        """The configured AND limit should cap retained broad-phase operands."""
+        stage_keys = [((f"atom-{index}".encode(),),) for index in range(4)]
+        stage_registry = {
+            stage_key: {
+                "key": stage_key,
+                "labels": {f"$s{index}"},
+                "cost": 1,
+                "longest_atom": 10 + index,
+                "max_group_atom_count": 1,
+            }
+            for index, stage_key in enumerate(stage_keys)
+        }
+        expression = _make_bool_and(("stage", stage_key) for stage_key in stage_keys)
+
+        limited_expression, limit_events = _limit_boolean_and_children(
+            expression,
+            stage_registry,
+            max_and_children=2,
+        )
+
+        self.assertEqual(
+            len(_expression_stage_keys(limited_expression)),
+            2,
+        )
+        self.assertEqual(len(limit_events), 1)
+        self.assertEqual(limit_events[0]["original_count"], 4)
+        self.assertEqual(limit_events[0]["kept_count"], 2)
+        self.assertEqual(len(limit_events[0]["omitted"]), 2)
+
+    def test_preferred_searches_per_index_does_not_prune_direct_string_and(self):
+        """The preferred budget must not remove strings from a direct AND clause."""
+        stage_keys = [((f"budget-{index}".encode(),),) for index in range(4)]
+        stage_registry = {
+            stage_key: {
+                "key": stage_key,
+                "labels": {f"$s{index}"},
+                "cost": 1,
+                "longest_atom": 10 + index,
+                "max_group_atom_count": 1,
+            }
+            for index, stage_key in enumerate(stage_keys)
+        }
+        expression = _make_bool_and(("stage", stage_key) for stage_key in stage_keys)
+
+        (
+            selected_expression,
+            selected_stage_keys,
+            selected_cost,
+            pruned,
+        ) = _choose_boolean_stages(
+            expression,
+            stage_registry,
+            preferred_searches_per_index=2,
+            hard_searches_per_index=100,
+        )
+
+        # max_required_strings_per_and_search is responsible for deciding how
+        # many strings remain in a direct AND. Once that decision has been
+        # made, the preferred searches-per-index budget must not silently
+        # remove more strings from the clause.
+        self.assertFalse(pruned)
+        self.assertEqual(selected_cost, 4)
+        self.assertSetEqual(selected_stage_keys, set(stage_keys))
+        self.assertEqual(selected_expression, expression)
+
+    def test_preferred_searches_per_index_prunes_complex_boolean_plan(self):
+        """The preferred budget should still prune complete Boolean operands."""
+        stage_keys = [((f"budget-{index}".encode(),),) for index in range(4)]
+        stage_registry = {
+            stage_key: {
+                "key": stage_key,
+                "labels": {f"$s{index}"},
+                "cost": 1,
+                "longest_atom": 10 + index,
+                "max_group_atom_count": 1,
+            }
+            for index, stage_key in enumerate(stage_keys)
+        }
+
+        # Each OR branch must stay intact to remain restrictive. The outer AND
+        # may safely retain one complete OR operand and replace the other with
+        # TRUE when the preferred budget is only two searches.
+        expression = _make_bool_and(
+            [
+                _make_bool_or(
+                    [
+                        ("stage", stage_keys[0]),
+                        ("stage", stage_keys[1]),
+                    ]
+                ),
+                _make_bool_or(
+                    [
+                        ("stage", stage_keys[2]),
+                        ("stage", stage_keys[3]),
+                    ]
+                ),
+            ]
+        )
+
+        (
+            selected_expression,
+            selected_stage_keys,
+            selected_cost,
+            pruned,
+        ) = _choose_boolean_stages(
+            expression,
+            stage_registry,
+            preferred_searches_per_index=2,
+            hard_searches_per_index=100,
+        )
+
+        self.assertTrue(pruned)
+        self.assertEqual(selected_cost, 2)
+        self.assertEqual(len(selected_stage_keys), 2)
+        self.assertEqual(selected_expression[0], "or")
+        self.assertSetEqual(
+            _expression_stage_keys(selected_expression),
+            selected_stage_keys,
+        )
+
+    def test_boolean_or_absorption_removes_redundant_and_branch(self):
+        """A OR (A AND B) should simplify to A regardless of child order."""
+        stage_a = ("stage", ((b"absorb-a",),))
+        stage_b = ("stage", ((b"absorb-b",),))
+        redundant_and = _make_bool_and([stage_a, stage_b])
+
+        self.assertEqual(
+            _make_bool_or([stage_a, redundant_and]),
+            stage_a,
+        )
+        self.assertEqual(
+            _make_bool_or([redundant_and, stage_a]),
+            stage_a,
+        )
+
+    def test_boolean_or_absorption_does_not_remove_unrelated_and_branches(self):
+        """Absorption must not simplify OR branches unless one contains a full sibling."""
+        stage_a = ("stage", ((b"absorb-a",),))
+        stage_b = ("stage", ((b"absorb-b",),))
+        stage_c = ("stage", ((b"absorb-c",),))
+
+        unrelated_and = _make_bool_and([stage_b, stage_c])
+        expected = ("or", (stage_a, unrelated_and))
+        self.assertEqual(
+            _make_bool_or([stage_a, unrelated_and]),
+            expected,
+        )
+
+        left_and = _make_bool_and([stage_a, stage_b])
+        right_and = _make_bool_and([stage_a, stage_c])
+        expected_two_ands = ("or", (left_and, right_and))
+        self.assertEqual(
+            _make_bool_or([left_and, right_and]),
+            expected_two_ands,
+        )
+
+    def test_and_limit_counts_only_direct_string_stages(self):
+        """Nested OR and threshold operands must not consume the direct-string AND limit."""
+        stage_keys = [((f"direct-{index}".encode(),),) for index in range(7)]
+        stage_registry = {
+            stage_key: {
+                "key": stage_key,
+                "labels": {f"$s{index}"},
+                "cost": 1,
+                "longest_atom": 10 + index,
+                "max_group_atom_count": 1,
+            }
+            for index, stage_key in enumerate(stage_keys)
+        }
+
+        nested_or = _make_bool_or(
+            [
+                ("stage", stage_keys[2]),
+                ("stage", stage_keys[3]),
+            ]
+        )
+        nested_threshold = _make_bool_threshold(
+            2,
+            [
+                ("stage", stage_keys[4]),
+                ("stage", stage_keys[5]),
+                ("stage", stage_keys[6]),
+            ],
+        )
+        expression = _make_bool_and(
+            [
+                ("stage", stage_keys[0]),
+                ("stage", stage_keys[1]),
+                nested_or,
+                nested_threshold,
+            ]
+        )
+
+        limited_expression, limit_events = _limit_boolean_and_children(
+            expression,
+            stage_registry,
+            max_and_children=1,
+        )
+
+        self.assertEqual(limited_expression[0], "and")
+        self.assertEqual(len(limit_events), 1)
+        self.assertEqual(limit_events[0]["original_count"], 2)
+        self.assertEqual(limit_events[0]["kept_count"], 1)
+
+        limited_children = limited_expression[1]
+        self.assertEqual(
+            sum(child[0] == "stage" for child in limited_children),
+            1,
+        )
+        self.assertIn(nested_or, limited_children)
+        self.assertIn(nested_threshold, limited_children)
+
+    def test_preferred_budget_does_not_partially_prune_threshold(self):
+        """A threshold must stay complete even when its cost exceeds the preferred budget."""
+        stage_keys = [((f"threshold-{index}".encode(),),) for index in range(4)]
+        stage_registry = {
+            stage_key: {
+                "key": stage_key,
+                "labels": {f"$item{index}"},
+                "cost": 1,
+                "longest_atom": 10 + index,
+                "max_group_atom_count": 1,
+            }
+            for index, stage_key in enumerate(stage_keys)
+        }
+        expression = _make_bool_threshold(
+            2,
+            [("stage", stage_key) for stage_key in stage_keys],
+        )
+
+        (
+            selected_expression,
+            selected_stage_keys,
+            selected_cost,
+            pruned,
+        ) = _choose_boolean_stages(
+            expression,
+            stage_registry,
+            preferred_searches_per_index=2,
+            hard_searches_per_index=100,
+        )
+
+        self.assertFalse(pruned)
+        self.assertEqual(selected_expression, expression)
+        self.assertSetEqual(selected_stage_keys, set(stage_keys))
+        self.assertEqual(selected_cost, 4)
+        self.assertEqual(selected_expression[0], "threshold")
+        self.assertEqual(selected_expression[1], 2)
+
+    def test_single_search_and_batching_preserves_or_boundary(self):
+        """Batch direct AND strings, but never combine strings across an OR boundary."""
+
+        def make_stage(stage_key, label, group_id):
+            atom = stage_key[0][0]
+            return {
+                "key": stage_key,
+                "labels": {label},
+                "group_ids": [group_id],
+                "alternatives": ((atom,),),
+                "searches": [(group_id, f"-s{atom.hex().upper()} ")],
+                "cost": 1,
+                "longest_atom": len(atom),
+                "max_group_atom_count": 1,
+            }
+
+        stage_a = ((b"batch-alpha",),)
+        stage_b = ((b"batch-bravo",),)
+        stage_c = ((b"outside-or",),)
+        stage_registry = {
+            stage_a: make_stage(stage_a, "$a", 0),
+            stage_b: make_stage(stage_b, "$b", 1),
+            stage_c: make_stage(stage_c, "$c", 2),
+        }
+
+        expression = _make_bool_or(
+            [
+                _make_bool_and(
+                    [
+                        ("stage", stage_a),
+                        ("stage", stage_b),
+                    ]
+                ),
+                ("stage", stage_c),
+            ]
+        )
+
+        combined_expression = _combine_single_search_and_stages(
+            expression,
+            stage_registry,
+        )
+
+        self.assertEqual(combined_expression[0], "or")
+        self.assertEqual(len(combined_expression[1]), 2)
+
+        combined_children = [
+            child
+            for child in combined_expression[1]
+            if child[0] == "stage" and isinstance(child[1], tuple) and child[1] and child[1][0] == "combined_and"
+        ]
+        self.assertEqual(len(combined_children), 1)
+
+        combined_stage = stage_registry[combined_children[0][1]]
+        self.assertTrue(combined_stage["combined_and"])
+        self.assertSetEqual(combined_stage["labels"], {"$a", "$b"})
+        self.assertEqual(combined_stage["cost"], 1)
+
+        self.assertIn(("stage", stage_c), combined_expression[1])
+        self.assertNotIn("$c", combined_stage["labels"])
 
     def test_suricata_search(self):
         """Test that a snort search succeeds."""

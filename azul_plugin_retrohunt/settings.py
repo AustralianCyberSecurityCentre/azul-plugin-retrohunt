@@ -22,6 +22,11 @@ class RetrohuntSettings(BaseSettings):
         """Settings for the BigGrep and Narrow phase search."""
 
         max_thread_count: int = Field(5, alias="MAX_THREAD_COUNT")
+        max_required_strings_per_and_search: int = Field(10, alias="MAX_REQUIRED_STRINGS_PER_AND_SEARCH")
+        max_required_string_searches_per_index: int = Field(64, alias="MAX_REQUIRED_STRING_SEARCHES_PER_INDEX")
+        max_required_broad_phase_workers: int = Field(2, alias="MAX_BROAD_PHASE_WORKERS")
+        max_broad_phase_tasks: int = Field(10000, alias="MAX_BROAD_PHASE_TASKS")
+        default_narrow_phase_cleanup_multiplier: int = Field(4, alias="DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER")
 
     class Indexer(BaseModel):
         """Nested configuration for indexers."""

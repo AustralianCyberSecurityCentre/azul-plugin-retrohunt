@@ -157,77 +157,6 @@ def _parse_condition_metadata(
     return ("unknown", None)
 
 
-def _convert_condition_ast(node) -> ConditionNode:
-    """Convert Python AST into broad-phase AST."""
-    #
-    # N(2, ...)
-    #
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "N":
-        required = node.args[0].value
-
-        children = []
-
-        for arg in node.args[1:]:
-            children.append(_convert_condition_ast(arg))
-
-        return NOfNode(
-            required=required,
-            children=children,
-        )
-
-    #
-    # S("$a")
-    #
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "S":
-        return StringNode(
-            string_name=node.args[0].value,
-        )
-
-    #
-    # a & b
-    #
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitAnd):
-        left = _convert_condition_ast(node.left)
-        right = _convert_condition_ast(node.right)
-
-        children = []
-
-        if isinstance(left, AndNode):
-            children.extend(left.children)
-        else:
-            children.append(left)
-
-        if isinstance(right, AndNode):
-            children.extend(right.children)
-        else:
-            children.append(right)
-
-        return AndNode(children)
-
-    #
-    # a | b
-    #
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
-        left = _convert_condition_ast(node.left)
-        right = _convert_condition_ast(node.right)
-
-        children = []
-
-        if isinstance(left, OrNode):
-            children.extend(left.children)
-        else:
-            children.append(left)
-
-        if isinstance(right, OrNode):
-            children.extend(right.children)
-        else:
-            children.append(right)
-
-        return OrNode(children)
-
-    raise ValueError(f"Unsupported AST node: {ast.dump(node)}")
-
-
 def _expand_string_specifiers(
     specifiers: list[str],
     string_names: set[str],
@@ -698,6 +627,17 @@ def _parse_partial_condition(expr: str) -> ConditionNode:
     if re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", expr):
         return StringNode(string_name=expr)
 
+    # Positional string predicates still guarantee that the named string
+    # occurs. Broad phase may safely ignore the position/range and search the
+    # string itself; full YARA verifies the positional requirement later.
+    positional_match = re.match(
+        r"^(\$[A-Za-z_][A-Za-z0-9_]*)\s+(?:at|in)\b",
+        expr,
+        flags=re.IGNORECASE,
+    )
+    if positional_match:
+        return StringNode(string_name=positional_match.group(1))
+
     return UnknownNode(raw_text=expr)
 
 
@@ -736,68 +676,6 @@ def _build_condition_ast(
             exc,
         )
         return None
-
-
-def _evaluate_condition_ast(
-    node: ConditionNode | None,
-    string_matches: dict[str, set[str]],
-) -> set:
-    """Evaluate broad-phase condition tree."""
-    if node is None:
-        return set()
-
-    if isinstance(node, UnknownNode):
-        return set()
-
-    if isinstance(node, StringNode):
-        return string_matches.get(
-            node.string_name,
-            set(),
-        )
-
-    if isinstance(node, OrNode):
-        results = [
-            _evaluate_condition_ast(
-                child,
-                string_matches,
-            )
-            for child in node.children
-        ]
-
-        if not results:
-            return set()
-
-        return set.union(*results)
-
-    if isinstance(node, AndNode):
-        results = [
-            _evaluate_condition_ast(
-                child,
-                string_matches,
-            )
-            for child in node.children
-        ]
-
-        if not results:
-            return set()
-
-        return set.intersection(*results)
-
-    if isinstance(node, NOfNode):
-        counts: dict[str, int] = {}
-
-        for child in node.children:
-            matches = _evaluate_condition_ast(
-                child,
-                string_matches,
-            )
-
-            for path in matches:
-                counts[path] = counts.get(path, 0) + 1
-
-        return {path for path, count in counts.items() if count >= node.required}
-
-    raise ValueError(f"Unsupported condition node: {type(node)}")
 
 
 def _extract_required_groups(
@@ -1179,10 +1057,9 @@ def _yara_process_flags(current_rule: YaraRule, current_string: YaraString, flag
 def _yara_finish_string(current_rule: YaraRule, current_string: YaraString) -> tuple[YaraRule, YaraString]:
     """String is complete so add to rule."""
     if current_string:
-        # if "nocase" string, yara must give us the atoms
-        if "nocase" in current_string.modifiers and len(current_string.atoms) == 0:
-            raise YaraStringNoAtomException(f"Yara did not output any atoms for nocase string {current_string.name}")
-
+        # Strings without usable atoms are still retained in the parsed rule.
+        # The broad-phase planner treats them as unsearchable and only filters
+        # on sibling structures when doing so is provably safe.
         current_rule.strings.append(current_string)
         current_string = None
     return current_rule, current_string
