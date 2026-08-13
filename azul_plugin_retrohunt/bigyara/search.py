@@ -74,7 +74,7 @@ def release_unused_memory() -> None:
     the process RSS, so the optional malloc_trim call is important for keeping
     long-running Retrohunt workers within their container memory budget.
 
-    malloc_trim is best-effort only.  Failure to load or invoke it must never make
+    malloc_trim is best-effort only. Failure to load or invoke it must never make
     a hunt fail, so unsupported platforms simply perform garbage collection and
     continue.
     """
@@ -85,26 +85,6 @@ def release_unused_memory() -> None:
             _malloc_trim(0)
         except (OSError, ValueError):
             logger.debug("malloc_trim failed", exc_info=True)
-
-
-def _current_rss_mib() -> float | None:
-    """Return the current process resident-set size in MiB when running on Linux.
-
-    The function reads /proc/self/statm, extracts the resident page count, and
-    multiplies it by the operating-system page size before converting the value to
-    MiB.  The result represents memory currently resident for this Retrohunt
-    process and is used only for operational logging around narrow-phase cleanup.
-
-    If /proc is unavailable, malformed, or unsupported, the function returns None
-    instead of raising.  Memory telemetry must never affect search correctness or
-    cause a hunt to fail.
-    """
-    try:
-        with open("/proc/self/statm", encoding="utf-8") as statm:
-            resident_pages = int(statm.read().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
-    except (OSError, ValueError, IndexError):
-        return None
 
 
 _DURATION_BUCKETS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 2400]
@@ -379,8 +359,8 @@ def _bgparse_search_string(atoms: list[bytes]) -> str:
     """Build the bgparse command-line search arguments for one mandatory atom group.
 
     Each byte string is converted to uppercase hexadecimal and emitted as a
-    separate ``-s<HEX>`` argument.  Duplicate atoms are removed while preserving
-    their original order.  Multiple ``-s`` arguments in a single bgparse command
+    separate ``-s<HEX>`` argument. Duplicate atoms are removed while preserving
+    their original order. Multiple ``-s`` arguments in a single bgparse command
     have AND semantics, so every returned atom must be present for that physical
     search to match an indexed file.
 
@@ -397,7 +377,7 @@ def _valid_group_ids(plan, group_ids) -> list[int]:
     """Return the usable atom-group identifiers referenced by a parsed YARA plan.
 
     The parser stores atom groups by numeric index and each YARA string references
-    one or more of those indexes.  This helper filters out negative indexes,
+    one or more of those indexes. This helper filters out negative indexes,
     indexes beyond the end of ``plan.groups``, and groups that contain no atoms.
     It also removes duplicate group IDs while preserving their first-seen order.
 
@@ -423,14 +403,14 @@ _BOOL_FALSE = ("false",)
 def _make_bool_and(children):
     """Construct a canonical Boolean AND node while applying safe simplifications.
 
-    Children are consumed in order.  FALSE short-circuits the entire expression to
+    Children are consumed in order. FALSE short-circuits the entire expression to
     FALSE, TRUE children are discarded because they do not restrict an AND, and
     nested AND nodes are flattened into the parent.  Duplicate child expressions
-    are then removed.  An empty result becomes TRUE, a single remaining child is
+    are then removed. An empty result becomes TRUE, a single remaining child is
     returned directly, and two or more children become ``("and", children)``.
 
     The planner uses this normalisation whenever it creates or rewrites an AND
-    subtree.  Keeping the representation flat and simplified reduces later stage
+    subtree. Keeping the representation flat and simplified reduces later stage
     selection work while preserving the conservative broad-phase semantics.
     """
     flattened = []
@@ -457,7 +437,7 @@ def _make_bool_or(children):
     """Construct a canonical Boolean OR node while applying safe simplifications.
 
     TRUE short-circuits the entire OR to TRUE because an unrestricted branch can
-    satisfy the broad approximation.  FALSE children are discarded, nested OR
+    satisfy the broad approximation. FALSE children are discarded, nested OR
     nodes are flattened, duplicate child expressions are removed, and absorbed
     AND branches are discarded using ``A OR (A AND B) == A``.  An empty OR becomes
     FALSE, one remaining child is returned directly, and multiple children become
@@ -498,15 +478,15 @@ def _make_bool_threshold(required: int, children):
     """Construct and simplify an at-least-N Boolean threshold expression.
 
     TRUE children count as already-satisfied votes and reduce the remaining
-    required count.  FALSE children cannot contribute and are discarded.  The
+    required count. FALSE children cannot contribute and are discarded. The
     function then collapses trivial cases: zero required votes becomes TRUE,
     an impossible threshold becomes FALSE, one required vote becomes OR, and
-    requiring every remaining child becomes AND.  Otherwise a
+    requiring every remaining child becomes AND. Otherwise a
     ``("threshold", required, children)`` node is returned.
 
-    Threshold children are intentionally not deduplicated.  Two distinct YARA
+    Threshold children are intentionally not deduplicated. Two distinct YARA
     identifiers can resolve to the same physical atom search while still counting
-    as two separate votes under YARA N-of semantics.  Preserving those semantic
+    as two separate votes under YARA N-of semantics. Preserving those semantic
     votes is required to avoid changing the rule.
     """
     if required <= 0:
@@ -539,19 +519,19 @@ def _make_bool_threshold(required: int, children):
 def _register_string_stage(plan, string_name: str, stage_registry: dict):
     """Register the physical broad-phase representation of one YARA string.
 
-    A YARA string can have one or more usable atom groups.  Each atom group is one
+    A YARA string can have one or more usable atom groups. Each atom group is one
     physical bgparse AND search, while multiple groups for the same YARA string
-    are alternatives and therefore OR together.  This function validates the
+    are alternatives and therefore OR together. This function validates the
     string's referenced groups, canonicalises each group by sorting its atoms,
     deduplicates identical alternatives, and uses the resulting tuple of
     alternatives as the stage key.
 
     Stages with identical physical searches are shared in ``stage_registry`` even
-    when they originate from different YARA identifiers.  The stage records the
+    when they originate from different YARA identifiers. The stage records the
     representative group IDs, generated bgparse command strings, physical search
     cost, selectivity hints, and all YARA labels represented by that search.
 
-    The returned key is used by the Boolean expression tree.  Returning None means
+    The returned key is used by the Boolean expression tree. Returning None means
     the string has no usable atom group and therefore cannot safely restrict the
     broad phase on its own.
     """
@@ -633,9 +613,9 @@ def _build_or_all_atoms_fallback_plan(plan):
     stage, and all of those stages are joined by OR.
 
     The fallback deliberately ignores the original Boolean relationship between
-    those atoms.  That can produce many extra broad-phase candidates, but any file
+    those atoms. That can produce many extra broad-phase candidates, but any file
     containing a usable extracted atom remains eligible for narrow-phase YARA,
-    which evaluates the original rule exactly.  The fallback is therefore a
+    which evaluates the original rule exactly. The fallback is therefore a
     compatibility mechanism intended to avoid rejecting otherwise valid rules when
     their condition syntax is not representable by the broad planner.
 
@@ -701,14 +681,14 @@ def _build_or_all_atoms_fallback_plan(plan):
 def _build_searchable_boolean_expression(node, plan, stage_registry: dict):
     """Translate the parsed YARA condition AST into a safe atom-search expression.
 
-    StringNode objects are registered as physical stages.  AndNode, OrNode, and
+    StringNode objects are registered as physical stages. AndNode, OrNode, and
     NOfNode objects are recursively converted to the planner's AND, OR, and
-    threshold tuples using the normalising helpers.  Unsupported predicates such
+    threshold tuples using the normalising helpers. Unsupported predicates such
     as filesize tests, module expressions, entrypoint checks, or other UnknownNode
     content are represented as TRUE, except for the literal FALSE predicate.
 
     Treating an unsupported predicate as TRUE removes that predicate as a
-    restriction.  Under AND this merely broadens the candidate set; under OR it can
+    restriction. Under AND this merely broadens the candidate set; under OR it can
     make the entire OR subtree TRUE, correctly signalling that no atom-only filter
     can safely represent that branch.
 
@@ -776,7 +756,7 @@ def _expression_stage_keys(expression) -> set:
     """Return every physical stage key referenced anywhere in a Boolean expression.
 
     The function recursively walks AND, OR, and threshold children, collecting the
-    keys from stage nodes into a set.  TRUE and FALSE nodes contribute no stages.
+    keys from stage nodes into a set. TRUE and FALSE nodes contribute no stages.
     Unknown planner operators raise immediately because silently ignoring a new
     operator could invalidate cost accounting or safety decisions.
 
@@ -806,7 +786,7 @@ def _restrict_expression_to_stages(expression, selected_stage_keys: set):
     """Safely rewrite a Boolean expression to use only a selected set of stages.
 
     An unselected ordinary stage is replaced with TRUE, which removes that
-    restriction and can only broaden an AND-based filter.  Composite expressions
+    restriction and can only broaden an AND-based filter. Composite expressions
     are recursively simplified with the normal Boolean constructors.
 
     Direct AND clauses containing only stage children are treated atomically after
@@ -814,9 +794,9 @@ def _restrict_expression_to_stages(expression, selected_stage_keys: set):
     any member of that retained direct-AND clause is not selected, the entire
     clause becomes TRUE instead of silently shrinking to fewer mandatory strings.
 
-    Threshold expressions are also atomic during budget pruning.  Either every
+    Threshold expressions are also atomic during budget pruning. Either every
     stage required to represent the N-of expression is retained, preserving the
-    original N exactly, or the whole threshold becomes TRUE.  This prevents budget
+    original N exactly, or the whole threshold becomes TRUE. This prevents budget
     selection from transforming, for example, 3-of-8 into a weaker 2-of-7 plan.
 
     The function is used only to create conservative broad-phase approximations;
@@ -887,16 +867,16 @@ def _minimum_restrictive_stage_set(expression, stage_registry: dict):
     """Find the lowest-cost stage set that keeps an expression meaningfully restrictive.
 
     This helper is used when the complete Boolean plan is more expensive than the
-    configured preferred budget.  It asks what minimum collection of stages can be
+    configured preferred budget. It asks what minimum collection of stages can be
     kept while replacing all omitted restrictions with TRUE without making the
     whole expression TRUE.
 
     For AND, one restrictive child can safely filter the original conjunction, so
-    the cheapest safe child selection is chosen.  A direct string-only AND is an
+    the cheapest safe child selection is chosen. A direct string-only AND is an
     exception: after the configured AND-string limit has selected its members, the
     whole retained clause is treated atomically and all of its stages are required.
     For OR, every branch must remain restrictive, so the minimum selections for all
-    branches are unioned.  Thresholds are likewise atomic and require every stage
+    branches are unioned. Thresholds are likewise atomic and require every stage
     needed to preserve the original N-of semantics.
 
     The returned set is therefore the cheapest safe broad filter for that subtree,
@@ -970,11 +950,11 @@ def _collect_activation_bundles(expression, stage_registry: dict) -> list[set]:
     The function recursively visits every Boolean subtree and asks
     ``_minimum_restrictive_stage_set`` for the minimum stage set that would make
     that subtree restrictive.  Each unique non-empty set is stored as an activation
-    bundle.  The traversal then continues through AND, OR, and threshold children
+    bundle. The traversal then continues through AND, OR, and threshold children
     to discover smaller useful structures.
 
     ``_choose_boolean_stages`` uses these bundles when spare preferred-budget
-    capacity exists.  Adding a complete bundle can restore meaningful Boolean
+    capacity exists. Adding a complete bundle can restore meaningful Boolean
     structure, such as an OR branch or threshold, instead of spending budget on an
     individual stage that would simplify away and provide no additional filtering.
     """
@@ -1006,9 +986,9 @@ def _stage_strength(stage: dict) -> tuple:
 
     The score prefers stages with a longer extracted atom, then stages whose
     largest mandatory atom group contains more atoms, then lower physical search
-    cost.  Sorted YARA labels provide a deterministic final tie-breaker.
+    cost. Sorted YARA labels provide a deterministic final tie-breaker.
 
-    This is only a planning heuristic.  It does not affect correctness because
+    This is only a planning heuristic. It does not affect correctness because
     stages omitted because of a preferred limit are replaced conservatively with
     TRUE.  The score exists to spend limited broad-phase work on searches that are
     more likely to reduce the narrow-phase candidate set.
@@ -1025,11 +1005,11 @@ def _and_child_strength(expression, stage_registry: dict) -> tuple:
     """Estimate how valuable an AND operand is when only some conjuncts may be retained.
 
     The function recursively derives a deterministic strength tuple for a Boolean
-    subexpression.  A stage uses its atom-length and atom-count hints directly.
+    subexpression. A stage uses its atom-length and atom-count hints directly.
     For OR, the weakest-looking alternative represents the branch because an OR is
-    only as selective as its broadest alternative.  For an N-of threshold, the
+    only as selective as its broadest alternative. For an N-of threshold, the
     Nth-strongest child is used as a proxy for the selectivity of satisfying the
-    threshold.  Nested ANDs use their strongest remaining child.
+    threshold. Nested ANDs use their strongest remaining child.
 
     Total physical cost, referenced stage count, and child count are included as
     tie-breakers so cheaper, simpler operands are preferred when selectivity looks
@@ -1096,21 +1076,21 @@ def _limit_boolean_and_children(
 ):
     """Apply the configured direct-string limit to every Boolean AND clause.
 
-    The function recursively rewrites the Boolean expression.  OR and threshold
-    subtrees are visited but do not consume the direct-string limit.  At an AND
+    The function recursively rewrites the Boolean expression. OR and threshold
+    subtrees are visited but do not consume the direct-string limit. At an AND
     node, only immediate stage children count as direct mandatory strings.
     Complex operands such as ``A OR B`` or ``3 of (...)`` remain intact and are
     handled by their own Boolean semantics.
 
     If the number of direct string stages exceeds ``max_and_children``, those
     stages are ranked with ``_and_child_strength`` and only the strongest configured
-    number are retained.  The omitted conjuncts are effectively replaced with TRUE
+    number are retained. The omitted conjuncts are effectively replaced with TRUE
     by removing them from the AND, which creates a superset of the original matches
     and therefore remains safe for broad-phase filtering.
 
     The function also records structured limit events used by logging to explain
     exactly how many strings were present, which strings were kept, and which were
-    omitted.  This setting controls logical direct-AND strings; it is separate from
+    omitted. This setting controls logical direct-AND strings; it is separate from
     the physical searches-per-index budget.
     """
     limit_events = []
@@ -1180,7 +1160,7 @@ def _combine_single_search_and_stages(
     """Collapse compatible direct YARA-string ANDs into one native bgparse search.
 
     The function walks the Boolean expression recursively while preserving OR and
-    threshold boundaries.  At each AND node it identifies immediate stage children
+    threshold boundaries. At each AND node it identifies immediate stage children
     whose physical cost is exactly one and whose stage contains exactly one bgparse
     search.  Two or more such stages can be represented exactly by concatenating
     all of their mandatory atoms into one command, because multiple bgparse ``-s``
@@ -1193,7 +1173,7 @@ def _combine_single_search_and_stages(
     Boolean tree.
 
     Stages with multiple alternatives, such as nocase expansions, are deliberately
-    not combined.  Representing ``(A1 OR A2) AND (B1 OR B2)`` inside bgparse would
+    not combined. Representing ``(A1 OR A2) AND (B1 OR B2)`` inside bgparse would
     require the Cartesian product of alternatives; naively placing every atom in
     one command would incorrectly require all alternatives and could cause false
     negatives.
@@ -1302,12 +1282,12 @@ def _choose_boolean_stages(
 ):
     """Choose the strongest safe Boolean broad-phase plan allowed by search budgets.
 
-    The function first calculates the physical cost of the complete expression.  If
+    The function first calculates the physical cost of the complete expression. If
     that cost fits both the preferred per-index budget and the hard per-index limit,
     the complete plan is returned unchanged.
 
     Otherwise it computes the minimum restrictive stage set required to keep the
-    expression safely useful.  If even that minimum exceeds the hard limit, the
+    expression safely useful. If even that minimum exceeds the hard limit, the
     hunt fails because executing an unsafe approximation is not permitted.  The
     preferred limit is softer: it may be exceeded when the minimum safe filter
     itself costs more, while the hard global-task-derived limit is never exceeded.
@@ -1315,7 +1295,7 @@ def _choose_boolean_stages(
     Starting from the minimum safe selection, the function repeatedly considers
     activation bundles and individual stages that fit the remaining target budget.
     It scores additions by aggregate stage strength, useful stage count, added
-    physical cost, and deterministic expression ordering.  After each addition the
+    physical cost, and deterministic expression ordering. After each addition the
     expression is re-restricted and any stages simplified out of the resulting
     Boolean tree are removed so their budget can be reused.
 
@@ -1420,11 +1400,11 @@ def _format_boolean_expression(expression, stage_registry: dict) -> str:
 
     TRUE and FALSE are rendered explicitly, stage nodes use their YARA labels,
     AND/OR nodes are recursively parenthesised, and threshold nodes are shown as
-    ``AT_LEAST_N(...)``.  Combined native bgparse AND stages are described through
+    ``AT_LEAST_N(...)``. Combined native bgparse AND stages are described through
     ``_stage_label_text`` so logs show the logical mandatory strings rather than an
     opaque internal stage key.
 
-    The formatter is diagnostic only.  Its purpose is to make the planner's exact
+    The formatter is diagnostic only. Its purpose is to make the planner's exact
     broad-phase interpretation auditable against the original YARA condition.
     """
     operator = expression[0]
@@ -1451,11 +1431,11 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
     A stage node resolves to the set of indexed paths found for that stage.  AND
     recursively evaluates its children, sorts their result sets from smallest to
     largest, and intersects them in place so rejection happens early and temporary
-    set work is minimised.  OR unions all child candidate sets.  A threshold counts
+    set work is minimised. OR unions all child candidate sets. A threshold counts
     how many child result sets contain each path and returns paths whose count meets
     or exceeds the required N.
 
-    FALSE evaluates to an empty set.  TRUE is intentionally rejected because a
+    FALSE evaluates to an empty set. TRUE is intentionally rejected because a
     nonrestrictive plan should have been handled earlier by fallback planning rather
     than accidentally sending an undefined universe of files to narrow phase.
 
@@ -1518,20 +1498,20 @@ def _build_rule_boolean_plan(
     """Build one rule's executable, resource-bounded broad-phase Boolean plan.
 
     The function converts the parsed condition AST into a safe searchable
-    expression and a registry of physical string stages.  If no restrictive
+    expression and a registry of physical string stages. If no restrictive
     expression can be represented but usable atoms exist, it falls back to the
     OR-all-atoms compatibility plan.
 
     For a representable expression it first applies
-    ``max_required_strings_per_and_search`` to direct string-only AND clauses.  It
+    ``max_required_strings_per_and_search`` to direct string-only AND clauses. It
     then batches compatible single-search direct AND strings into one native
-    bgparse command.  After batching, ``_choose_boolean_stages`` applies the
+    bgparse command. After batching, ``_choose_boolean_stages`` applies the
     preferred searches-per-index budget and the hard global-task-derived limit.
     This order is deliberate: the logical direct-string limit is decided before
     physical batching, and the budget sees the true physical cost after batching.
 
-    FALSE conditions return an empty executable plan.  A selected TRUE expression
-    falls back to OR-all-atoms rather than pretending to be restrictive.  Selected
+    FALSE conditions return an empty executable plan. A selected TRUE expression
+    falls back to OR-all-atoms rather than pretending to be restrictive. Selected
     stages are finally sorted deterministically using selectivity and cost hints for
     predictable execution and logging.
 
@@ -1634,9 +1614,9 @@ def _run_bgparse_task(
     """Execute one physical bgparse task against one index and stream its results.
 
     A shell command is built from the bgparse executable, the already-generated
-    search arguments, and the target index.  stdout is kept as a pipe and parsed
+    search arguments, and the target index. stdout is kept as a pipe and parsed
     incrementally by ``_process_bgparse_lines`` so a large result set is not first
-    materialised as one giant bytes object.  stderr is redirected to a temporary
+    materialised as one giant bytes object. stderr is redirected to a temporary
     file, preventing either subprocess pipe from filling and blocking the child.
 
     The parsed match paths and optional file metadata are returned together with
@@ -1644,7 +1624,7 @@ def _run_bgparse_task(
     The caller performs the central error handling so all executor tasks follow the
     same path.
 
-    Cancellation is checked after the subprocess has exited.  This helper is kept
+    Cancellation is checked after the subprocess has exited. This helper is kept
     small and side-effect-limited so it can be submitted safely to the bounded
     broad-phase ThreadPoolExecutor.
     """
@@ -1702,7 +1682,7 @@ def _run_bgparse_task_args(
     """Adapter that executes a pre-built broad-phase task tuple.
 
     Broad-phase task generation stores every argument needed by
-    ``_run_bgparse_task`` in a tuple.  ThreadPoolExecutor submission is simpler and
+    ``_run_bgparse_task`` in a tuple. ThreadPoolExecutor submission is simpler and
     less error-prone when all tasks have the same one-argument callable, so this
     helper only unpacks the tuple and forwards it unchanged.
 
@@ -1721,22 +1701,22 @@ def _broad_phase_search(
     """Plan and execute the atom-index broad phase for all rules in a hunt.
 
     For YARA rules, the function builds a safe Boolean broad plan from each parsed
-    condition.  YARA strings are represented as ORs of their alternative atom
+    condition. YARA strings are represented as ORs of their alternative atom
     groups, direct mandatory single-search strings may be batched into native
     multi-``-s`` bgparse commands, and AND, OR, and N-of relationships are later
-    evaluated over the resulting candidate sets.  Unsupported predicates are
+    evaluated over the resulting candidate sets. Unsupported predicates are
     handled conservatively by the planner so broad phase can admit extra files but
     does not intentionally strengthen the original condition.
 
     Configuration controls three separate resource concerns: the maximum number of
     direct strings retained in an AND clause, the preferred number of physical
-    searches per index, and the hard total broad-task limit.  A hard per-index limit
-    is derived from the total task cap and current number of indexes.  The complete
+    searches per index, and the hard total broad-task limit. A hard per-index limit
+    is derived from the total task cap and current number of indexes. The complete
     multi-rule task count is checked again before any subprocess work starts.
 
-    Execution is stage-oriented.  Each physical stage is searched across every
+    Execution is stage-oriented. Each physical stage is searched across every
     index with a bounded ThreadPoolExecutor that keeps at most the configured number
-    of bgparse processes in flight.  stdout is parsed incrementally, candidate paths
+    of bgparse processes in flight. stdout is parsed incrementally, candidate paths
     are unioned across indexes and across alternative searches belonging to the
     same stage, and file metadata is retained only as needed for later narrow
     fetches.  Progress, cancellation, process failures, bgparse error markers, and
@@ -1744,7 +1724,7 @@ def _broad_phase_search(
 
     After all stages for a rule finish, ``_evaluate_boolean_expression`` applies
     the planned AND/OR/threshold set logic and produces the exact broad candidate
-    superset sent to narrow phase.  Per-stage temporary structures are then cleared
+    superset sent to narrow phase. Per-stage temporary structures are then cleared
     and memory trimming is requested before moving to the next rule.
 
     The broad phase never performs final YARA matching; its purpose is to use the
@@ -1758,60 +1738,11 @@ def _broad_phase_search(
     logger.debug("Rule search plans broad phase: %s", rule_search_plans)
 
     settings = RetrohuntSettings().search_settings
-    logger.warning(
-        "Search settings types: "
-        "max_required_strings_per_and_search=%r (%s), "
-        "max_required_string_searches_per_index=%r (%s), "
-        "max_required_broad_phase_workers=%r (%s), "
-        "max_broad_phase_tasks=%r (%s), "
-        "max_thread_count=%r (%s), "
-        "max_narrow_phase_inflight_files=%r (%s), "
-        "default_narrow_phase_cleanup_multiplier=%r (%s)",
-        settings.max_required_strings_per_and_search,
-        type(settings.max_required_strings_per_and_search).__name__,
-        settings.max_required_string_searches_per_index,
-        type(settings.max_required_string_searches_per_index).__name__,
-        settings.max_required_broad_phase_workers,
-        type(settings.max_required_broad_phase_workers).__name__,
-        settings.max_broad_phase_tasks,
-        type(settings.max_broad_phase_tasks).__name__,
-        settings.max_thread_count,
-        type(settings.max_thread_count).__name__,
-        settings.max_narrow_phase_inflight_files,
-        type(settings.max_narrow_phase_inflight_files).__name__,
-        settings.default_narrow_phase_cleanup_multiplier,
-        type(settings.default_narrow_phase_cleanup_multiplier).__name__,
-    )
 
     max_and_children = settings.max_required_strings_per_and_search
     preferred_searches_per_index = settings.max_required_string_searches_per_index
     broad_phase_workers = settings.max_required_broad_phase_workers
     max_broad_phase_tasks = settings.max_broad_phase_tasks
-
-    # max_and_children = _positive_int_setting(
-    #    settings,
-    #    "max_required_strings_per_and_search",
-    #    _DEFAULT_MAX_REQUIRED_STRINGS_PER_AND_SEARCH,
-    # )
-    # preferred_searches_per_index = _positive_int_setting(
-    #    settings,
-    #    "max_required_string_searches_per_index",
-    #    _DEFAULT_MAX_REQUIRED_STRING_SEARCHES_PER_INDEX,
-    # )
-    # configured_broad_workers = _positive_int_setting(
-    #    settings,
-    #    "max_broad_phase_workers",
-    #    _DEFAULT_MAX_BROAD_PHASE_WORKERS,
-    # )
-    # max_broad_phase_tasks = _positive_int_setting(
-    #    settings,
-    #    "max_broad_phase_tasks",
-    #    _DEFAULT_MAX_BROAD_PHASE_TASKS,
-    # )
-    # broad_phase_workers = min(
-    #    configured_broad_workers,
-    #    os.cpu_count() or 1,
-    # )
 
     if len(indices) > max_broad_phase_tasks:
         raise BiggrepException(
@@ -2167,14 +2098,14 @@ def _process_bgparse_lines(
 ) -> tuple[list[str], FileConfig]:
     """Parse bgparse stdout incrementally into match paths and optional file metadata.
 
-    Each non-empty output line is split on commas.  The first field is decoded as
+    Each non-empty output line is split on commas. The first field is decoded as
     the indexed file path; remaining key=value fields, excluding bgparse's final
     trailing field, are decoded into the per-file configuration mapping when
-    ``store_config`` is enabled.  Existing config entries are left intact so the
+    ``store_config`` is enabled. Existing config entries are left intact so the
     first usable metadata record for a path is retained.
 
     ``allowed_paths`` can further restrict accepted results when a caller needs to
-    filter a streamed search.  Malformed config fields increment the bgparse error
+    filter a streamed search. Malformed config fields increment the bgparse error
     metric and raise ``FileConfigReadException`` rather than silently storing
     corrupt metadata.
 
@@ -2267,7 +2198,7 @@ def _narrow_phase_search(
     STRING searches require no file bodies and return the broad matches directly.
     For YARA and Suricata candidates, the function converts rule-path lists to sets,
     builds an inverted file-to-rules mapping so each candidate file is fetched only
-    once, and precompiles each YARA rule once for the hunt.  YARA source is given a
+    once, and precompiles each YARA rule once for the hunt. YARA source is given a
     PE import when required by the surrounding Retrohunt behaviour.
 
     A bounded ThreadPoolExecutor processes files end-to-end: one worker owns one
@@ -2279,14 +2210,14 @@ def _narrow_phase_search(
     timeouts do not pin large buffers.
 
     Candidates are processed in cleanup batches sized from the active worker count
-    and the configured cleanup multiplier.  Each completed file immediately updates
+    and the configured cleanup multiplier. Each completed file immediately updates
     rule match sets, progress, I/O and CPU metrics, missing-file accounting, and the
-    data-release callback.  After a bounded batch drains, temporary containers are
+    data-release callback. After a bounded batch drains, temporary containers are
     cleared and explicit garbage collection/native heap trimming is requested.
 
-    At the end, only paths that passed exact narrow matching remain.  Native YARA
+    At the end, only paths that passed exact narrow matching remain. Native YARA
     objects, candidate maps, metrics caches, and file metadata are cleared before a
-    final memory trim.  This phase is the correctness authority: broad phase only
+    final memory trim. This phase is the correctness authority: broad phase only
     reduces candidates, while narrow phase evaluates the original rule semantics.
     """
     if queryType == QueryTypeEnum.STRING:
@@ -2343,18 +2274,18 @@ def _narrow_phase_search(
         """Fetch and exactly evaluate one candidate file against all rules assigned to it.
 
         The worker first removes the file's broad-phase metadata from ``file_config`` so
-        that table shrinks continuously during the hunt.  It then performs the blocking
+        that table shrinks continuously during the hunt. It then performs the blocking
         data callback, records I/O duration and byte count, and treats an empty result
         as a missing file.
 
         For each rule associated with the file, YARA matching is timed and configured
-        to abort its callback path on the first confirmed match.  Cancellation is
+        to abort its callback path on the first confirmed match. Cancellation is
         checked before the fetch, after the blocking fetch returns, and between rule
         evaluations.  Suricata follows the same per-file dispatch structure when that
         implementation is available.
 
         The complete file body is intentionally scoped to this worker invocation and
-        set to None in ``finally``.  This prevents large bytes objects from being held
+        set to None in ``finally``. This prevents large bytes objects from being held
         by worker frames or Future tracebacks after success, timeout, cancellation, or
         an exception.
         """
@@ -2412,7 +2343,7 @@ def _narrow_phase_search(
     def worker_task(task: tuple[str, set[str]]):
         """Unpack one ``(file_path, rules_for_file)`` item and execute the narrow worker.
 
-        The narrow batch submits dictionary items directly to ThreadPoolExecutor.  This
+        The narrow batch submits dictionary items directly to ThreadPoolExecutor. This
         adapter keeps submission uniform while leaving all fetch, match, cancellation,
         and cleanup behaviour inside ``worker``.
         """
@@ -2437,10 +2368,6 @@ def _narrow_phase_search(
         cleanup_batch_size,
     )
 
-    rss_mib = _current_rss_mib()
-    if rss_mib is not None:
-        logger.info("Narrow search starting process RSS: %.1f MiB", rss_mib)
-
     def process_batch(
         executor: ThreadPoolExecutor,
         batch: dict[str, set[str]],
@@ -2454,7 +2381,7 @@ def _narrow_phase_search(
         For each completed worker result the function records I/O metrics, advances
         file and rule/job progress, removes missing or non-matching paths from the rule
         candidate sets, and invokes the data-release callback after progress consumers
-        have had a chance to use matched-file metadata.  Worker exceptions also trigger
+        have had a chance to use matched-file metadata. Worker exceptions also trigger
         the release callback before being re-raised.
 
         The local Future mapping is destructively drained and cleared in ``finally``.
@@ -2561,14 +2488,6 @@ def _narrow_phase_search(
             batch.clear()
             release_unused_memory()
 
-            rss_mib = _current_rss_mib()
-            if rss_mib is not None:
-                logger.debug(
-                    "Narrow-phase cleanup batch %d completed; process RSS %.1f MiB",
-                    batch_count,
-                    rss_mib,
-                )
-
     # Convert back to lists and remove empty rules.
     final_matches: RuleFileMatches = {
         rule_name: list(paths) for rule_name, paths in rule_matches_sets.items() if paths
@@ -2605,10 +2524,6 @@ def _narrow_phase_search(
     rule_matches_sets.clear()
     release_unused_memory()
 
-    rss_mib = _current_rss_mib()
-    if rss_mib is not None:
-        logger.info("Narrow search cleanup completed; process RSS: %.1f MiB", rss_mib)
-
     return final_matches
 
 
@@ -2629,8 +2544,8 @@ def _pop_dict_chunks(
     """Yield bounded dictionaries while destructively draining the source mapping.
 
     Up to ``chunk_size`` entries are removed from the input dictionary with
-    ``popitem`` and returned as a new batch.  The process repeats until the source
-    is empty.  A non-positive chunk size is rejected because it could otherwise
+    ``popitem`` and returned as a new batch. The process repeats until the source
+    is empty. A non-positive chunk size is rejected because it could otherwise
     create a non-progressing loop.
 
     Narrow phase uses destructive chunking so files already assigned to a completed
