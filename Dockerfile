@@ -4,6 +4,27 @@ ARG BUILD_TAG='3.12-trixie@sha256:e5931cdb4a8cec0ad083277c16a39114f14123b8b6c858
 ARG BASE_IMAGE='python'
 ARG BASE_TAG='3.12-slim-trixie@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a'
 
+# Temporary dev-only YARA-X build.
+# Pin to the exact commit that contains `yr debug atoms`.
+ARG YARAX_REPO="https://github.com/matt-acsc/yara-x.git"
+ARG YARAX_REF="db413bc5045106515d77fc415b99f2c6ec042f5f"
+
+FROM rust:trixie AS yarax_builder
+ENV DEBIAN_FRONTEND=noninteractive
+ARG YARAX_REPO
+ARG YARAX_REF
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN git clone "$YARAX_REPO" /tmp/yara-x
+
+WORKDIR /tmp/yara-x
+RUN git checkout "$YARAX_REF" && \
+    cargo build --release -p yara-x-cli --features debug-cmd
+
+
 FROM $REGISTRY/$BUILD_IMAGE:$BUILD_TAG AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_DISABLE_PIP_VERSION_CHECK=yes
@@ -49,6 +70,7 @@ RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ]; then \
     uv pip freeze | grep 'azul-.*==' | grep -v '^azul-plugin-retrohunt' | cut -d "=" -f 1 | xargs -I {} uv pip install --extra-index-url=$UV_INDEX_URL --system --upgrade --no-deps '{}>=0.0.0'; \
     fi
 
+
 FROM $REGISTRY/$BASE_IMAGE:$BASE_TAG AS base
 ENV DEBIAN_FRONTEND=noninteractive
 COPY debian.txt /tmp/src/
@@ -57,11 +79,24 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     $(grep -vE "^\s*(#|$)" /tmp/src/debian.txt | tr "\n" " ") && \
     rm -rf /tmp/src/debian.txt /var/lib/apt/lists/*
+
 ARG UID=21000
 ARG GID=21000
 RUN groupadd -g $GID azul && useradd --create-home --shell /bin/bash -u $UID -g $GID azul
-USER azul
+
 COPY --from=builder /usr/local /usr/local
+
+# Temporary dev-only YARA-X binary.
+# yara_parse.py resolves this as:
+# /usr/local/lib/python3.12/site-packages/azul_plugin_retrohunt/yr
+COPY --from=yarax_builder \
+    /tmp/yara-x/target/release/yr \
+    /usr/local/lib/python3.12/site-packages/azul_plugin_retrohunt/yr
+
+RUN chmod 0755 /usr/local/lib/python3.12/site-packages/azul_plugin_retrohunt/yr
+
+USER azul
+
 
 # run tests during build to verify dockerfile has all requirements
 FROM base AS tester
@@ -88,6 +123,7 @@ RUN --mount=type=secret,uid=$UID,gid=$GID,id=testSecret export $(cat /run/secret
     pytest -o cache_dir=/tmp/cache --tb=short /tmp/tests/unit
 # generate empty file to copy to `release` stage so this stage is not skipped due to optimisations.
 RUN touch /tmp/testingpassed
+
 
 FROM base AS release
 # copy from `tester` stage to ensure testing is not skipped due to build optimisations.

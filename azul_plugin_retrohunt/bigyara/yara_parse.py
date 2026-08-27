@@ -13,8 +13,6 @@ import tempfile
 from dataclasses import dataclass, field
 from itertools import product
 
-from azul_plugin_retrohunt.bigyara.env import executables
-
 from . import SEARCH_ATOM_SIZE_MIN, ProgressCallback, SearchPhaseEnum
 
 logger = logging.getLogger("bigyara.yara_atom_parser")
@@ -803,56 +801,31 @@ def _extract_required_strings(
 def parse_yara_rules(
     rule_text: str, progress_callback: ProgressCallback
 ) -> tuple[RuleAtoms, RuleContent, RuleSearchPlans]:
-    """Compile the yara rule, parsing out search atoms.
-
-    Will parse the yara rule with small atoms first to determine
-    whether there are any nocase strings. If there are, we'll have to stick
-    with small atoms, otherwise we can use the large atom version
-    """
+    """Compile the YARA rule and extract final atoms selected by YARA-X."""
     yara_rules: list[YaraRule]
     rule_atoms: RuleAtoms = {}
     rule_search_plans: RuleSearchPlans = {}
 
-    # write the yara rules to a file
+    # Write the YARA rules to a temporary file for `yr debug atoms`.
     tmp_path: str
     with tempfile.NamedTemporaryFile(suffix=".yar", mode="w", delete=False) as yara_file:
         yara_file.write(rule_text)
         tmp_path = yara_file.name
 
-    # FUTURE: This section of code needs to be re-thought.
-    #         It seems silly to do an entire run-through of yara just to detect nocase strings.
-    #         I see no reason why we can't just detect nocase with regex or something,
-    #         then warn that it will be time consuming.
-    #         Alternately, could just blanket-ban nocase and say that bigyara is not compatible with it.
-    yara_rules = _parse_yara_with_exe(executables["yarac-small"], tmp_path)
-    nocase: bool = False
-    for yara_rule in yara_rules:
-        for string in yara_rule.strings:
-            if "nocase" in string.modifiers:
-                logger.warning(
-                    f"String {string.name} in rule {yara_rule.name} has the 'nocase' modifier - "
-                    "this may severely degrade performance"
-                )
-                nocase = True
-                break
-        if nocase:
-            break
-    if not nocase:
-        yara_rules = _parse_yara_with_exe(executables["yarac-large"], tmp_path)
-
-    # delete the yara rule file
-    os.remove(tmp_path)
+    yara_x_exe = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "yr",
+    )
+    try:
+        yara_rules = _parse_yara_with_exe(yara_x_exe, tmp_path)
+    finally:
+        os.remove(tmp_path)
 
     progress_callback(SearchPhaseEnum.ATOM_PARSE, 0, len(yara_rules), None)
 
     for rule_index in range(len(yara_rules)):
         new_atoms: list[bytes] = []
-        search_group_count = 0
-        largest_group = 0
-        # accumulate all regex groups across the entire rule.
-
         groups: list[set[bytes]] = []
-        group_sizes: list[int] = []
         string_groups: dict[str, list[int]] = {}
 
         for string_idx, yara_string in enumerate(yara_rules[rule_index].strings):
@@ -864,71 +837,29 @@ def parse_yara_rules(
                 string_name = f"$anon_{string_idx}"
 
             string_groups[string_name] = []
-            if "nocase" not in yara_string.modifiers and len(yara_string.re) > 0:
-                # If it is nocase or a normal string, the searches are the atoms
-                # if it is a regular expression, pull the searches from the RE tree
-                # FUTURE: this function does a heap of unnecessary work and needs to be refactored.
-
-                # inspect regex structure before flattening atoms.
-                try:
-                    re_tree_root: AtomTreeNode = _parse_re_tree(yara_string.re)
-
-                    regex_searches: list[set] = _searches_from_node(re_tree_root)
-                    regex_searches = _remove_bad_atoms(regex_searches)
-                    regex_searches = _get_minimal_atoms(regex_searches)
-
-                    # keep all groups for logging later.
-                    for search in regex_searches:
-                        groups.append(set(search))
-
-                        string_groups[string_name].append(len(groups) - 1)
-
-                    group_sizes.extend(len(g) for g in regex_searches)
-
-                    search_group_count += len(regex_searches)
-
-                    if regex_searches:
-                        largest_group = max(
-                            largest_group,
-                            max(len(x) for x in regex_searches),
-                        )
-
-                except Exception as e:
-                    logger.debug(
-                        "Failed to inspect regex structure for string %s in rule %s: %s",
-                        yara_string.name,
-                        yara_rules[rule_index].name,
-                        e,
-                    )
-
-                yara_string.atoms = _get_atoms_from_regex(
-                    yara_string.re,
-                    yara_string.modifiers,
-                )
 
             if len(yara_string.atoms) == 0:
-                logger.error(
-                    "No atoms found: rule=%s string=%s modifiers=%s regex=%r",
+                # YARA-X can legitimately have patterns that do not contribute
+                # matcher atoms (for example, some anchored/fixed-offset cases).
+                # Keep the string in the plan as unsearchable so the broad-phase
+                # planner can conservatively fall back to sibling structures.
+                logger.debug(
+                    "No usable YARA-X matcher atoms: rule=%s string=%s",
                     yara_rules[rule_index].name,
                     yara_string.name,
-                    yara_string.modifiers,
-                    yara_string.re,
                 )
+                continue
 
-                raise YaraStringNoAtomException(
-                    f"Failed to find any valid atoms for string {yara_string.name} in {yara_rules[rule_index].name}"
-                )
-
-            for yara_atom in yara_string.atoms:
+            # `yr debug atoms` already returns the final atoms selected by
+            # YARA-X. Treat each atom as an alternative trigger for this
+            # YARA string. In RuleSearchPlan, multiple groups for one string
+            # are OR alternatives, so each atom must be a singleton group.
+            for yara_atom in dict.fromkeys(yara_string.atoms):
                 if yara_atom not in new_atoms:
                     new_atoms.append(yara_atom)
 
-            # non-regex strings become singleton groups
-            if len(yara_string.re) == 0 or "nocase" in yara_string.modifiers:
-                for yara_atom in yara_string.atoms:
-                    groups.append({yara_atom})
-
-                    string_groups[string_name].append(len(groups) - 1)
+                groups.append({yara_atom})
+                string_groups[string_name].append(len(groups) - 1)
 
         progress_callback(
             SearchPhaseEnum.ATOM_PARSE,
@@ -1074,15 +1005,12 @@ def yara_finish_rule(rules: list[YaraRule], current_rule: YaraRule, current_stri
 
 
 def _parse_yara_with_exe(yara_exe: str, rule_file: str) -> list[YaraRule]:
-    """Run a dummy yara search with a yara exe patched to output atoms, and parse the result."""
-    # FUTURE: add a timeout to this.
-    # run patched yara
-    process: subprocess.CompletedProcess[bytes]
-    with tempfile.NamedTemporaryFile() as dummy_data_file:
-        process = subprocess.run(  # noqa: S603  # nosec: B603
-            (yara_exe, "--no-warnings", rule_file, dummy_data_file.name),
-            capture_output=True,
-        )  # noqa: S403  # nosec: B403
+    """Run YARA-X debug atoms and parse the selected atoms."""
+    process: subprocess.CompletedProcess[bytes] = subprocess.run(  # noqa: S603  # nosec: B602
+        (yara_exe, "debug", "atoms", rule_file),
+        capture_output=True,
+    )
+
     if process.returncode != 0:
         raise Exception(f"Error running {yara_exe}, exit code {process.returncode}: {process.stderr.decode()}")
 
@@ -1090,38 +1018,62 @@ def _parse_yara_with_exe(yara_exe: str, rule_file: str) -> list[YaraRule]:
     current_string: YaraString = None
     rules: list[YaraRule] = []
 
-    # parse the patched output
-    for line in process.stdout.strip().split():
-        if line.startswith(b"RULE:"):
-            current_rule, current_string = _yara_finish_string(current_rule, current_string)
-            if current_rule:
+    for raw_line in process.stdout.splitlines():
+        line = raw_line.decode().rstrip()
+
+        if not line:
+            continue
+
+        if line.startswith("rule "):
+            if current_rule is not None:
+                current_rule, current_string = _yara_finish_string(
+                    current_rule,
+                    current_string,
+                )
                 rules.append(current_rule)
+
             current_rule = YaraRule()
-            current_rule.name = line[5:].decode()
+            current_rule.name = line[5:]
             current_rule.strings = []
-        elif line.startswith(b"STRING:"):
-            current_rule, current_string = _yara_finish_string(current_rule, current_string)
+            current_string = None
+
+        elif line.startswith("  ") and not line.startswith("    "):
+            if current_rule is None:
+                raise Exception(f"Got string before rule in YARA-X output: {line}")
+
+            current_rule, current_string = _yara_finish_string(
+                current_rule,
+                current_string,
+            )
+
             current_string = YaraString()
-            current_string.name = line[7:].decode()
+            current_string.name = line.strip()
             current_string.atoms = []
+
+            # YARA-X debug atoms does not emit these.
+            # Keep them for compatibility with the rest of the parser for now.
             current_string.modifiers = []
-            current_string.re = []
-        elif line.startswith(b"FLAGS:"):
-            _yara_process_flags(current_rule, current_string, int(line[6:]))
-        elif line.startswith(b"ATOM:"):
-            atom = binascii.a2b_hex(line[5:])
+            current_string.re = b""
+
+        elif line.startswith("    "):
+            if current_string is None:
+                raise Exception(f"Got atom before string in YARA-X output: {line}")
+
+            atom = binascii.a2b_hex(line.strip())
+
             if len(atom) >= SEARCH_ATOM_SIZE_MIN:
                 current_string.atoms.append(atom)
-        elif line.startswith(b"RE:"):
-            if len(current_string.re) > 0:
-                raise Exception(
-                    "Got another regular expression tree when one was already "
-                    f"set for {current_string.name} in {current_rule.name}"
-                )
-            current_string.re = line[3:]
+
         else:
-            raise Exception(f"Invalid identifier in yara output (line = {line})")
-    yara_finish_rule(rules, current_rule, current_string)
+            raise Exception(f"Invalid identifier in YARA-X output (line = {line})")
+
+    if current_rule is not None:
+        current_rule, current_string = _yara_finish_string(
+            current_rule,
+            current_string,
+        )
+        rules.append(current_rule)
+
     return rules
 
 

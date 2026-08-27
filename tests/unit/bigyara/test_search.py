@@ -7,6 +7,7 @@ from hashlib import sha256
 from types import SimpleNamespace
 
 from azul_plugin_retrohunt import test_utils
+from azul_plugin_retrohunt.bigyara import SEARCH_ATOM_SIZE_MIN
 from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
 from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
 from azul_plugin_retrohunt.bigyara.search import (
@@ -28,7 +29,6 @@ from azul_plugin_retrohunt.bigyara.search import (
     clear_stop_event,
     search,
 )
-from azul_plugin_retrohunt.bigyara.yara_parse import YaraStringNoAtomException
 from azul_plugin_retrohunt.models import FileMetadata
 
 # FUTURE: bigyara search should in theory be usable on any biggrep indices,
@@ -248,15 +248,12 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         atom_events = [event for event in progress_events if event[0] == SearchPhaseEnum.ATOM_PARSE]
         self.assertTrue(atom_events)
         self.assertTrue(all(total == 1 for _, _, total, _ in atom_events))
-        self.assertIn(
-            (
-                SearchPhaseEnum.ATOM_PARSE,
-                1,
-                1,
-                ("Rule", [b"abcd", b"notfound"]),
-            ),
-            atom_events,
-        )
+        completed_atom_events = [event for event in atom_events if event[1] == 1 and event[3] is not None]
+        self.assertEqual(len(completed_atom_events), 1)
+        completed_rule, completed_atoms = completed_atom_events[0][3]
+        self.assertEqual(completed_rule, "Rule")
+        self.assertTrue(completed_atoms)
+        self.assertTrue(all(isinstance(atom, bytes) and len(atom) >= SEARCH_ATOM_SIZE_MIN for atom in completed_atoms))
 
         broad_events = [event for event in progress_events if event[0] == SearchPhaseEnum.BROAD_PHASE]
         self.assertTrue(broad_events)
@@ -371,9 +368,16 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
                 any of them
         }
         """
-        # no atoms long enough
-        with self.assertRaises(YaraStringNoAtomException):
-            results: RuleFileMatches = search(yara_rules, QueryTypeEnum.YARA, self.base_temp_dir, fetch_from_dict)
+        # YARA-X may compile the string, but Retrohunt filters matcher atoms
+        # shorter than SEARCH_ATOM_SIZE_MIN. With no usable broad-phase atom
+        # left, the hunt must fail conservatively at broad-plan construction.
+        with self.assertRaises(NoAtomException):
+            search(
+                yara_rules,
+                QueryTypeEnum.YARA,
+                self.base_temp_dir,
+                fetch_from_dict,
+            )
 
     def test_yara_search_skipping_one_file(self):
         """Test that a yara search succeeds but also skip one file and ensure the progress callback works."""

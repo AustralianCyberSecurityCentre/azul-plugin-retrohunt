@@ -278,3 +278,5 @@ yara-*
 
 .ruff_cache
 
+azul_plugin_retrohunt/yr
+
