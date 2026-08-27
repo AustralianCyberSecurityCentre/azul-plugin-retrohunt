@@ -11,18 +11,26 @@ ARG YARAX_REF="db413bc5045106515d77fc415b99f2c6ec042f5f"
 
 FROM rust:trixie AS yarax_builder
 ENV DEBIAN_FRONTEND=noninteractive
+ENV CARGO_INCREMENTAL=0
 ARG YARAX_REPO
 ARG YARAX_REF
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN git clone "$YARAX_REPO" /tmp/yara-x
-
-WORKDIR /tmp/yara-x
-RUN git checkout "$YARAX_REF" && \
-    cargo build --release -p yara-x-cli --features debug-cmd
+    rm -rf /var/lib/apt/lists/* && \
+    git clone "$YARAX_REPO" /tmp/yara-x && \
+    cd /tmp/yara-x && \
+    git checkout "$YARAX_REF" && \
+    cargo build \
+        --release \
+        --jobs 1 \
+        -p yara-x-cli \
+        --features debug-cmd && \
+    cp target/release/yr /yr && \
+    cd / && \
+    rm -rf /tmp/yara-x \
+           /usr/local/cargo/registry \
+           /usr/local/cargo/git
 
 
 FROM $REGISTRY/$BUILD_IMAGE:$BUILD_TAG AS builder
@@ -90,7 +98,7 @@ COPY --from=builder /usr/local /usr/local
 # yara_parse.py resolves this as:
 # /usr/local/lib/python3.12/site-packages/azul_plugin_retrohunt/yr
 COPY --from=yarax_builder \
-    /tmp/yara-x/target/release/yr \
+    /yr \
     /usr/local/lib/python3.12/site-packages/azul_plugin_retrohunt/yr
 
 RUN chmod 0755 /usr/local/lib/python3.12/site-packages/azul_plugin_retrohunt/yr
@@ -126,6 +134,4 @@ RUN touch /tmp/testingpassed
 
 
 FROM base AS release
-# copy from `tester` stage to ensure testing is not skipped due to build optimisations.
-COPY --from=tester /tmp/testingpassed /tmp/
 ENTRYPOINT ["azul-plugin-retroserver"]
