@@ -25,11 +25,6 @@ This leverages the capabilities of Cert's BigGrep indexing.
 - Once an event's rules have been run it posts a result back to Redis.
 - Single threaded and will only run one job at a time, if you want more jobs running. Run more instances.
 
-#### azul-plugin-retroserver:
-
-- Accepts yara/suricata rules from users and submits `retrohunt` events to Redis for retroworker to accept.
-- Displays the resulsts or retrohunt workers jobs.
-
 ## Installation
 
 - Install required system libraries:
@@ -43,6 +38,90 @@ This leverages the capabilities of Cert's BigGrep indexing.
 
 - Install package (from the root directory of this project):
   `pip install -e .`
+
+### Updating the bundled YARA-X CLI
+
+Retrohunt ships a modified Linux YARA-X CLI at `azul_plugin_retrohunt/yr`. It provides final matcher atoms through:
+
+```bash
+yr debug atoms --json <rules.yar>
+```
+
+Build on Linux using the same architecture and a compatible distribution as the runtime container. Git, a C/C++ build toolchain and a recent Rust toolchain are required.
+
+#### 1. Clone the latest source
+
+Run from the Retrohunt repository root:
+
+```bash
+RETROHUNT_ROOT="$(pwd)"
+YARAX_BUILD_DIR="$(mktemp -d)"
+
+git clone https://github.com/VirusTotal/yara-x.git "$YARAX_BUILD_DIR/yara-x"
+cd "$YARAX_BUILD_DIR/yara-x"
+
+rustup update stable
+git rev-parse HEAD
+```
+
+Record the commit hash used for the update. For a reproducible release build, check out the desired release tag before continuing.
+
+#### 2. Apply the Retrohunt atom-output changes
+
+Apply our custom changes implementing `debug atoms --json` before building. Enabling `debug-cmd` alone does not guarantee the Retrohunt JSON interface exists.
+
+The output must contain one entry per pattern:
+
+```json
+[
+  {
+    "rule": "Example",
+    "pattern": "$a",
+    "atoms": ["41424344"]
+  }
+]
+```
+
+Preserve patterns with `"atoms": []`. Each anonymous `$` pattern must have its own entry.
+
+#### 3. Build the CLI with debug commands enabled
+
+```bash
+cargo +stable build \
+    --locked \
+    --release \
+    --jobs 1 \
+    -p yara-x-cli \
+    --features debug-cmd
+```
+
+This produces `target/release/yr`. The binary is optimised for runtime use; `debug-cmd` enables the diagnostic commands.
+
+Verify the required command:
+
+```bash
+target/release/yr --version
+target/release/yr debug atoms --help
+```
+
+#### 4. Install the binary into the plugin
+
+```bash
+install -m 0755 \
+    target/release/yr \
+    "$RETROHUNT_ROOT/azul_plugin_retrohunt/yr"
+
+cd "$RETROHUNT_ROOT"
+```
+
+The wheel configuration must include:
+
+```toml
+[tool.hatch.build.targets.wheel.force-include]
+"azul_plugin_retrohunt/yr" = "azul_plugin_retrohunt/yr"
+```
+
+The bundled CLI and the Python `yara-x` scanning package are separate dependencies. When updating either, run the parser and search tests to check compatibility between atom extraction and narrow-phase scanning.
 
 ### Installation debugging
 
