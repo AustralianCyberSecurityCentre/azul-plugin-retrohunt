@@ -38,6 +38,7 @@ PLUGIN_NAME = "RetroHunter"
 PLUGIN_VERSION = "2026.07.23"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
+MAX_HUNT_RETRIES = 10
 CANCELLATION_CHECK_INTERVAL_SECONDS = 0.5
 
 dp: dispatcher.DispatcherAPI = None
@@ -533,6 +534,44 @@ def main():
 
                 # Check cancellation before starting work
                 check_is_cancelled(job_id)
+
+                # Reload after acquiring the lock: another worker may have
+                # updated the hunt since this message was claimed.
+                current_json = rs.redis.get(job_id)
+                if not current_json:
+                    rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+                    continue
+                job = azm.RetrohuntEvent(**json.loads(current_json))
+                if job.entity.status in {
+                    azm.HuntState.COMPLETED,
+                    azm.HuntState.FAILED,
+                    azm.HuntState.CANCELLED,
+                }:
+                    rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+                    continue
+
+                # Submitted means the initial attempt has not started yet.
+                # Persist Starting before executing so crashes also count
+                # as attempts when the pending message is reclaimed.
+                if job.action != azm.RetrohuntEvent.RetrohuntAction.Submitted:
+                    if job.entity.retries >= MAX_HUNT_RETRIES:
+                        job.entity.status = azm.HuntState.FAILED
+                        job.entity.error = f"Reached maximum number of retries ({MAX_HUNT_RETRIES})."
+                        job.entity.processing_end = pendulum.now()
+                        job.entity.updated = job.entity.processing_end
+                        job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
+                        logger.error("Hunt %s: %s", job_id, job.entity.error)
+                        _update_progress(job, None)
+                        prom_jobs_run.labels(azm.HuntState.FAILED.name).inc()
+                        rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
+                        continue
+                    job.entity.retries += 1
+                    logger.info("Retrying hunt %s (%s/%s)", job_id, job.entity.retries, MAX_HUNT_RETRIES)
+
+                job.action = azm.RetrohuntEvent.RetrohuntAction.Starting
+                job.entity.status = azm.HuntState.STARTING
+                job.entity.updated = pendulum.now()
+                _update_progress(job, None)
 
                 with prom_worker_runtime.time():
                     hunt(bgi_folders, job, logs)
