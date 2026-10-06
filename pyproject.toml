@@ -40,7 +40,7 @@ runtime = [
     "prometheus-client>=0.24.1",
     "starlette-exporter>=0.23.0",
     "uvicorn>=0.40.0",
-    "yara-python>=4.5.4",
+    "yara-x>=1.20.0",
 ]
 
 [project.scripts]
@@ -98,8 +98,7 @@ path = "hatch_build.py"
 "azul_plugin_retrohunt/bigyara/bin/bgindex" = "azul_plugin_retrohunt/bigyara/bin/bgindex"
 "azul_plugin_retrohunt/bigyara/bin/bgdump" = "azul_plugin_retrohunt/bigyara/bin/bgdump"
 "azul_plugin_retrohunt/bigyara/bin/bgparse" = "azul_plugin_retrohunt/bigyara/bin/bgparse"
-"azul_plugin_retrohunt/bigyara/bin/yarac-small" = "azul_plugin_retrohunt/bigyara/bin/yarac-small"
-"azul_plugin_retrohunt/bigyara/bin/yarac-large" = "azul_plugin_retrohunt/bigyara/bin/yarac-large"
+"azul_plugin_retrohunt/yr" = "azul_plugin_retrohunt/yr"
 
 
 [dependency-groups]
@@ -115,6 +114,7 @@ dev = [
     "fakeredis>=2.23.0",
     "starlette-exporter>=0.23.0",
     "azul-metastore>=11.0.0",
+    "tox-uv>=1.0",
 ]
 
 [tool.ruff]

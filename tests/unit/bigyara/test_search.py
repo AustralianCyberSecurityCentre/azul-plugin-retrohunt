@@ -4,7 +4,11 @@ import sys
 import tempfile
 import unittest
 from hashlib import sha256
+from threading import local
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import yara_x
 
 from azul_plugin_retrohunt import test_utils
 from azul_plugin_retrohunt.bigyara import SEARCH_ATOM_SIZE_MIN
@@ -13,7 +17,6 @@ from azul_plugin_retrohunt.bigyara.ingest import BigYaraIngestor
 from azul_plugin_retrohunt.bigyara.search import (
     DataCallbackException,
     NoAtomException,
-    NoIndexMatchesException,
     QueryTypeEnum,
     RuleFileMatches,
     SearchPhaseEnum,
@@ -26,9 +29,11 @@ from azul_plugin_retrohunt.bigyara.search import (
     _make_bool_and,
     _make_bool_or,
     _make_bool_threshold,
+    _narrow_phase_search,
     clear_stop_event,
     search,
 )
+from azul_plugin_retrohunt.bigyara.yara_parse import NOfNode, parse_yara_rules
 from azul_plugin_retrohunt.models import FileMetadata
 
 # FUTURE: bigyara search should in theory be usable on any biggrep indices,
@@ -286,11 +291,19 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         self.assertEqual(len(narrow_empty), 1)
         self.assertEqual(narrow_empty[0][0], "Rule")
 
+    @unittest.expectedFailure
     def test_string_search(self):
-        """Plain string searches currently produce no optimized search plan."""
+        """Plain-string search should return matching paths; currently unsupported."""
         self.index_string_content()
-        with self.assertRaises(NoIndexMatchesException):
-            search("abcd", QueryTypeEnum.STRING, self.base_temp_dir)
+        expected = [
+            os.path.join(self.base_temp_dir, f"content/cache/{sha256(data).hexdigest()}")
+            for data in self.string_content
+            if b"abcd" in data
+        ]
+        self.assert_rule_matches_equal(
+            search("abcd", QueryTypeEnum.STRING, self.base_temp_dir),
+            {"abcd": expected},
+        )
 
     def test_yara_search(self):
         """Test that a yara search succeeds."""
@@ -541,6 +554,215 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
             results,
             {"ThresholdRule": expected},
         )
+
+    def assert_yara_search_results(self, source, data, expected_contents):
+        """Check explicit expected matches against both YARA-X and indexed search."""
+        to_hash_dict(data)
+        self.index_data(data)
+        expected = {
+            name: [os.path.join(self.base_temp_dir, f"content/cache/{sha256(body).hexdigest()}") for body in bodies]
+            for name, bodies in expected_contents.items()
+        }
+        # The explicit expectations avoid two equally wrong paths agreeing.
+        rules = yara_x.compile(source)
+        oracle = {}
+        scanner = yara_x.Scanner(rules)
+        for body in data:
+            for rule in scanner.scan(body).matching_rules:
+                oracle.setdefault(rule.identifier, []).append(
+                    os.path.join(self.base_temp_dir, f"content/cache/{sha256(body).hexdigest()}")
+                )
+        self.assert_rule_matches_equal(oracle, expected)
+        actual = search(source, QueryTypeEnum.YARA, self.base_temp_dir, fetch_from_dict)
+        self.assert_rule_matches_equal(actual, expected)
+
+    def test_yara_regex_matches_and_rejects_atom_only_candidate(self):
+        """Regex must match independently and reject a file containing only its atom."""
+        source = r"""
+        rule RegexOnly {
+            strings:
+                $a = /ALPHA[0-9]{2}OMEGA/
+            condition:
+                $a
+        }
+        """
+        data = [b"ALPHA12OMEGA", b"ALPHAxxOMEGA", b"ALPHA12", b"unrelated"]
+        self.assert_yara_search_results(source, data, {"RegexOnly": data[:1]})
+
+    def test_yara_nocase_matches_lower_and_mixed_case(self):
+        """Case variants must survive atom extraction and exact matching."""
+        source = """
+        rule CaseInsensitive {
+            strings:
+                $a = "RSTV" nocase
+            condition:
+                $a
+        }
+        """
+        data = [b"RSTV", b"rstv", b"RsTv", b"RStX"]
+        self.assert_yara_search_results(source, data, {"CaseInsensitive": data[:3]})
+
+    def test_yara_preserves_hash_import(self):
+        """A non-PE import must survive into narrow-phase compilation."""
+        source = """
+        import "hash"
+        rule HashImport {
+            strings:
+                $a = "hello"
+            condition:
+                $a and hash.md5(0, filesize) == "5d41402abc4b2a76b9719d911017c592"
+        }
+        """
+        data = [b"hello", b"hello extra", b"unrelated"]
+        self.assert_yara_search_results(source, data, {"HashImport": data[:1]})
+
+    def test_yara_preserves_private_rule_dependency(self):
+        """Helper rules are compiled together and private matches are not returned."""
+        source = """
+        private rule Helper {
+            strings: $a = "HELPER_TOKEN"
+            condition: $a
+        }
+        rule Detection {
+            strings: $a = "DETECTION_TOKEN"
+            condition: $a and Helper
+        }
+        """
+        data = [b"HELPER_TOKEN DETECTION_TOKEN", b"DETECTION_TOKEN", b"HELPER_TOKEN"]
+        self.assert_yara_search_results(source, data, {"Detection": data[:1]})
+
+    def test_yara_global_rule_blocks_otherwise_matching_file(self):
+        """The full-source global constraint must reject a broad-phase candidate."""
+        source = """
+        global rule Gate {
+            strings: $a = "ALLOW_TOKEN"
+            condition: $a
+        }
+        rule Detection {
+            strings: $a = "DETECTION_TOKEN"
+            condition: $a
+        }
+        """
+        data = [b"ALLOW_TOKEN DETECTION_TOKEN", b"DENY_TOKEN DETECTION_TOKEN"]
+        self.assert_yara_search_results(source, data, {"Gate": data[:1], "Detection": data[:1]})
+
+    def test_yara_anonymous_threshold_keeps_distinct_patterns(self):
+        """Anonymous strings remain three separate votes in a two-of-three plan."""
+        source = """
+        rule AnonymousThreshold {
+            strings:
+                $ = "ALPHA_ONE"
+                $ = "BRAVO_TWO"
+                $ = "CHARLIE_THREE"
+            condition: 2 of them
+        }
+        """
+        _, _, plans = parse_yara_rules(source, lambda *args: None)
+        plan = plans["AnonymousThreshold"]
+        self.assertEqual(plan.string_count, 3)
+        self.assertEqual(len(plan.string_groups), 3)
+        self.assertIsInstance(plan.condition_ast, NOfNode)
+        self.assertEqual(plan.condition_ast.required, 2)
+        self.assertEqual(len(plan.condition_ast.children), 3)
+        data = [
+            b"ALPHA_ONE BRAVO_TWO",
+            b"ALPHA_ONE CHARLIE_THREE",
+            b"BRAVO_TWO CHARLIE_THREE",
+            b"ALPHA_ONE only",
+            b"unrelated",
+        ]
+        self.assert_yara_search_results(source, data, {"AnonymousThreshold": data[:3]})
+
+    def test_yara_zero_atom_pattern_is_retained(self):
+        """A fixed-offset pattern remains in the plan while a sibling supplies atoms."""
+        source = """
+        rule FixedOffset {
+            strings:
+                $fixed = "HEADER_TOKEN"
+                $body = "BODY_TOKEN"
+            condition: $fixed at 0 and $body
+        }
+        """
+        _, _, plans = parse_yara_rules(source, lambda *args: None)
+        plan = plans["FixedOffset"]
+        self.assertEqual(plan.string_count, 2)
+        self.assertIn("$fixed", plan.string_groups)
+        self.assertEqual(plan.string_groups["$fixed"], [])
+        self.assertTrue(plan.string_groups["$body"])
+        data = [b"HEADER_TOKEN BODY_TOKEN", b"xHEADER_TOKEN BODY_TOKEN", b"BODY_TOKEN"]
+        self.assert_yara_search_results(source, data, {"FixedOffset": data[:1]})
+
+    def test_narrow_phase_no_candidates_does_not_create_executor(self):
+        """Empty narrow-phase candidates must not compile or start a thread pool."""
+        with (
+            patch("azul_plugin_retrohunt.bigyara.search.ThreadPoolExecutor") as executor,
+            patch("azul_plugin_retrohunt.bigyara.search.yara_x.compile") as compile_rules,
+        ):
+            result = _narrow_phase_search(
+                QueryTypeEnum.YARA,
+                {},
+                {},
+                {},
+                fetch_from_dict,
+                lambda *args: None,
+                query_hash="empty-candidates-test",
+            )
+        self.assertEqual(result, {})
+        executor.assert_not_called()
+        compile_rules.assert_not_called()
+
+    def test_narrow_phase_compiles_and_scans_once_per_file(self):
+        """Two candidate rules share one real scan; unrelated matches stay excluded."""
+        source = """
+        rule First { strings: $a = "ALPHA_ONE" condition: $a }
+        rule Second { strings: $a = "BRAVO_TWO" condition: $a }
+        rule Other { strings: $a = "CHARLIE_THREE" condition: $a }
+        """
+        released = []
+        real_compile = yara_x.compile
+        real_scanner = yara_x.Scanner
+        scanner_state = local()
+        scan_calls = Mock()
+        timeout_calls = Mock()
+
+        def create_scanner(rules):
+            # Native scanners must be created, used and released in their
+            # owning worker thread. The spies retain no native bound methods.
+            scanner_state.native = real_scanner(rules)
+
+            def set_timeout(seconds):
+                timeout_calls(seconds)
+                scanner_state.native.set_timeout(seconds)
+
+            def scan(data):
+                scan_calls(data)
+                return scanner_state.native.scan(data)
+
+            return SimpleNamespace(set_timeout=set_timeout, scan=scan)
+
+        with (
+            patch("azul_plugin_retrohunt.bigyara.search.yara_x.compile", wraps=real_compile) as compile_rules,
+            patch(
+                "azul_plugin_retrohunt.bigyara.search.yara_x.Scanner",
+                side_effect=create_scanner,
+            ) as scanner_factory,
+        ):
+            result = _narrow_phase_search(
+                QueryTypeEnum.YARA,
+                {"First": ["candidate"], "Second": ["candidate"]},
+                {"First": source, "Second": source, "Other": source},
+                {"candidate": {}},
+                lambda *args: b"ALPHA_ONE BRAVO_TWO CHARLIE_THREE",
+                lambda *args: None,
+                query_hash="one-scan-test",
+                data_release_callback=lambda path, matched: released.append((path, matched)),
+            )
+        self.assert_rule_matches_equal(result, {"First": ["candidate"], "Second": ["candidate"]})
+        compile_rules.assert_called_once_with(source)
+        scanner_factory.assert_called_once()
+        scan_calls.assert_called_once_with(b"ALPHA_ONE BRAVO_TWO CHARLIE_THREE")
+        timeout_calls.assert_called_once_with(60)
+        self.assertEqual(released, [("candidate", True)])
 
     def test_boolean_fallback_or_searches_every_extracted_atom(self):
         """An unusable condition plan should fall back to OR-ing every atom."""
@@ -917,6 +1139,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         self.assertIn(("stage", stage_c), combined_expression[1])
         self.assertNotIn("$c", combined_stage["labels"])
 
+    @unittest.skip("Suricata broad-phase search is not implemented")
     def test_suricata_search(self):
         """Test that a snort search succeeds."""
         # FUTURE suricata - implement
@@ -958,7 +1181,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         # self.assertDictEqual(
         #     results,
         #     {
-        #         "999999:SimpleBeacon domain: www.gamble.co": [
+        #         "999999:SimpleBeacon domain: www\.gamble.co": [
         #             os.path.join(
         #                 self.base_temp_dir,
         #                 "content/cache/7f43c5b4e1377a29fb63d6c3fc5e8bdd6574ad1bd4005c62fb910bfa4d063ad1",

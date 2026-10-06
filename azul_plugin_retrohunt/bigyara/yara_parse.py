@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import binascii
+import json
 import logging
 import os
 import re
@@ -119,7 +120,7 @@ class RuleSearchPlan:
     # total strings available
     string_count: int | None = None
 
-    # $a and $b and <complex_expression>
+    # $a and $b and \<complex_expression>
     required_strings: set[str] = field(default_factory=set)
     required_groups: list[set[bytes]] = field(default_factory=list)
     optional_strings: set[str] = field(default_factory=set)
@@ -828,6 +829,8 @@ def parse_yara_rules(
         groups: list[set[bytes]] = []
         string_groups: dict[str, list[int]] = {}
 
+        reserved_names = {string.name for string in yara_rules[rule_index].strings if string.name != "$"}
+
         for string_idx, yara_string in enumerate(yara_rules[rule_index].strings):
             string_name = yara_string.name
 
@@ -835,6 +838,9 @@ def parse_yara_rules(
             # must be treated as distinct strings.
             if string_name == "$":
                 string_name = f"$anon_{string_idx}"
+                while string_name in reserved_names:
+                    string_name += "_"
+                reserved_names.add(string_name)
 
             string_groups[string_name] = []
 
@@ -881,10 +887,10 @@ def parse_yara_rules(
 
         logger.info(f'Found {len(rule_atoms[rule_name])} atoms for "{rule_name}"')
 
-    rule_content: RuleContent = {}
+    rule_content: RuleContent = {rule_name: rule_text for rule_name in rule_atoms}
 
     condition_re = re.compile(
-        r"rule (.+?)(?:\:.+?)?{.+?condition:(.+?)}",
+        r"\brule\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^{}]+)?\{.+?\bcondition\s*:(.+?)\}",
         re.DOTALL,
     )
 
@@ -895,8 +901,6 @@ def parse_yara_rules(
         for match_rule_name in rule_atoms:
             if match_rule_name != re_rule_name:
                 continue
-
-            rule_content[match_rule_name] = match.group(0)
 
             if match_rule_name in rule_search_plans:
                 plan = rule_search_plans[match_rule_name]
@@ -1005,76 +1009,86 @@ def yara_finish_rule(rules: list[YaraRule], current_rule: YaraRule, current_stri
 
 
 def _parse_yara_with_exe(yara_exe: str, rule_file: str) -> list[YaraRule]:
-    """Run YARA-X debug atoms and parse the selected atoms."""
+    """Run YARA-X debug atoms and parse JSON output."""
     process: subprocess.CompletedProcess[bytes] = subprocess.run(  # noqa: S603  # nosec: B602
-        (yara_exe, "debug", "atoms", rule_file),
+        (yara_exe, "debug", "atoms", "--json", rule_file),
         capture_output=True,
     )
 
     if process.returncode != 0:
         raise Exception(f"Error running {yara_exe}, exit code {process.returncode}: {process.stderr.decode()}")
 
-    current_rule: YaraRule = None
-    current_string: YaraString = None
-    rules: list[YaraRule] = []
+    atom_data = json.loads(process.stdout.decode())
 
-    for raw_line in process.stdout.splitlines():
-        line = raw_line.decode().rstrip()
+    if not isinstance(atom_data, list):
+        raise Exception(f"Unexpected YARA-X JSON format: expected list, got {type(atom_data).__name__}")
 
-        if not line:
-            continue
+    rules_by_name: dict[str, YaraRule] = {}
 
-        if line.startswith("rule "):
-            if current_rule is not None:
-                current_rule, current_string = _yara_finish_string(
-                    current_rule,
-                    current_string,
+    for entry in atom_data:
+        rule_name = entry["rule"]
+        pattern_name = entry["pattern"]
+
+        #
+        # Create rule if needed.
+        #
+        rule = rules_by_name.get(rule_name)
+
+        if rule is None:
+            rule = YaraRule()
+            rule.name = rule_name
+            rule.strings = []
+            rule.content = b""
+
+            # internal lookup table
+            rule._strings_by_name = {}
+
+            rules_by_name[rule_name] = rule
+
+        #
+        # Merge named patterns only. Each anonymous entry is a distinct
+        # pattern in the YARA-X JSON, even though every identifier is "$".
+        #
+        yara_string = rule._strings_by_name.get(pattern_name) if pattern_name != "$" else None
+
+        if yara_string is None:
+            yara_string = YaraString()
+            yara_string.name = pattern_name
+            yara_string.modifiers = []
+            yara_string.re = b""
+            yara_string.atoms = []
+
+            rule.strings.append(yara_string)
+            if pattern_name != "$":
+                rule._strings_by_name[pattern_name] = yara_string
+
+        existing_atoms = set(yara_string.atoms)
+
+        for atom_hex in entry.get("atoms", []):
+            try:
+                atom = binascii.unhexlify(atom_hex)
+            except (binascii.Error, ValueError):
+                logger.warning(
+                    "Invalid atom returned from YARA-X: %s",
+                    atom_hex,
                 )
-                rules.append(current_rule)
+                continue
 
-            current_rule = YaraRule()
-            current_rule.name = line[5:]
-            current_rule.strings = []
-            current_string = None
+            if len(atom) < SEARCH_ATOM_SIZE_MIN:
+                continue
 
-        elif line.startswith("  ") and not line.startswith("    "):
-            if current_rule is None:
-                raise Exception(f"Got string before rule in YARA-X output: {line}")
+            if atom not in existing_atoms:
+                yara_string.atoms.append(atom)
+                existing_atoms.add(atom)
 
-            current_rule, current_string = _yara_finish_string(
-                current_rule,
-                current_string,
-            )
+    #
+    # Remove temporary lookup tables.
+    #
+    for rule in rules_by_name.values():
+        if hasattr(rule, "_strings_by_name"):
+            delattr(rule, "_strings_by_name")
 
-            current_string = YaraString()
-            current_string.name = line.strip()
-            current_string.atoms = []
-
-            # YARA-X debug atoms does not emit these.
-            # Keep them for compatibility with the rest of the parser for now.
-            current_string.modifiers = []
-            current_string.re = b""
-
-        elif line.startswith("    "):
-            if current_string is None:
-                raise Exception(f"Got atom before string in YARA-X output: {line}")
-
-            atom = binascii.a2b_hex(line.strip())
-
-            if len(atom) >= SEARCH_ATOM_SIZE_MIN:
-                current_string.atoms.append(atom)
-
-        else:
-            raise Exception(f"Invalid identifier in YARA-X output (line = {line})")
-
-    if current_rule is not None:
-        current_rule, current_string = _yara_finish_string(
-            current_rule,
-            current_string,
-        )
-        rules.append(current_rule)
-
-    return rules
+    return list(rules_by_name.values())
 
 
 def _transform_searches(searches, transformer):

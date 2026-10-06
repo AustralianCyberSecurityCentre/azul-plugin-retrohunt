@@ -14,7 +14,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from itertools import islice
 from threading import Event
 
-import yara
+import yara_x
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
@@ -45,7 +45,6 @@ from .yara_parse import (
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
-
 # Python's garbage collector does not return most large bytes/native YARA
 # allocations to the operating system. On glibc Linux, malloc_trim() releases
 # free heap pages after a bounded narrow-phase batch has fully drained.
@@ -2178,9 +2177,9 @@ def _process_bgparse_output(
     )
 
 
-def yara_callback(_data):
-    """Yara callback to abort a yara search once a match is found."""
-    return yara.CALLBACK_ABORT
+# def yara_callback(_data):
+#    """Yara callback to abort a yara search once a match is found."""
+#    return yara.CALLBACK_ABORT
 
 
 def _narrow_phase_search(
@@ -2198,8 +2197,8 @@ def _narrow_phase_search(
     STRING searches require no file bodies and return the broad matches directly.
     For YARA and Suricata candidates, the function converts rule-path lists to sets,
     builds an inverted file-to-rules mapping so each candidate file is fetched only
-    once, and precompiles each YARA rule once for the hunt. YARA source is given a
-    PE import when required by the surrounding Retrohunt behaviour.
+    once, and compiles the complete original YARA source once for the hunt.
+    Imports and global/private/helper rule semantics are preserved.
 
     A bounded ThreadPoolExecutor processes files end-to-end: one worker owns one
     file fetch and then evaluates every candidate rule associated with that file.
@@ -2240,13 +2239,24 @@ def _narrow_phase_search(
         for file_path in paths:
             file_to_rules[file_path].add(rule_name)
 
-    # Precompile YARA rules once per hunt.
-    compiled_yara_rules = {}
+    if not file_to_rules:
+        file_config.clear()
+        release_unused_memory()
+        return {}
+
+    # parse_yara_rules retains the complete original source for every rule.
+    # Compile it once so imports, helpers and global constraints stay intact.
+    compiled_yara_rules = None
     if queryType == QueryTypeEnum.YARA:
-        for rule_name, content in rule_content.items():
-            if not content.startswith('import "pe"\n'):
-                content = 'import "pe"\n' + content
-            compiled_yara_rules[rule_name] = yara.compile(source=content)
+        sources = set(rule_content.values())
+        if len(sources) != 1:
+            raise ValueError("YARA narrow phase requires the complete original ruleset source.")
+        compiled_yara_rules = yara_x.compile(sources.pop())
+
+    # Scanners are isolated per worker and per hunt.
+    from threading import local
+
+    scanner_state = local()
 
     # Bind metric children once instead of performing label lookups per file.
     missing_files_metric = prom_missing_files.labels(query_hash=query_hash)
@@ -2263,9 +2273,9 @@ def _narrow_phase_search(
     total_files = len(file_to_rules)
     settings = RetrohuntSettings().search_settings
 
-    configured_threads = settings.max_thread_count
+    configured_threads = max(1, settings.max_thread_count)
     active_workers = min(configured_threads, total_files)
-    cleanup_batch_size = active_workers * settings.default_narrow_phase_cleanup_multiplier
+    cleanup_batch_size = active_workers * max(1, settings.default_narrow_phase_cleanup_multiplier)
 
     # Worker function. A worker holds at most one complete file body. data is
     # deleted in finally so YARA timeouts/errors cannot pin a large bytes object
@@ -2278,10 +2288,8 @@ def _narrow_phase_search(
         data callback, records I/O duration and byte count, and treats an empty result
         as a missing file.
 
-        For each rule associated with the file, YARA matching is timed and configured
-        to abort its callback path on the first confirmed match. Cancellation is
-        checked before the fetch, after the blocking fetch returns, and between rule
-        evaluations.  Suricata follows the same per-file dispatch structure when that
+        YARA scans the full ruleset once and retains matches for candidate rules.
+        Cancellation is checked before the fetch, after fetching and after scanning.  Suricata follows the same per-file dispatch structure when that
         implementation is available.
 
         The complete file body is intentionally scoped to this worker invocation and
@@ -2313,25 +2321,30 @@ def _narrow_phase_search(
                 return ("missing", file_path, rules_for_file, None, io_duration, data_len)
 
             results = []
-            for rule_name in rules_for_file:
-                if stop_event.is_set():
-                    raise CancelException("Narrow phase cancelled by user.")
+            if queryType == QueryTypeEnum.YARA:
+                scanner = getattr(scanner_state, "scanner", None)
+                if scanner is None:
+                    scanner = yara_x.Scanner(compiled_yara_rules)
+                    scanner.set_timeout(60)
+                    scanner_state.scanner = scanner
 
-                if queryType == QueryTypeEnum.YARA:
-                    with cpu_duration_metrics[rule_name].time():
-                        matched = bool(
-                            compiled_yara_rules[rule_name].match(
-                                data=data,
-                                callback=yara_callback,
-                                which_callbacks=yara.CALLBACK_MATCHES,
-                                fast=True,
-                                timeout=60,
-                            )
-                        )
-                elif queryType == QueryTypeEnum.SURICATA:
+                scan_start = time.perf_counter()
+                matched_rules = {rule.identifier for rule in scanner.scan(data).matching_rules}
+                scan_duration = time.perf_counter() - scan_start
+                # Allocate the shared scan cost across candidate rules so the
+                # aggregate CPU metric does not count the same scan repeatedly.
+                for rule_name in rules_for_file:
+                    cpu_duration_metrics[rule_name].observe(scan_duration / len(rules_for_file))
+                    results.append((rule_name, rule_name in matched_rules))
+            elif queryType == QueryTypeEnum.SURICATA:
+                for rule_name in rules_for_file:
+                    if stop_event.is_set():
+                        raise CancelException("Narrow phase cancelled by user.")
                     matched = _run_suricata(rule_content[rule_name], file_path, data)
+                    results.append((rule_name, matched))
 
-                results.append((rule_name, matched))
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled by user.")
 
             return ("ok", file_path, rules_for_file, results, io_duration, data_len)
         finally:
@@ -2517,7 +2530,7 @@ def _narrow_phase_search(
 
     # Drop native YARA objects and all candidate/config containers before the
     # final trim. Only the confirmed result lists survive this point.
-    compiled_yara_rules.clear()
+    compiled_yara_rules = None
     cpu_duration_metrics.clear()
     file_config.clear()
     file_to_rules.clear()
