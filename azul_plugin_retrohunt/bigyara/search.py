@@ -6,6 +6,7 @@ import gc
 import hashlib
 import logging
 import os
+import re
 import subprocess  # noqa: S404  # nosec: B404
 import tempfile
 import time
@@ -341,6 +342,24 @@ def _atom_parse(
             progress_callback(SearchPhaseEnum.ATOM_PARSE, 1, 1, (query, rule_atoms[query]))
     elif query_type == QueryTypeEnum.YARA:
         rule_atoms, rule_content, rule_search_plans = parse_yara_rules(query, progress_callback)
+        # Private rules remain in the complete source compiled by narrow phase,
+        # but cannot produce reported matches and need no independent searches.
+        # Consume comments, quoted strings and regex literals before looking for
+        # declarations so rule-like text inside them cannot hide a public rule.
+        declarations = re.compile(
+            r'"(?:\\.|[^"\\])*"'
+            r"|//[^\n]*|/\*[\s\S]*?\*/"
+            r"|/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\[])+/[is]*"
+            r"|\b(?P<modifiers>(?:(?:private|global)\s+)*)"
+            r"rule\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b"
+        )
+        for declaration in declarations.finditer(query):
+            modifiers = declaration.group("modifiers")
+            if modifiers is not None and "private" in modifiers.split():
+                rule_name = declaration.group("name")
+                rule_atoms.pop(rule_name, None)
+                rule_search_plans.pop(rule_name, None)
+
     elif query_type == QueryTypeEnum.SURICATA:
         rule_atoms, rule_content = parse_suricata_rules(query, progress_callback)
     else:
