@@ -464,7 +464,6 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                     self.assertEqual(entity.tool_match_count, 2)
 
 
-
 class TestWorkerRetries(TestCase):
     """Exercise the real worker loop and Redis writes without executing hunts."""
 
@@ -502,8 +501,11 @@ class TestWorkerRetries(TestCase):
             raise FatalException("simulated interrupted worker")
 
         with (
-            patch("azul_plugin_retrohunt.retrohunt.RetrohuntService.redis", new_callable=PropertyMock,
-                  return_value=self.fake_redis),
+            patch(
+                "azul_plugin_retrohunt.retrohunt.RetrohuntService.redis",
+                new_callable=PropertyMock,
+                return_value=self.fake_redis,
+            ),
             mock.patch.object(r_worker, "RetrohuntSettings", return_value=settings),
             mock.patch.object(r_worker, "start_http_server"),
             mock.patch.object(r_worker.dispatcher, "DispatcherAPI"),
@@ -511,10 +513,14 @@ class TestWorkerRetries(TestCase):
             mock.patch.object(r_worker, "start_heartbeat", return_value=heartbeat),
             mock.patch.object(r_worker, "release_unused_memory"),
             mock.patch.object(r_worker, "sleep", side_effect=AssertionError("Unexpected worker error or sleep")),
-            mock.patch.object(self.fake_redis, "xautoclaim", side_effect=[
-                (b"0-0", [(self.msg_id, {b"hunt_id": self.job_id.encode()})], []),
-                FatalException("stop after processing queue entry"),
-            ]),
+            mock.patch.object(
+                self.fake_redis,
+                "xautoclaim",
+                side_effect=[
+                    (b"0-0", [(self.msg_id, {b"hunt_id": self.job_id.encode()})], []),
+                    FatalException("stop after processing queue entry"),
+                ],
+            ),
             mock.patch.object(self.fake_redis, "xack", wraps=self.fake_redis.xack) as ack,
             mock.patch.object(r_worker, "hunt", side_effect=interrupted_hunt) as hunt,
         ):
@@ -556,7 +562,6 @@ class TestWorkerRetries(TestCase):
         self.assertEqual(stored.entity.error, "Reached maximum number of retries (10).")
         self.assertIsNotNone(stored.entity.processing_end)
         self.assertEqual(self.fake_redis.xpending("retrohunt-jobs", "retrohunt-workers")["pending"], 0)
-
 
 
 EXPECTED_REQUESTS = [
