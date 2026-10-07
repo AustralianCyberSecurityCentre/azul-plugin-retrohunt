@@ -67,6 +67,7 @@ SUBMISSION = azm.RetrohuntEvent(
         search_type="Yara",
         search='rule r {strings: $a = "powershell-preview" condition: $a}',
         status=azm.HuntState.SUBMITTED,
+        retries=0,
     ),
     timestamp=str_to_datetime("2020-08-20T04:02:30.062458"),
 )
@@ -479,7 +480,9 @@ class TestWorkerRetries(TestCase):
         self.fake_redis.xreadgroup("retrohunt-workers", "previous-worker", {"retrohunt-jobs": ">"})
 
     def _stored_job(self):
-        return azm.RetrohuntEvent.model_validate_json(self.fake_redis.get(self.job_id))
+        job = azm.RetrohuntEvent.model_validate_json(self.fake_redis.get(self.job_id))
+
+        return job
 
     def _run_worker(self, expected_retries=None):
         """Reclaim one pending entry; stop without running search or waiting."""
