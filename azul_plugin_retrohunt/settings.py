@@ -27,6 +27,7 @@ class RetrohuntSettings(BaseSettings):
         max_required_broad_phase_workers: int = Field(2, alias="MAX_BROAD_PHASE_WORKERS")
         max_broad_phase_tasks: int = Field(10000, alias="MAX_BROAD_PHASE_TASKS")
         default_narrow_phase_cleanup_multiplier: int = Field(4, alias="DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER")
+        max_retries: int = Field(10, alias="MAX_RETRIES")
 
     class Indexer(BaseModel):
         """Nested configuration for indexers."""
