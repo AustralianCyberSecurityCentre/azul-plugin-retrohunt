@@ -623,22 +623,11 @@ def _stage_label_text(stage: dict) -> str:
 
 
 def _build_or_all_atoms_fallback_plan(plan):
-    """Build the conservative compatibility fallback that OR-searches every usable atom.
+    """OR-search atoms only after proving a match requires a searchable pattern.
 
-    This path is used when YARA parsing extracted valid atoms but the recursive
-    condition planner cannot derive a restrictive atom-only Boolean expression.
-    Every unique atom from every usable string group becomes its own one-search
-    stage, and all of those stages are joined by OR.
-
-    The fallback deliberately ignores the original Boolean relationship between
-    those atoms. That can produce many extra broad-phase candidates, but any file
-    containing a usable extracted atom remains eligible for narrow-phase YARA,
-    which evaluates the original rule exactly. The fallback is therefore a
-    compatibility mechanism intended to avoid rejecting otherwise valid rules when
-    their condition syntax is not representable by the broad planner.
-
-    If no usable atoms exist at all, None is returned and the caller must fail
-    rather than pretending that a meaningful broad search can be performed.
+    This broader plan may be used if resource budgets remove the original
+    restrictive expression. It must not be used for an unrepresentable condition
+    that could match without any usable atoms. No usable atoms returns None.
     """
     stage_registry = {}
 
@@ -1516,9 +1505,9 @@ def _build_rule_boolean_plan(
     """Build one rule's executable, resource-bounded broad-phase Boolean plan.
 
     The function converts the parsed condition AST into a safe searchable
-    expression and a registry of physical string stages. If no restrictive
-    expression can be represented but usable atoms exist, it falls back to the
-    OR-all-atoms compatibility plan.
+    expression and a registry of physical string stages. Reject conditions for
+    which a required positive searchable pattern cannot be established, rather
+    than silently excluding files with no extracted atoms.
 
     For a representable expression it first applies
     ``max_required_strings_per_and_search`` to direct string-only AND clauses. It
@@ -1528,8 +1517,9 @@ def _build_rule_boolean_plan(
     This order is deliberate: the logical direct-string limit is decided before
     physical batching, and the budget sees the true physical cost after batching.
 
-    FALSE conditions return an empty executable plan. A selected TRUE expression
-    falls back to OR-all-atoms rather than pretending to be restrictive. Selected
+    FALSE conditions return an empty executable plan. A budget-selected TRUE
+    expression can use OR-all-atoms only after the original expression was
+    proven restrictive. Selected
     stages are finally sorted deterministically using selectivity and cost hints for
     predictable execution and logging.
 
@@ -1546,11 +1536,18 @@ def _build_rule_boolean_plan(
     )
     mode = "boolean_expression"
 
-    # If YARA atom extraction succeeded but our condition planner could not
-    # derive any restrictive expression, fall back to OR-searching every
-    # usable extracted atom. Narrow-phase YARA still decides exact matches.
+    # Atom extraction alone does not establish that a match needs an atom.
+    # Reject rather than silently missing files that never reach narrow phase.
     if expression == _BOOL_TRUE:
-        return _build_or_all_atoms_fallback_plan(plan)
+        raise NoAtomException(
+            f'Rule "{rule_name}" cannot be searched safely: Retrohunt could not '
+            "establish that every match requires a positive searchable pattern. "
+            "The condition may match files containing none of its searchable patterns "
+            "(for example, 'not $a or $b'), or uses a condition Retrohunt cannot analyse. "
+            "An atom-only search could miss matching files, so this hunt has been rejected. "
+            "Require a positive pattern with usable atoms in every matching branch "
+            "(for example, '$gate and (not $a or $b)'), or use a full-file YARA-X scan."
+        )
 
     expression, and_limit_events = _limit_boolean_and_children(
         expression,
@@ -1568,7 +1565,13 @@ def _build_rule_boolean_plan(
     )
 
     if expression == _BOOL_TRUE:
-        return None
+        raise NoAtomException(
+            f'Rule "{rule_name}" cannot be searched safely: no required positive '
+            "searchable pattern remains in its broad-phase plan. "
+            "This hunt has been rejected to avoid missing matching files. "
+            "Require a positive pattern with usable atoms in every matching branch "
+            "or use a full-file YARA-X scan."
+        )
 
     if expression == _BOOL_FALSE:
         return {
@@ -1787,9 +1790,9 @@ def _broad_phase_search(
 
         if rule_plan["mode"] == "fallback_or_all_atoms":
             logger.warning(
-                'Rule "%s": the YARA rule produced valid atoms, but its '
-                "condition could not be represented safely by the broad-phase "
-                "planner. Falling back to OR-searching all %d unique extracted "
+                'Rule "%s": a required positive searchable pattern was established, '
+                "but the broad-phase search budget removed the restrictive plan. "
+                "Falling back to OR-searching all %d unique extracted "
                 "atoms; narrow-phase YARA will evaluate the original condition.",
                 rule_name,
                 len(rule_plan["stages"]),
