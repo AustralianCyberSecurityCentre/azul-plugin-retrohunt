@@ -764,8 +764,8 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
         timeout_calls.assert_called_once_with(60)
         self.assertEqual(released, [("candidate", True)])
 
-    def test_boolean_fallback_or_searches_every_extracted_atom(self):
-        """An unusable condition plan should fall back to OR-ing every atom."""
+    def test_boolean_unsearchable_condition_is_rejected(self):
+        """A condition with no proven positive searchable path must be rejected."""
         plan = SimpleNamespace(
             condition_ast=None,
             string_groups={
@@ -778,27 +778,65 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
             ],
         )
 
-        rule_plan = _build_rule_boolean_plan(
-            "FallbackRule",
-            plan,
-            max_required_strings=40,
-            preferred_searches_per_index=64,
-            hard_searches_per_index=1000,
-        )
+        with self.assertRaisesRegex(
+            NoAtomException,
+            "every match requires a positive searchable pattern",
+        ):
+            _build_rule_boolean_plan(
+                "UnsafeRule",
+                plan,
+                max_required_strings=40,
+                preferred_searches_per_index=64,
+                hard_searches_per_index=1000,
+            )
+
+    def test_boolean_fallback_or_searches_every_extracted_atom(self):
+        """A proven restrictive rule may OR all atoms if budgeting removes its plan."""
+        source = """
+        rule FallbackRule
+        {
+            strings:
+                $a = "alpha_atom"
+                $b = "bravo_atom"
+            condition:
+                $a and $b
+        }
+        """
+
+        _, _, plans = parse_yara_rules(source, lambda *args: None)
+        plan = plans["FallbackRule"]
+
+        # Simulate budget pruning removing an otherwise safe restrictive plan.
+        with patch(
+            "azul_plugin_retrohunt.bigyara.search._choose_boolean_stages",
+            return_value=(("true",), set(), 0, True),
+        ):
+            rule_plan = _build_rule_boolean_plan(
+                "FallbackRule",
+                plan,
+                max_required_strings=40,
+                preferred_searches_per_index=64,
+                hard_searches_per_index=1000,
+            )
 
         self.assertIsNotNone(rule_plan)
         self.assertEqual(rule_plan["mode"], "fallback_or_all_atoms")
-        self.assertEqual(rule_plan["searches_per_index"], 3)
         self.assertEqual(rule_plan["expression"][0], "or")
 
+        expected_atoms = {
+            atom
+            for group_ids in plan.string_groups.values()
+            for group_idx in group_ids
+            if 0 <= group_idx < len(plan.groups)
+            for atom in plan.groups[group_idx]
+        }
+
         searched_atoms = {stage["alternatives"][0][0] for stage in rule_plan["stages"]}
-        self.assertSetEqual(
-            searched_atoms,
-            {
-                b"alpha_atom",
-                b"second_atom",
-                b"bravo_atom",
-            },
+
+        self.assertSetEqual(searched_atoms, expected_atoms)
+        self.assertEqual(
+            rule_plan["searches_per_index"],
+            len(expected_atoms),
         )
 
     def test_threshold_preserves_duplicate_shared_stage_votes(self):
