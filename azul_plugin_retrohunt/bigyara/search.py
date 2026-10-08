@@ -1591,7 +1591,7 @@ def _build_rule_boolean_plan(
             "(for example, 'not $a or $b'), or uses a condition Retrohunt cannot analyse. "
             "An atom-only search could miss matching files, so this hunt has been rejected. "
             "Require a positive pattern with usable atoms in every matching branch "
-            "(for example, '$gate and (not $a or $b)'), or use a full-file YARA-X scan." + extra
+            "(for example, '$gate and (not $a or $b)')." + extra
         )
 
     if expression == _BOOL_FALSE:
