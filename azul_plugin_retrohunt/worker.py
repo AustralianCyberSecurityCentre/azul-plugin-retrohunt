@@ -39,6 +39,8 @@ PLUGIN_VERSION = "2026.07.23"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
 CANCELLATION_CHECK_INTERVAL_SECONDS = 0.5
+settings = RetrohuntSettings()
+MAX_HUNT_RETRIES = settings.search_settings.max_retries
 
 dp: dispatcher.DispatcherAPI = None
 
@@ -407,7 +409,6 @@ def main():
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
     LOCK_TTL = settings.redis.ttl
-    MAX_HUNT_RETRIES = settings.search_settings.max_retries
     exception_sleep = settings.redis.exception_wait
     start_http_server(settings.prometheus_port_worker)
 
