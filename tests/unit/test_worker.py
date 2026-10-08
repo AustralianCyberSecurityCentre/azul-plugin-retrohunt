@@ -489,6 +489,7 @@ class TestWorkerRetries(TestCase):
         settings = mock.Mock()
         settings.redis.ttl = 30
         settings.redis.exception_wait = 0
+        settings.search_settings.max_retries = 10
         settings.indexers = {}
         heartbeat = mock.Mock()
 
@@ -509,6 +510,7 @@ class TestWorkerRetries(TestCase):
                 new_callable=PropertyMock,
                 return_value=self.fake_redis,
             ),
+            mock.patch.object(r_worker, "MAX_HUNT_RETRIES", None),
             mock.patch.object(r_worker, "RetrohuntSettings", return_value=settings),
             mock.patch.object(r_worker, "start_http_server"),
             mock.patch.object(r_worker.dispatcher, "DispatcherAPI"),
@@ -529,6 +531,7 @@ class TestWorkerRetries(TestCase):
         ):
             with self.assertRaises(FatalException):
                 r_worker.main()
+            self.assertEqual(r_worker.MAX_HUNT_RETRIES, 10)
 
         heartbeat.join.assert_called_once_with(timeout=1.0)
         self.assertIsNone(self.fake_redis.get(f"retrohunt:{self.job_id}:lock"))
@@ -546,7 +549,6 @@ class TestWorkerRetries(TestCase):
 
     def test_retries_survive_repeated_worker_restarts_and_stop_at_ten(self):
         """Initial attempt plus ten interrupted retries exhaust the same hunt."""
-        self.assertEqual(r_worker.MAX_HUNT_RETRIES, 10)
         for count in range(11):
             with self.subTest(retries=count):
                 hunt, ack = self._run_worker(expected_retries=count)
