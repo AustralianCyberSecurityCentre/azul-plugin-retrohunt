@@ -1029,9 +1029,7 @@ def _parse_yara_with_exe(yara_exe: str, rule_file: str) -> list[YaraRule]:
         rule_name = entry["rule"]
         pattern_name = entry["pattern"]
 
-        #
-        # Create rule if needed.
-        #
+        # Create rule if needed
         rule = rules_by_name.get(rule_name)
 
         if rule is None:
@@ -1045,10 +1043,8 @@ def _parse_yara_with_exe(yara_exe: str, rule_file: str) -> list[YaraRule]:
 
             rules_by_name[rule_name] = rule
 
-        #
         # Merge named patterns only. Each anonymous entry is a distinct
         # pattern in the YARA-X JSON, even though every identifier is "$".
-        #
         yara_string = rule._strings_by_name.get(pattern_name) if pattern_name != "$" else None
 
         if yara_string is None:
@@ -1081,9 +1077,7 @@ def _parse_yara_with_exe(yara_exe: str, rule_file: str) -> list[YaraRule]:
                 yara_string.atoms.append(atom)
                 existing_atoms.add(atom)
 
-    #
     # Remove temporary lookup tables.
-    #
     for rule in rules_by_name.values():
         if hasattr(rule, "_strings_by_name"):
             delattr(rule, "_strings_by_name")

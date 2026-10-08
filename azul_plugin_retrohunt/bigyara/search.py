@@ -1495,6 +1495,17 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
     raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
 
 
+def _describe_non_searchable_strings(plan) -> list[str]:
+    """Return YARA strings that do not have any usable atom groups."""
+    descriptions = []
+
+    for string_name, group_ids in sorted(plan.string_groups.items()):
+        if not _valid_group_ids(plan, group_ids):
+            descriptions.append(string_name)
+
+    return descriptions
+
+
 def _build_rule_boolean_plan(
     rule_name: str,
     plan,
@@ -1546,7 +1557,7 @@ def _build_rule_boolean_plan(
             "(for example, 'not $a or $b'), or uses a condition Retrohunt cannot analyse. "
             "An atom-only search could miss matching files, so this hunt has been rejected. "
             "Require a positive pattern with usable atoms in every matching branch "
-            "(for example, '$gate and (not $a or $b)'), or use a full-file YARA-X scan."
+            "(for example, '$gate and (not $a or $b)')."
         )
 
     expression, and_limit_events = _limit_boolean_and_children(
@@ -1565,12 +1576,22 @@ def _build_rule_boolean_plan(
     )
 
     if expression == _BOOL_TRUE:
+        non_searchable_strings = _describe_non_searchable_strings(plan)
+
+        extra = ""
+        if non_searchable_strings:
+            extra = f"\n\nStrings without searchable atoms (minimum atom size {SEARCH_ATOM_SIZE_MIN}): " + ", ".join(
+                non_searchable_strings
+            )
+
         raise NoAtomException(
-            f'Rule "{rule_name}" cannot be searched safely: no required positive '
-            "searchable pattern remains in its broad-phase plan. "
-            "This hunt has been rejected to avoid missing matching files. "
+            f'Rule "{rule_name}" cannot be searched safely: Retrohunt could not '
+            "establish that every match requires a positive searchable pattern. "
+            "The condition may match files containing none of its searchable patterns "
+            "(for example, 'not $a or $b'), or uses a condition Retrohunt cannot analyse. "
+            "An atom-only search could miss matching files, so this hunt has been rejected. "
             "Require a positive pattern with usable atoms in every matching branch "
-            "or use a full-file YARA-X scan."
+            "(for example, '$gate and (not $a or $b)'), or use a full-file YARA-X scan." + extra
         )
 
     if expression == _BOOL_FALSE:
@@ -2197,11 +2218,6 @@ def _process_bgparse_output(
         index_path=index_path,
         store_config=store_config,
     )
-
-
-# def yara_callback(_data):
-#    """Yara callback to abort a yara search once a match is found."""
-#    return yara.CALLBACK_ABORT
 
 
 def _narrow_phase_search(
