@@ -18,7 +18,7 @@ class RetrohuntSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="plugin_", extra="ignore")
 
-    class SearhSettings(BaseSettings):
+    class SearchSettings(BaseSettings):
         """Settings for the BigGrep and Narrow phase search."""
 
         max_thread_count: int = Field(5, alias="MAX_THREAD_COUNT")
