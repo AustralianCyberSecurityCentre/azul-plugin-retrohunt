@@ -1512,9 +1512,8 @@ def _build_no_atom_exception(rule_name: str, plan) -> NoAtomException:
 
     if non_searchable_strings:
         message += (
-            "\n\nThe following strings do not produce searchable atoms "
-            f"(minimum atom size: {SEARCH_ATOM_SIZE_MIN} bytes):\n"
-            + "\n".join(f"  - {s}" for s in non_searchable_strings)
+            "The following strings do not produce searchable atoms "
+            f"(minimum atom size: {SEARCH_ATOM_SIZE_MIN} bytes):".join(f"  - {s}" for s in non_searchable_strings)
         )
 
     message += (
