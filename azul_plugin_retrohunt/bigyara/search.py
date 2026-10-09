@@ -6,6 +6,7 @@ import gc
 import hashlib
 import logging
 import os
+import re
 import subprocess  # noqa: S404  # nosec: B404
 import tempfile
 import time
@@ -14,7 +15,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from itertools import islice
 from threading import Event
 
-import yara
+import yara_x
 from prometheus_client import Counter, Histogram
 
 from azul_plugin_retrohunt.retrohunt import CancelException
@@ -45,7 +46,6 @@ from .yara_parse import (
 
 stop_event = Event()
 logger = logging.getLogger("bigyara.search")
-
 # Python's garbage collector does not return most large bytes/native YARA
 # allocations to the operating system. On glibc Linux, malloc_trim() releases
 # free heap pages after a bounded narrow-phase batch has fully drained.
@@ -342,6 +342,24 @@ def _atom_parse(
             progress_callback(SearchPhaseEnum.ATOM_PARSE, 1, 1, (query, rule_atoms[query]))
     elif query_type == QueryTypeEnum.YARA:
         rule_atoms, rule_content, rule_search_plans = parse_yara_rules(query, progress_callback)
+        # Private rules remain in the complete source compiled by narrow phase,
+        # but cannot produce reported matches and need no independent searches.
+        # Consume comments, quoted strings and regex literals before looking for
+        # declarations so rule-like text inside them cannot hide a public rule.
+        declarations = re.compile(
+            r'"(?:\\.|[^"\\])*"'
+            r"|//[^\n]*|/\*[\s\S]*?\*/"
+            r"|/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\[])+/[is]*"
+            r"|\b(?P<modifiers>(?:(?:private|global)\s+)*)"
+            r"rule\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b"
+        )
+        for declaration in declarations.finditer(query):
+            modifiers = declaration.group("modifiers")
+            if modifiers is not None and "private" in modifiers.split():
+                rule_name = declaration.group("name")
+                rule_atoms.pop(rule_name, None)
+                rule_search_plans.pop(rule_name, None)
+
     elif query_type == QueryTypeEnum.SURICATA:
         rule_atoms, rule_content = parse_suricata_rules(query, progress_callback)
     else:
@@ -605,22 +623,11 @@ def _stage_label_text(stage: dict) -> str:
 
 
 def _build_or_all_atoms_fallback_plan(plan):
-    """Build the conservative compatibility fallback that OR-searches every usable atom.
+    """OR-search atoms only after proving a match requires a searchable pattern.
 
-    This path is used when YARA parsing extracted valid atoms but the recursive
-    condition planner cannot derive a restrictive atom-only Boolean expression.
-    Every unique atom from every usable string group becomes its own one-search
-    stage, and all of those stages are joined by OR.
-
-    The fallback deliberately ignores the original Boolean relationship between
-    those atoms. That can produce many extra broad-phase candidates, but any file
-    containing a usable extracted atom remains eligible for narrow-phase YARA,
-    which evaluates the original rule exactly. The fallback is therefore a
-    compatibility mechanism intended to avoid rejecting otherwise valid rules when
-    their condition syntax is not representable by the broad planner.
-
-    If no usable atoms exist at all, None is returned and the caller must fail
-    rather than pretending that a meaningful broad search can be performed.
+    This broader plan may be used if resource budgets remove the original
+    restrictive expression. It must not be used for an unrepresentable condition
+    that could match without any usable atoms. No usable atoms returns None.
     """
     stage_registry = {}
 
@@ -1488,6 +1495,36 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
     raise ValueError(f"Unknown boolean broad-phase operator: {operator}")
 
 
+def _describe_non_searchable_strings(plan) -> list[str]:
+    """Return YARA strings that do not have any usable atom groups."""
+    return sorted(
+        string_name for string_name, group_ids in plan.string_groups.items() if not _valid_group_ids(plan, group_ids)
+    )
+
+
+def _build_no_atom_exception(rule_name: str, plan) -> NoAtomException:
+    """Build exception message."""
+    non_searchable_strings = _describe_non_searchable_strings(plan)
+
+    message = (
+        f'Rule "{rule_name}" cannot be searched safely. Retrohunt could not establish a safe broad-phase search plan.'
+    )
+
+    if non_searchable_strings:
+        message += (
+            " Non-searchable strings "
+            f"(minimum atom size: {SEARCH_ATOM_SIZE_MIN} bytes): " + ", ".join(non_searchable_strings) + ". "
+        )
+
+    message += (
+        "A matching branch of the rule may be satisfied without "
+        "requiring a searchable atom. This hunt was rejected to avoid "
+        "missing valid matches."
+    )
+
+    return NoAtomException(message)
+
+
 def _build_rule_boolean_plan(
     rule_name: str,
     plan,
@@ -1498,9 +1535,9 @@ def _build_rule_boolean_plan(
     """Build one rule's executable, resource-bounded broad-phase Boolean plan.
 
     The function converts the parsed condition AST into a safe searchable
-    expression and a registry of physical string stages. If no restrictive
-    expression can be represented but usable atoms exist, it falls back to the
-    OR-all-atoms compatibility plan.
+    expression and a registry of physical string stages. Reject conditions for
+    which a required positive searchable pattern cannot be established, rather
+    than silently excluding files with no extracted atoms.
 
     For a representable expression it first applies
     ``max_required_strings_per_and_search`` to direct string-only AND clauses. It
@@ -1510,8 +1547,9 @@ def _build_rule_boolean_plan(
     This order is deliberate: the logical direct-string limit is decided before
     physical batching, and the budget sees the true physical cost after batching.
 
-    FALSE conditions return an empty executable plan. A selected TRUE expression
-    falls back to OR-all-atoms rather than pretending to be restrictive. Selected
+    FALSE conditions return an empty executable plan. A budget-selected TRUE
+    expression can use OR-all-atoms only after the original expression was
+    proven restrictive. Selected
     stages are finally sorted deterministically using selectivity and cost hints for
     predictable execution and logging.
 
@@ -1528,11 +1566,13 @@ def _build_rule_boolean_plan(
     )
     mode = "boolean_expression"
 
-    # If YARA atom extraction succeeded but our condition planner could not
-    # derive any restrictive expression, fall back to OR-searching every
-    # usable extracted atom. Narrow-phase YARA still decides exact matches.
+    # Atom extraction alone does not establish that a match needs an atom.
+    # Reject rather than silently missing files that never reach narrow phase.
     if expression == _BOOL_TRUE:
-        return _build_or_all_atoms_fallback_plan(plan)
+        raise _build_no_atom_exception(
+            rule_name,
+            plan,
+        )
 
     expression, and_limit_events = _limit_boolean_and_children(
         expression,
@@ -1550,7 +1590,10 @@ def _build_rule_boolean_plan(
     )
 
     if expression == _BOOL_TRUE:
-        return None
+        raise _build_no_atom_exception(
+            rule_name,
+            plan,
+        )
 
     if expression == _BOOL_FALSE:
         return {
@@ -1769,9 +1812,9 @@ def _broad_phase_search(
 
         if rule_plan["mode"] == "fallback_or_all_atoms":
             logger.warning(
-                'Rule "%s": the YARA rule produced valid atoms, but its '
-                "condition could not be represented safely by the broad-phase "
-                "planner. Falling back to OR-searching all %d unique extracted "
+                'Rule "%s": a required positive searchable pattern was established, '
+                "but the broad-phase search budget removed the restrictive plan. "
+                "Falling back to OR-searching all %d unique extracted "
                 "atoms; narrow-phase YARA will evaluate the original condition.",
                 rule_name,
                 len(rule_plan["stages"]),
@@ -2178,11 +2221,6 @@ def _process_bgparse_output(
     )
 
 
-def yara_callback(_data):
-    """Yara callback to abort a yara search once a match is found."""
-    return yara.CALLBACK_ABORT
-
-
 def _narrow_phase_search(
     queryType: QueryTypeEnum,
     rule_matches: RuleFileMatches,
@@ -2198,8 +2236,8 @@ def _narrow_phase_search(
     STRING searches require no file bodies and return the broad matches directly.
     For YARA and Suricata candidates, the function converts rule-path lists to sets,
     builds an inverted file-to-rules mapping so each candidate file is fetched only
-    once, and precompiles each YARA rule once for the hunt. YARA source is given a
-    PE import when required by the surrounding Retrohunt behaviour.
+    once, and compiles the complete original YARA source once for the hunt.
+    Imports and global/private/helper rule semantics are preserved.
 
     A bounded ThreadPoolExecutor processes files end-to-end: one worker owns one
     file fetch and then evaluates every candidate rule associated with that file.
@@ -2240,13 +2278,24 @@ def _narrow_phase_search(
         for file_path in paths:
             file_to_rules[file_path].add(rule_name)
 
-    # Precompile YARA rules once per hunt.
-    compiled_yara_rules = {}
+    if not file_to_rules:
+        file_config.clear()
+        release_unused_memory()
+        return {}
+
+    # parse_yara_rules retains the complete original source for every rule.
+    # Compile it once so imports, helpers and global constraints stay intact.
+    compiled_yara_rules = None
     if queryType == QueryTypeEnum.YARA:
-        for rule_name, content in rule_content.items():
-            if not content.startswith('import "pe"\n'):
-                content = 'import "pe"\n' + content
-            compiled_yara_rules[rule_name] = yara.compile(source=content)
+        sources = set(rule_content.values())
+        if len(sources) != 1:
+            raise ValueError("YARA narrow phase requires the complete original ruleset source.")
+        compiled_yara_rules = yara_x.compile(sources.pop())
+
+    # Scanners are isolated per worker and per hunt.
+    from threading import local
+
+    scanner_state = local()
 
     # Bind metric children once instead of performing label lookups per file.
     missing_files_metric = prom_missing_files.labels(query_hash=query_hash)
@@ -2263,9 +2312,9 @@ def _narrow_phase_search(
     total_files = len(file_to_rules)
     settings = RetrohuntSettings().search_settings
 
-    configured_threads = settings.max_thread_count
+    configured_threads = max(1, settings.max_thread_count)
     active_workers = min(configured_threads, total_files)
-    cleanup_batch_size = active_workers * settings.default_narrow_phase_cleanup_multiplier
+    cleanup_batch_size = active_workers * max(1, settings.default_narrow_phase_cleanup_multiplier)
 
     # Worker function. A worker holds at most one complete file body. data is
     # deleted in finally so YARA timeouts/errors cannot pin a large bytes object
@@ -2278,10 +2327,8 @@ def _narrow_phase_search(
         data callback, records I/O duration and byte count, and treats an empty result
         as a missing file.
 
-        For each rule associated with the file, YARA matching is timed and configured
-        to abort its callback path on the first confirmed match. Cancellation is
-        checked before the fetch, after the blocking fetch returns, and between rule
-        evaluations.  Suricata follows the same per-file dispatch structure when that
+        YARA scans the full ruleset once and retains matches for candidate rules.
+        Cancellation is checked before the fetch, after fetching and after scanning.  Suricata follows the same per-file dispatch structure when that
         implementation is available.
 
         The complete file body is intentionally scoped to this worker invocation and
@@ -2313,25 +2360,30 @@ def _narrow_phase_search(
                 return ("missing", file_path, rules_for_file, None, io_duration, data_len)
 
             results = []
-            for rule_name in rules_for_file:
-                if stop_event.is_set():
-                    raise CancelException("Narrow phase cancelled by user.")
+            if queryType == QueryTypeEnum.YARA:
+                scanner = getattr(scanner_state, "scanner", None)
+                if scanner is None:
+                    scanner = yara_x.Scanner(compiled_yara_rules)
+                    scanner.set_timeout(60)
+                    scanner_state.scanner = scanner
 
-                if queryType == QueryTypeEnum.YARA:
-                    with cpu_duration_metrics[rule_name].time():
-                        matched = bool(
-                            compiled_yara_rules[rule_name].match(
-                                data=data,
-                                callback=yara_callback,
-                                which_callbacks=yara.CALLBACK_MATCHES,
-                                fast=True,
-                                timeout=60,
-                            )
-                        )
-                elif queryType == QueryTypeEnum.SURICATA:
+                scan_start = time.perf_counter()
+                matched_rules = {rule.identifier for rule in scanner.scan(data).matching_rules}
+                scan_duration = time.perf_counter() - scan_start
+                # Allocate the shared scan cost across candidate rules so the
+                # aggregate CPU metric does not count the same scan repeatedly.
+                for rule_name in rules_for_file:
+                    cpu_duration_metrics[rule_name].observe(scan_duration / len(rules_for_file))
+                    results.append((rule_name, rule_name in matched_rules))
+            elif queryType == QueryTypeEnum.SURICATA:
+                for rule_name in rules_for_file:
+                    if stop_event.is_set():
+                        raise CancelException("Narrow phase cancelled by user.")
                     matched = _run_suricata(rule_content[rule_name], file_path, data)
+                    results.append((rule_name, matched))
 
-                results.append((rule_name, matched))
+            if stop_event.is_set():
+                raise CancelException("Narrow phase cancelled by user.")
 
             return ("ok", file_path, rules_for_file, results, io_duration, data_len)
         finally:
@@ -2517,7 +2569,7 @@ def _narrow_phase_search(
 
     # Drop native YARA objects and all candidate/config containers before the
     # final trim. Only the confirmed result lists survive this point.
-    compiled_yara_rules.clear()
+    compiled_yara_rules = None
     cpu_duration_metrics.clear()
     file_config.clear()
     file_to_rules.clear()

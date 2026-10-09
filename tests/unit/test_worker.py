@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import StringIO
-from unittest import mock
+from unittest import TestCase, mock
 
 import fakeredis
 import pytest
@@ -67,6 +67,7 @@ SUBMISSION = azm.RetrohuntEvent(
         search_type="Yara",
         search='rule r {strings: $a = "powershell-preview" condition: $a}',
         status=azm.HuntState.SUBMITTED,
+        retries=0,
     ),
     timestamp=str_to_datetime("2020-08-20T04:02:30.062458"),
 )
@@ -462,6 +463,110 @@ class TestIndex(test_utils.BaseIngestorIndexerTest):
                     self.assertEqual(entity.tool_matches_total, 2)
                     self.assertEqual(entity.tool_matches_done, 2)
                     self.assertEqual(entity.tool_match_count, 2)
+
+
+class TestWorkerRetries(TestCase):
+    """Exercise the real worker loop and Redis writes without executing hunts."""
+
+    def setUp(self):
+        self.fake_redis = fakeredis.FakeRedis()
+        self.addCleanup(self.fake_redis.close)
+        self.job = copy.deepcopy(SUBMISSION)
+        self.job_id = self.job.entity.id
+        self.fake_redis.set(self.job_id, self.job.model_dump_json())
+        self.msg_id = self.fake_redis.xadd("retrohunt-jobs", {b"hunt_id": self.job_id.encode()})
+        self.fake_redis.xgroup_create("retrohunt-jobs", "retrohunt-workers", id="0-0")
+        # Leave a real pending entry, as happens when a worker dies before XACK.
+        self.fake_redis.xreadgroup("retrohunt-workers", "previous-worker", {"retrohunt-jobs": ">"})
+
+    def _stored_job(self):
+        job = azm.RetrohuntEvent.model_validate_json(self.fake_redis.get(self.job_id))
+
+        return job
+
+    def _run_worker(self, expected_retries=None):
+        """Reclaim one pending entry; stop without running search or waiting."""
+        settings = mock.Mock()
+        settings.redis.ttl = 30
+        settings.redis.exception_wait = 0
+        settings.search_settings.max_retries = 10
+        settings.indexers = {}
+        heartbeat = mock.Mock()
+
+        def interrupted_hunt(index_dirs, job, logs):
+            # Read Redis here, rather than just checking the in-memory job:
+            # the count and Starting marker must survive an abrupt exit.
+            stored = self._stored_job()
+            self.assertEqual(stored.entity.retries, expected_retries)
+            self.assertEqual(job.entity.retries, expected_retries)
+            self.assertEqual(stored.action, azm.RetrohuntEvent.RetrohuntAction.Starting)
+            self.assertEqual(stored.entity.status, azm.HuntState.STARTING)
+            self.assertIsNotNone(self.fake_redis.get(f"retrohunt:{self.job_id}:lock"))
+            raise FatalException("simulated interrupted worker")
+
+        with (
+            patch(
+                "azul_plugin_retrohunt.retrohunt.RetrohuntService.redis",
+                new_callable=PropertyMock,
+                return_value=self.fake_redis,
+            ),
+            mock.patch.object(r_worker, "MAX_HUNT_RETRIES", None),
+            mock.patch.object(r_worker, "RetrohuntSettings", return_value=settings),
+            mock.patch.object(r_worker, "start_http_server"),
+            mock.patch.object(r_worker.dispatcher, "DispatcherAPI"),
+            mock.patch.object(r_worker, "capture_logs", return_value=StringIO()),
+            mock.patch.object(r_worker, "start_heartbeat", return_value=heartbeat),
+            mock.patch.object(r_worker, "release_unused_memory"),
+            mock.patch.object(r_worker, "sleep", side_effect=AssertionError("Unexpected worker error or sleep")),
+            mock.patch.object(
+                self.fake_redis,
+                "xautoclaim",
+                side_effect=[
+                    (b"0-0", [(self.msg_id, {b"hunt_id": self.job_id.encode()})], []),
+                    FatalException("stop after processing queue entry"),
+                ],
+            ),
+            mock.patch.object(self.fake_redis, "xack", wraps=self.fake_redis.xack) as ack,
+            mock.patch.object(r_worker, "hunt", side_effect=interrupted_hunt) as hunt,
+        ):
+            with self.assertRaises(FatalException):
+                r_worker.main()
+            self.assertEqual(r_worker.MAX_HUNT_RETRIES, 10)
+
+        heartbeat.join.assert_called_once_with(timeout=1.0)
+        self.assertIsNone(self.fake_redis.get(f"retrohunt:{self.job_id}:lock"))
+        return hunt, ack
+
+    def test_initial_attempt_persists_zero_retries_for_legacy_record(self):
+        """Old records default to zero and record Starting before execution."""
+        raw = json.loads(self.fake_redis.get(self.job_id))
+        raw["entity"].pop("retries", None)
+        self.fake_redis.set(self.job_id, json.dumps(raw))
+        hunt, ack = self._run_worker(expected_retries=0)
+        hunt.assert_called_once()
+        ack.assert_not_called()
+        self.assertEqual(self.fake_redis.xpending("retrohunt-jobs", "retrohunt-workers")["pending"], 1)
+
+    def test_retries_survive_repeated_worker_restarts_and_stop_at_ten(self):
+        """Initial attempt plus ten interrupted retries exhaust the same hunt."""
+        for count in range(11):
+            with self.subTest(retries=count):
+                hunt, ack = self._run_worker(expected_retries=count)
+                hunt.assert_called_once()
+                ack.assert_not_called()
+                self.assertEqual(self._stored_job().entity.retries, count)
+                self.assertEqual(self.fake_redis.xpending("retrohunt-jobs", "retrohunt-workers")["pending"], 1)
+
+        hunt, ack = self._run_worker()
+        hunt.assert_not_called()
+        ack.assert_called_once_with("retrohunt-jobs", "retrohunt-workers", self.msg_id)
+        stored = self._stored_job()
+        self.assertEqual(stored.entity.retries, 10)
+        self.assertEqual(stored.entity.status, azm.HuntState.FAILED)
+        self.assertEqual(stored.action, azm.RetrohuntEvent.RetrohuntAction.Completed)
+        self.assertEqual(stored.entity.error, "Reached maximum number of retries (10).")
+        self.assertIsNotNone(stored.entity.processing_end)
+        self.assertEqual(self.fake_redis.xpending("retrohunt-jobs", "retrohunt-workers")["pending"], 0)
 
 
 EXPECTED_REQUESTS = [

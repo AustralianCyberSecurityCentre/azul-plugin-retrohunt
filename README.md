@@ -25,11 +25,6 @@ This leverages the capabilities of Cert's BigGrep indexing.
 - Once an event's rules have been run it posts a result back to Redis.
 - Single threaded and will only run one job at a time, if you want more jobs running. Run more instances.
 
-#### azul-plugin-retroserver:
-
-- Accepts yara/suricata rules from users and submits `retrohunt` events to Redis for retroworker to accept.
-- Displays the resulsts or retrohunt workers jobs.
-
 ## Installation
 
 - Install required system libraries:
@@ -43,6 +38,28 @@ This leverages the capabilities of Cert's BigGrep indexing.
 
 - Install package (from the root directory of this project):
   `pip install -e .`
+
+### Updating the bundled YARA-X CLI
+
+Retrohunt ships a modified Linux YARA-X CLI at `azul_plugin_retrohunt/yr`. It provides final matcher atoms through:
+
+```bash
+yr debug atoms --json <rules.yar>
+```
+
+Run script
+```bash
+./update_yarax_binary.sh
+```
+
+#### 2. Check
+
+Verify the required command `debug atoms --json` exists:
+
+```bash
+target/release/yr --version
+target/release/yr debug atoms --help
+```
 
 ### Installation debugging
 

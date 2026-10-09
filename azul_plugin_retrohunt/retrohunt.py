@@ -51,6 +51,7 @@ class RetrohuntService:
                 username=settings.username,
                 password=settings.password,
                 db=settings.db,
+                socket_timeout=None,
             )
         return self._redis_client
 

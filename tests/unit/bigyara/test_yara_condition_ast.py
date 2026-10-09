@@ -1,5 +1,6 @@
 """Unit tests for the current YARA condition AST and search-plan logic."""
 
+import os
 import unittest
 from unittest import mock
 
@@ -542,13 +543,16 @@ class TestRuleSearchPlanIntegration(unittest.TestCase):
         yara_string.re = b""
         return yara_string
 
-    def test_parse_yara_rules_nocase_uses_small_atom_pass_only(self):
-        """Nocase rules must keep the small-atom result and skip yarac-large."""
+    def test_parse_yara_rules_uses_single_yara_x_atom_pass(self):
+        """YARA-X final atoms should be consumed in one compiler pass."""
         parsed_rule = yara_parse.YaraRule()
         parsed_rule.name = "NoCaseRule"
 
+        # Model the kind of final alternatives emitted by `yr debug atoms`
+        # for a nocase pattern. The parser no longer receives modifier flags;
+        # each final atom becomes its own OR-alternative group.
         yara_string = self.make_yara_string("$a", b"aaaa")
-        yara_string.modifiers = ["nocase"]
+        yara_string.atoms = [b"aaaa", b"AAAA"]
         parsed_rule.strings = [yara_string]
 
         rule_text = """
@@ -574,12 +578,25 @@ class TestRuleSearchPlanIntegration(unittest.TestCase):
         self.assertEqual(parse_mock.call_count, 1)
         self.assertEqual(
             parse_mock.call_args.args[0],
-            yara_parse.executables["yarac-small"],
+            os.path.join(
+                os.path.dirname(os.path.dirname(yara_parse.__file__)),
+                "yr",
+            ),
         )
-        self.assertEqual(rule_atoms["NoCaseRule"], [b"aaaa"])
+        self.assertCountEqual(
+            rule_atoms["NoCaseRule"],
+            [b"aaaa", b"AAAA"],
+        )
         self.assertDictEqual(
             plans["NoCaseRule"].string_groups,
-            {"$a": [0]},
+            {"$a": [0, 1]},
+        )
+        self.assertCountEqual(
+            [frozenset(group) for group in plans["NoCaseRule"].groups],
+            [
+                frozenset({b"aaaa"}),
+                frozenset({b"AAAA"}),
+            ],
         )
         self.assertEqual(
             plans["NoCaseRule"].condition_ast,
@@ -727,7 +744,7 @@ class TestRuleSearchPlanIntegration(unittest.TestCase):
                 progress_callback,
             )
 
-        self.assertEqual(parse_mock.call_count, 2)
+        self.assertEqual(parse_mock.call_count, 1)
         self.assertCountEqual(
             rule_atoms["Rule"],
             [b"aaaa", b"bbbb", b"cccc"],

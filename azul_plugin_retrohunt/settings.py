@@ -18,7 +18,7 @@ class RetrohuntSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="plugin_", extra="ignore")
 
-    class SearhSettings(BaseSettings):
+    class SearchSettings(BaseSettings):
         """Settings for the BigGrep and Narrow phase search."""
 
         max_thread_count: int = Field(5, alias="MAX_THREAD_COUNT")
@@ -27,6 +27,7 @@ class RetrohuntSettings(BaseSettings):
         max_required_broad_phase_workers: int = Field(2, alias="MAX_BROAD_PHASE_WORKERS")
         max_broad_phase_tasks: int = Field(10000, alias="MAX_BROAD_PHASE_TASKS")
         default_narrow_phase_cleanup_multiplier: int = Field(4, alias="DEFAULT_NARROW_PHASE_CLEANUP_MULTIPLIER")
+        max_retries: int = Field(10, alias="MAX_RETRIES")
 
     class Indexer(BaseModel):
         """Nested configuration for indexers."""
@@ -74,7 +75,7 @@ class RetrohuntSettings(BaseSettings):
         )
 
     redis: RedisSettings = Field(default_factory=lambda: RetrohuntSettings.RedisSettings())
-    search_settings: SearhSettings = Field(default_factory=lambda: RetrohuntSettings.SearhSettings())
+    search_settings: SearchSettings = Field(default_factory=lambda: RetrohuntSettings.SearchSettings())
     # should be common for all indexers/ingestors.
     root_path: str = tempfile.gettempdir()
     indexers: dict[str, Indexer] = dict()
