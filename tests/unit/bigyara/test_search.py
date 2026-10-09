@@ -780,7 +780,7 @@ class TestSearch(test_utils.BaseIngestorIndexerTest):
 
         with self.assertRaisesRegex(
             NoAtomException,
-            "every match requires a positive searchable pattern",
+            "A matching branch of the rule may be satisfied without requiring a searchable atom. This hunt was rejected to avoid missing valid matches.",
         ):
             _build_rule_boolean_plan(
                 "UnsafeRule",
