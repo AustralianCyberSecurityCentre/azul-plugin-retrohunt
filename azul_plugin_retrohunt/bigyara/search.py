@@ -1557,7 +1557,7 @@ def _build_rule_boolean_plan(
             "(for example, 'not $a or $b'), or uses a condition Retrohunt cannot analyse. "
             "An atom-only search could miss matching files, so this hunt has been rejected. "
             "Require a positive pattern with usable atoms in every matching branch "
-            "(for example, '$gate and (not $a or $b)')."
+            "(for example, '$gate and (not $a or $b)'). test"
         )
 
     expression, and_limit_events = _limit_boolean_and_children(
@@ -1578,22 +1578,24 @@ def _build_rule_boolean_plan(
     if expression == _BOOL_TRUE:
         non_searchable_strings = _describe_non_searchable_strings(plan)
 
-        extra = ""
-        if non_searchable_strings:
-            extra = f"\n\nStrings without searchable atoms (minimum atom size {SEARCH_ATOM_SIZE_MIN}): " + ", ".join(
-                non_searchable_strings
+        if (
+            non_searchable_strings
+            and len(non_searchable_strings) == len(plan.string_groups)
+        ):
+            raise NoAtomException(
+                f'Rule "{rule_name}" contains no searchable atoms. '
+                f"All referenced strings produce atoms smaller than the "
+                f"minimum searchable size of {SEARCH_ATOM_SIZE_MIN} bytes. "
+                "Use longer strings or perform a full-file YARA-X scan."
             )
 
         raise NoAtomException(
-            f'Rule "{rule_name}" cannot be searched safely: Retrohunt could not '
-            "establish that every match requires a positive searchable pattern. "
-            "The condition may match files containing none of its searchable patterns "
-            "(for example, 'not $a or $b'), or uses a condition Retrohunt cannot analyse. "
-            "An atom-only search could miss matching files, so this hunt has been rejected. "
-            "Require a positive pattern with usable atoms in every matching branch "
-            "(for example, '$gate and (not $a or $b)')." + extra
+            f'Rule "{rule_name}" cannot be searched safely. '
+            "Retrohunt could not prove that every matching file contains "
+            "a searchable atom. A matching branch of the condition may be "
+            "satisfied without any searchable atoms."
         )
-
+    
     if expression == _BOOL_FALSE:
         return {
             "mode": mode,
