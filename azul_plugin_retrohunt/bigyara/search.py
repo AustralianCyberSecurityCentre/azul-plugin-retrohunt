@@ -1497,13 +1497,33 @@ def _evaluate_boolean_expression(expression, stage_matches: dict) -> set[str]:
 
 def _describe_non_searchable_strings(plan) -> list[str]:
     """Return YARA strings that do not have any usable atom groups."""
-    descriptions = []
+    return sorted(
+        string_name for string_name, group_ids in plan.string_groups.items() if not _valid_group_ids(plan, group_ids)
+    )
 
-    for string_name, group_ids in sorted(plan.string_groups.items()):
-        if not _valid_group_ids(plan, group_ids):
-            descriptions.append(string_name)
 
-    return descriptions
+def _build_no_atom_exception(rule_name: str, plan) -> NoAtomException:
+    """Build exception message."""
+    non_searchable_strings = _describe_non_searchable_strings(plan)
+
+    message = (
+        f'Rule "{rule_name}" cannot be searched safely. Retrohunt could not establish a safe broad-phase search plan.'
+    )
+
+    if non_searchable_strings:
+        message += (
+            "\n\nThe following strings do not produce searchable atoms "
+            f"(minimum atom size: {SEARCH_ATOM_SIZE_MIN} bytes):\n"
+            + "\n".join(f"  - {s}" for s in non_searchable_strings)
+        )
+
+    message += (
+        "\n\nA matching branch of the rule may be satisfied without "
+        "requiring a searchable atom. This hunt was rejected to avoid "
+        "missing valid matches."
+    )
+
+    return NoAtomException(message)
 
 
 def _build_rule_boolean_plan(
@@ -1550,14 +1570,9 @@ def _build_rule_boolean_plan(
     # Atom extraction alone does not establish that a match needs an atom.
     # Reject rather than silently missing files that never reach narrow phase.
     if expression == _BOOL_TRUE:
-        raise NoAtomException(
-            f'Rule "{rule_name}" cannot be searched safely: Retrohunt could not '
-            "establish that every match requires a positive searchable pattern. "
-            "The condition may match files containing none of its searchable patterns "
-            "(for example, 'not $a or $b'), or uses a condition Retrohunt cannot analyse. "
-            "An atom-only search could miss matching files, so this hunt has been rejected. "
-            "Require a positive pattern with usable atoms in every matching branch "
-            "(for example, '$gate and (not $a or $b)'). test"
+        raise _build_no_atom_exception(
+            rule_name,
+            plan,
         )
 
     expression, and_limit_events = _limit_boolean_and_children(
@@ -1576,21 +1591,9 @@ def _build_rule_boolean_plan(
     )
 
     if expression == _BOOL_TRUE:
-        non_searchable_strings = _describe_non_searchable_strings(plan)
-
-        if non_searchable_strings and len(non_searchable_strings) == len(plan.string_groups):
-            raise NoAtomException(
-                f'Rule "{rule_name}" contains no searchable atoms. '
-                f"All referenced strings produce atoms smaller than the "
-                f"minimum searchable size of {SEARCH_ATOM_SIZE_MIN} bytes. "
-                "Use longer strings or perform a full-file YARA-X scan."
-            )
-
-        raise NoAtomException(
-            f'Rule "{rule_name}" cannot be searched safely. '
-            "Retrohunt could not prove that every matching file contains "
-            "a searchable atom. A matching branch of the condition may be "
-            "satisfied without any searchable atoms."
+        raise _build_no_atom_exception(
+            rule_name,
+            plan,
         )
 
     if expression == _BOOL_FALSE:
