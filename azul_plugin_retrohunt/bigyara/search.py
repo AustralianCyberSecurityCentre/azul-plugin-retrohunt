@@ -1517,7 +1517,7 @@ def _build_no_atom_exception(rule_name: str, plan) -> NoAtomException:
         )
 
     message += (
-        "\n\nA matching branch of the rule may be satisfied without "
+        "A matching branch of the rule may be satisfied without "
         "requiring a searchable atom. This hunt was rejected to avoid "
         "missing valid matches."
     )
