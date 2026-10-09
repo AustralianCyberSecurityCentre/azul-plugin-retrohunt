@@ -1578,10 +1578,7 @@ def _build_rule_boolean_plan(
     if expression == _BOOL_TRUE:
         non_searchable_strings = _describe_non_searchable_strings(plan)
 
-        if (
-            non_searchable_strings
-            and len(non_searchable_strings) == len(plan.string_groups)
-        ):
+        if non_searchable_strings and len(non_searchable_strings) == len(plan.string_groups):
             raise NoAtomException(
                 f'Rule "{rule_name}" contains no searchable atoms. '
                 f"All referenced strings produce atoms smaller than the "
@@ -1595,7 +1592,7 @@ def _build_rule_boolean_plan(
             "a searchable atom. A matching branch of the condition may be "
             "satisfied without any searchable atoms."
         )
-    
+
     if expression == _BOOL_FALSE:
         return {
             "mode": mode,
