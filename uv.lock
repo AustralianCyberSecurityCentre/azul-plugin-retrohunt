@@ -96,7 +96,7 @@ test-utils = [
 
 [[package]]
 name = "azul-metastore"
-version = "13.0.97"
+version = "13.0.100"
 source = { registry = "https://devpi.acsc.internal/azul/stable/" }
 dependencies = [
     { name = "azul-bedrock" },
@@ -121,7 +121,7 @@ dependencies = [
     { name = "xxhash" },
 ]
 wheels = [
-    { url = "https://devpi.acsc.internal/azul/stable/+f/c2f/7431ff83b9794/azul_metastore-13.0.97-py3-none-any.whl", hash = "sha256:c2f7431ff83b9794e2d3d6fc0c76dd9a7e4d52d09d1d96ee691308edc93af100" },
+    { url = "https://devpi.acsc.internal/azul/stable/+f/664/e419c18292a21/azul_metastore-13.0.100-py3-none-any.whl", hash = "sha256:664e419c18292a213e3072b3374ce50cc7c47ee6548e154cc2d26fbc727af996" },
 ]
 
 [[package]]
@@ -227,7 +227,7 @@ test-utils = [
 
 [[package]]
 name = "azul-security"
-version = "13.0.35"
+version = "13.0.37"
 source = { registry = "https://devpi.acsc.internal/azul/stable/" }
 dependencies = [
     { name = "azul-bedrock" },
@@ -238,7 +238,7 @@ dependencies = [
     { name = "pydantic-settings" },
 ]
 wheels = [
-    { url = "https://devpi.acsc.internal/azul/stable/+f/6af/863b010e34e51/azul_security-13.0.35-py3-none-any.whl", hash = "sha256:6af863b010e34e5167368920c7547d9eaa969515a24384ef22a18246993301d5" },
+    { url = "https://devpi.acsc.internal/azul/stable/+f/298/51053aec8afde/azul_security-13.0.37-py3-none-any.whl", hash = "sha256:29851053aec8afde3b5a310527b0c1a10b42b146b2031addbfdc35ee1b00d22d" },
 ]
 
 [[package]]
