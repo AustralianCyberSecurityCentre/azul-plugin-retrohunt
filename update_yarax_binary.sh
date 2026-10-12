@@ -6,32 +6,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/azul_plugin_retrohunt"
 OUTPUT_BINARY="${OUTPUT_DIR}/yr"
 
-echo "[+] Installing/updating Rust toolchain"
+# Pinned YARA-X version for reproducible builds.
+# Update this manually after reviewing upstream changes.
+# Anything before v1.21.0 does not have the debug command to view atoms so will not work.
+YARAX_VERSION="v1.21.0"
 
-if ! command -v rustup >/dev/null 2>&1; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    export PATH="$HOME/.cargo/bin:$PATH"
-fi
+echo "[+] Checking Rust toolchain"
 
-rustup self update
-rustup update stable
-rustup default stable
-
-echo "[+] Querying latest YARA-X release"
-
-LATEST_TAG=$(
-    curl -fsSL \
-        https://api.github.com/repos/VirusTotal/yara-x/releases/latest \
-    | grep '"tag_name"' \
-    | sed -E 's/.*"([^"]+)".*/\1/'
-)
-
-if [[ -z "${LATEST_TAG}" ]]; then
-    echo "[!] Failed to determine latest release"
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "[!] Rust toolchain not found"
+    echo
+    echo "Install Rust before running this script."
+    echo "Recommended:"
+    echo "  https://www.rust-lang.org/tools/install"
+    echo
+    echo "Verify installation:"
+    echo "  cargo --version"
+    echo "  rustc --version"
     exit 1
 fi
 
-echo "[+] Latest release: ${LATEST_TAG}"
+echo "[+] Using pinned YARA-X version: ${YARAX_VERSION}"
 
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -39,8 +34,9 @@ trap 'rm -rf "$WORKDIR"' EXIT
 cd "$WORKDIR"
 
 echo "[+] Cloning YARA-X"
+
 git clone \
-    --branch "${LATEST_TAG}" \
+    --branch "${YARAX_VERSION}" \
     --depth 1 \
     https://github.com/VirusTotal/yara-x.git
 
@@ -60,7 +56,10 @@ if [[ ! -f "${BIN_PATH}" ]]; then
     exit 1
 fi
 
+mkdir -p "${OUTPUT_DIR}"
+
 echo "[+] Copying binary to ${OUTPUT_BINARY}"
+
 cp "${BIN_PATH}" "${OUTPUT_BINARY}"
 chmod +x "${OUTPUT_BINARY}"
 

@@ -39,7 +39,6 @@ PLUGIN_VERSION = "2026.07.23"
 DISPATCHER_EVENT_WAIT_TIME_SECONDS = 10
 MATCH_LIMIT = 200
 CANCELLATION_CHECK_INTERVAL_SECONDS = 0.5
-MAX_HUNT_RETRIES = None
 
 dp: dispatcher.DispatcherAPI = None
 
@@ -404,7 +403,6 @@ def start_heartbeat(job_id: str, worker_id: str, ttl_seconds: int, stop_event: t
 def main():
     """Start the retrohunt worker."""
     global dp
-    global MAX_HUNT_RETRIES
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()

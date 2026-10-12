@@ -510,7 +510,6 @@ class TestWorkerRetries(TestCase):
                 new_callable=PropertyMock,
                 return_value=self.fake_redis,
             ),
-            mock.patch.object(r_worker, "MAX_HUNT_RETRIES", None),
             mock.patch.object(r_worker, "RetrohuntSettings", return_value=settings),
             mock.patch.object(r_worker, "start_http_server"),
             mock.patch.object(r_worker.dispatcher, "DispatcherAPI"),
@@ -531,7 +530,6 @@ class TestWorkerRetries(TestCase):
         ):
             with self.assertRaises(FatalException):
                 r_worker.main()
-            self.assertEqual(r_worker.MAX_HUNT_RETRIES, 10)
 
         heartbeat.join.assert_called_once_with(timeout=1.0)
         self.assertIsNone(self.fake_redis.get(f"retrohunt:{self.job_id}:lock"))

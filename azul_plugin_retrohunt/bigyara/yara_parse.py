@@ -120,7 +120,7 @@ class RuleSearchPlan:
     # total strings available
     string_count: int | None = None
 
-    # $a and $b and \<complex_expression>
+    # $a and $b and <complex_expression>
     required_strings: set[str] = field(default_factory=set)
     required_groups: list[set[bytes]] = field(default_factory=list)
     optional_strings: set[str] = field(default_factory=set)
