@@ -26,6 +26,4 @@ executables = {
     "bgdump": find_executable("bgdump", extra_paths=extra_paths),
     "bgindex": find_executable("bgindex", extra_paths=extra_paths),
     "bgparse": find_executable("bgparse", extra_paths=extra_paths),
-    "yarac-large": find_executable("yarac-large", extra_paths=extra_paths),
-    "yarac-small": find_executable("yarac-small", extra_paths=extra_paths),
 }
