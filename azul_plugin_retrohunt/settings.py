@@ -13,6 +13,30 @@ BGI_DIR_NAME = "bgi"
 STATE_DIR_NAME = "state"
 
 
+class S3IndexSettings(BaseSettings):
+    """S3 shadow-index settings. Helm can override defaults using PLUGIN_S3_* env vars.
+
+    S3 is a best-effort shadow target; the PVC remains authoritative in Stage 2.
+    Credentials are resolved through boto3's normal AWS credential provider chain.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="PLUGIN_S3_", extra="ignore")
+
+    enabled: bool = False
+    bucket: str = "retrohunt-indexes"
+    prefix: str = "retrohunt/indices"
+    region: str = "ap-southeast-2"
+    endpoint_url: str | None = None
+    verify_tls: bool = True
+
+    @model_validator(mode="after")
+    def validate_enabled_settings(self):
+        """Require a bucket whenever shadow uploads are enabled."""
+        if self.enabled and not self.bucket:
+            raise ValueError("PLUGIN_S3_BUCKET must be set when PLUGIN_S3_ENABLED=true")
+        return self
+
+
 class RetrohuntSettings(BaseSettings):
     """Centeralised Retrohunt specific settings."""
 
@@ -76,6 +100,7 @@ class RetrohuntSettings(BaseSettings):
 
     redis: RedisSettings = Field(default_factory=lambda: RetrohuntSettings.RedisSettings())
     search_settings: SearchSettings = Field(default_factory=lambda: RetrohuntSettings.SearchSettings())
+    s3: S3IndexSettings = Field(default_factory=S3IndexSettings)
     # should be common for all indexers/ingestors.
     root_path: str = tempfile.gettempdir()
     indexers: dict[str, Indexer] = dict()

@@ -188,6 +188,7 @@ class BigYaraIndexer(BaseYaraProcessor):
         # rename from hidden now that the write is complete
         os.rename(str(hidden_index_file) + ".bgi", str(index_file) + ".bgi")
         shutil.rmtree(folder_path)
+        return pathlib.Path(str(index_file) + ".bgi")
 
     # --------------------------------------------------------------------- Handle OOM failures
     def has_dir_failed_to_index_before(self, folder_path: pathlib.Path) -> bool:

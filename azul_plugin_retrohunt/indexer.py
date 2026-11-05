@@ -13,7 +13,9 @@ from prometheus_client import Counter, Gauge, start_http_server
 from pydantic.types import ByteSize
 
 from azul_plugin_retrohunt.bigyara.index import BigYaraIndexer
-from azul_plugin_retrohunt.settings import RetrohuntSettings
+from azul_plugin_retrohunt.s3_shadow import S3ShadowMirror
+from azul_plugin_retrohunt.s3_storage import S3IndexStorage
+from azul_plugin_retrohunt.settings import RetrohuntSettings, S3IndexSettings
 
 logger = logging.getLogger("retrohunt.indexer")
 
@@ -40,11 +42,25 @@ def run_indexer(
     periodic_folder_name: str,
     periodic_bgi_name: str,
     indexerSettings: RetrohuntSettings.Indexer,
+    s3_shadow_settings: S3IndexSettings | None = None,
 ):
     """Run an indexer of the provided type with the provided root_path."""
     # Future allow for multiple indexer types at once. - as long as the indexer isn't overworked this will save lots
     # of RAM/CPU allocations.
     indexer = BigYaraIndexer(index_root_path, indexerSettings.name, int(indexerSettings.max_bytes_before_indexing))
+    # Shadow storage is disabled by default. Errors must not alter PVC-based indexing.
+    shadow = None
+    if s3_shadow_settings is not None and s3_shadow_settings.enabled:
+        try:
+            shadow = S3ShadowMirror(
+                indexer._processor_name,
+                indexer.bgi_directory,
+                indexer.state_directory,
+                S3IndexStorage(s3_shadow_settings),
+            )
+        except Exception:
+            logger.exception("Failed to initialise S3 shadow mirror; continuing PVC-only")
+
     prom_number_of_indexes_created.labels(indexer._processor_name, PERIODIC_INDEX_NAME)
     prom_number_of_indexes_created.labels(indexer._processor_name, SIZE_BASED_INDEX_NAME)
     prom_bgi_directory_bytes.labels(indexer._processor_name).set(indexer.count_bytes_for_dir(indexer.bgi_directory))
@@ -54,6 +70,13 @@ def run_indexer(
     )
 
     while True:
+        # Retry missed shadow copies even if no new input directories exist.
+        # This is strictly best-effort and does not touch the indexing failure state.
+        if shadow is not None:
+            try:
+                shadow.reconcile()
+            except Exception:
+                logger.exception("S3 shadow reconciliation failed; continuing PVC-only")
         index_occurred = False
         for path_to_index in indexer.get_folders_ready_for_indexing():
             bytes_being_indexed = ByteSize(indexer.count_bytes_for_dir(path_to_index)).human_readable()
@@ -79,11 +102,13 @@ def run_indexer(
                 indexer.save_indexing_dir(path_to_index)
                 # Periodic indexing name or a split periodic index so override the name so it can be overridden.
                 if periodic_folder_name in path_to_index.name:
-                    indexer.generate_index(path_to_index, periodic_bgi_name, indexerSettings.timeout_minutes)
+                    completed_index = indexer.generate_index(
+                        path_to_index, periodic_bgi_name, indexerSettings.timeout_minutes
+                    )
                     prom_number_of_indexes_created.labels(indexer._processor_name, PERIODIC_INDEX_NAME).inc()
                 # Normal indexing, file will be named based on time of indexing.
                 else:
-                    indexer.generate_index(path_to_index, None, indexerSettings.timeout_minutes)
+                    completed_index = indexer.generate_index(path_to_index, None, indexerSettings.timeout_minutes)
                     prom_number_of_indexes_created.labels(indexer._processor_name, SIZE_BASED_INDEX_NAME).inc()
                 # Clear the last indexed folder because we've succeeded and don't want to indicate this directory.
                 # Failed to index potentially creating a bug.
@@ -93,6 +118,13 @@ def run_indexer(
                 )
 
                 logger.info(f"Finished generating index, it took {time.time() - start:.2f}s")
+                # Catch shadow failures separately so they never
+                # trigger the existing OOM split/delete retry path.
+                if shadow is not None and completed_index is not None:
+                    try:
+                        shadow.sync_file(completed_index)
+                    except Exception:
+                        logger.exception("Unexpected S3 shadow error; PVC index remains available")
             except Exception as ex:
                 logger.warning(f"Incomplete index generation, it took {time.time() - start:.2f}s")
                 logger.warning(ex)
@@ -126,4 +158,5 @@ def main(indexer_name: str):
         settings.periodic_index_folder_name,
         settings.periodic_bgi_name,
         indexer_cfg,
+        settings.s3,
     )
