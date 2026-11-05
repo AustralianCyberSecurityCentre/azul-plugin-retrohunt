@@ -31,6 +31,7 @@ dependencies = [
     "prometheus-client>=0.24.1",
     "pydantic>2",
     "redis==8.1.0",
+    "boto3>=1.35",
 ]
 
 [project.optional-dependencies]
