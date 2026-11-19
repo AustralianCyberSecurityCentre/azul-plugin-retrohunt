@@ -1,9 +1,6 @@
 """Bigyara high-level search/API over biggrep."""
 
-# bgindex will error if data to index is less than 4 bytes
 from typing import Callable
-
-INDEX_DATA_SIZE_MIN = 4
 
 # bgparse will error if data to search on is less than 3 bytes
 SEARCH_ATOM_SIZE_MIN = 3

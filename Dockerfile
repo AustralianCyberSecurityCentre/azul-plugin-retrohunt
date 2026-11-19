@@ -49,6 +49,13 @@ RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ]; then \
     uv pip freeze | grep 'azul-.*==' | grep -v '^azul-plugin-retrohunt' | cut -d "=" -f 1 | xargs -I {} uv pip install --extra-index-url=$UV_INDEX_URL --system --upgrade --no-deps '{}>=0.0.0'; \
     fi
 
+# Bedrock's index CLI is built and published separately by azul-bedrock.
+# CI must provide a pinned image digest with /usr/local/bin/azul-index.
+# Keeping this as an external artifact avoids compiling or vendoring Bedrock
+# Go sources in the Retrohunt (Python) build.
+ARG INDEX_CLI_IMAGE=azul-index-cli:latest
+FROM ${INDEX_CLI_IMAGE} AS index-cli
+
 FROM $REGISTRY/$BASE_IMAGE:$BASE_TAG AS base
 ENV DEBIAN_FRONTEND=noninteractive
 COPY debian.txt /tmp/src/
@@ -61,6 +68,9 @@ ARG UID=21000
 ARG GID=21000
 RUN groupadd -g $GID azul && useradd --create-home --shell /bin/bash -u $UID -g $GID azul
 COPY --from=builder /usr/local /usr/local
+# The only required index-management executable. No indexer or ingest tools.
+COPY --from=index-cli /usr/local/bin/azul-index /usr/local/bin/azul-index
+RUN chmod 0755 /usr/local/bin/azul-index
 RUN chmod 0755 \
     /usr/local/lib/python3.12/site-packages/azul_plugin_retrohunt/yr
 USER azul
