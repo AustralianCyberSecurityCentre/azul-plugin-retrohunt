@@ -24,9 +24,9 @@ from azul_plugin_retrohunt.bigyara.search import (
     search,
     trigger_stop_event,
 )
+from azul_plugin_retrohunt.index_provider import ObjectIndexProvider
 from azul_plugin_retrohunt.retrohunt import CancelException, FatalException, RetrohuntService
 from azul_plugin_retrohunt.settings import RetrohuntSettings
-from azul_plugin_retrohunt.index_provider import ObjectIndexProvider
 
 prom_jobs_run = Counter(
     "retrohunt_worker_jobs_run",

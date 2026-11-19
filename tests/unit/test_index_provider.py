@@ -14,8 +14,10 @@ SECOND = "b" * 64
 
 def provider(tmp_path):
     settings = SimpleNamespace(
-        index_cache_dir=str(tmp_path), index_cli_path="azul-index",
-        index_fetch_workers=2, index_list_timeout_seconds=10,
+        index_cache_dir=str(tmp_path),
+        index_cli_path="azul-index",
+        index_fetch_workers=2,
+        index_list_timeout_seconds=10,
         index_fetch_timeout_seconds=10,
     )
     return ObjectIndexProvider(settings)
@@ -53,9 +55,13 @@ def test_fetch_invokes_cli_and_checks_local_file(tmp_path):
 def test_prepare_requires_all_indexes(tmp_path):
     instance = provider(tmp_path)
     with patch.object(instance, "list_indexes", return_value=[FIRST, SECOND]):
-        with patch.object(instance, "fetch", side_effect=lambda index_id: (
-            tmp_path / f"{index_id}.bgi" if index_id == FIRST else (_ for _ in ()).throw(ValueError("missing"))
-        )):
+        with patch.object(
+            instance,
+            "fetch",
+            side_effect=lambda index_id: (
+                tmp_path / f"{index_id}.bgi" if index_id == FIRST else (_ for _ in ()).throw(ValueError("missing"))
+            ),
+        ):
             with pytest.raises(IndexUnavailable, match="complete index snapshot"):
                 instance.prepare()
 

@@ -1,8 +1,8 @@
 """Settings for all retrohunt subcommands."""
 
-
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class RetrohuntSettings(BaseSettings):
     """Centeralised Retrohunt specific settings."""
@@ -54,7 +54,7 @@ class RetrohuntSettings(BaseSettings):
     search_settings: SearchSettings = Field(default_factory=lambda: RetrohuntSettings.SearchSettings())
     # The index files are exclusively produced by the external Retroindexer.
     # Retrohunt never writes to the object store or creates BigGrep indexes.
-    index_cache_dir: str = "/tmp/retrohunt-index-cache"
+    index_cache_dir: str = "/tmp/retrohunt-index-cache"  # noqa: S108
     index_cli_path: str = "azul-index"
     index_fetch_workers: int = Field(4, ge=1, le=16)
     index_list_timeout_seconds: int = Field(120, ge=1)

@@ -9,8 +9,8 @@ import logging
 import re
 import subprocess
 import tempfile
-from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 
 from prometheus_client import Counter, Histogram
@@ -54,7 +54,7 @@ class ObjectIndexProvider:
         storage credentials. Capture only bounded output to avoid noisy logs.
         """
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603
                 [self.cli, *args],
                 check=True,
                 text=True,
@@ -98,7 +98,11 @@ class ObjectIndexProvider:
         with index_fetch_seconds.time():
             try:
                 self._run_cli(
-                    "fetch", "--id", index_id, "--output", str(destination),
+                    "fetch",
+                    "--id",
+                    index_id,
+                    "--output",
+                    str(destination),
                     timeout=self.fetch_timeout,
                 )
                 if not destination.is_file() or destination.stat().st_size == 0:
