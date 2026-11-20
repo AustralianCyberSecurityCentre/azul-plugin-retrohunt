@@ -324,7 +324,7 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
         periodic_check_is_cancelled(force=True)
 
         # Obtain a consistent snapshot of already-published indexes. The
-        # provider uses the Bedrock CLI and stages verified .bgi files in a
+        # provider uses the Retroindexer-owned azul-index CLI and stages verified .bgi files in a
         # per-pod cache. BigGrep still uses mmap against these local files.
         with ObjectIndexProvider(RetrohuntSettings()).search_snapshot() as snapshot:
             periodic_check_is_cancelled(force=True)

@@ -1,26 +1,43 @@
 # Production object-index Retrohunt
 
-This variant assumes **Retroindexer is already deployed**, the Bedrock
-`azul-index` CLI is implemented and published, and indexes are continuously
+This variant assumes **Retroindexer is already deployed**, the Retroindexer-owned
+`azul-index` CLI is built into the Retroindexer image, and indexes are continuously
 published to the same configured storage backend. This repository is a **read-only
 search consumer**; there are no ingestion/indexer entry points or shared PVC
 index directories.
 
 ## Required runtime and build contract
 
-* Publish a versioned container image from Bedrock containing the `azul-index`
-  executable at `/usr/local/bin/azul-index`. Build Retrohunt with
-  `--build-arg INDEX_CLI_IMAGE=<registry>/azul-index-cli@sha256:<digest>`.
-  `azul-index-cli:latest` is only a developer placeholder, **not** a production
-  image. The image must expose the executable in the expected location.
-* The source code for `azul-index` must implement `list` returning **one SHA-256
-  index ID per line** and `fetch --id ID --output PATH`, as in the Bedrock
-  proof of concept. The CLI must use the same backend credentials and namespace
-  as Retroindexer's `put` operation.
-* Keep `bgparse` and the YARA-X CLI from the existing Retrohunt image. Neither
-  is responsible for storage or index creation.
-* Ensure Kubernetes injects `AZUL_INDEX_*` settings and storage credentials
-  into **the Retrohunt worker**. See below.
+* **Bedrock remains unchanged.** Retroindexer owns the `cmd` Go CLI, builds the
+  `/usr/local/bin/azul-index` executable, and publishes SHA-256-named `.bgi`
+  objects with `.ready` markers. Its existing Bedrock dependency provides the
+  S3 and Azure Blob Storage clients.
+* Build Retrohunt using a **version-pinned Retroindexer image** as the binary
+  source. The CLI binary is copied into Retrohunt, not run as a separate
+  Retroindexer service. Example Dockerfile fragment (apply this to the real
+  Retrohunt Dockerfile, which was **not included** in the uploaded ZIP):
+
+  ```dockerfile
+  ARG RETROINDEXER_CLI_IMAGE
+  FROM ${RETROINDEXER_CLI_IMAGE} AS retroindexer-cli
+  # In the final Retrohunt image stage:
+  COPY --from=retroindexer-cli /usr/local/bin/azul-index /usr/local/bin/azul-index
+  ```
+
+  Build with a pinned release/digest, for example
+  `--build-arg RETROINDEXER_CLI_IMAGE=<registry>/retroindexer@sha256:<digest>`.
+  The image **must** contain the built CLI at that exact path. Setting this build
+  argument in values.yaml alone does not add a binary to an existing image.
+* The CLI supports `list` (one SHA-256 ID per line), `fetch --id ID --output
+  PATH`, and `put --file PATH`. Retrohunt invokes **only** `list` and `fetch`;
+  indexing and publication remain exclusively Retroindexer's responsibility.
+* **Match the publisher's namespace:** both deployments need the same
+  `AZUL_INDEX_PREFIX` (default `retrohunt/indices`), backend, container/bucket,
+  and endpoint. The CLI is configured independently inside each pod.
+* Keep `bgparse` and YARA-X in Retrohunt; BigGrep continues to mmap local
+  cached files. No shared index PVC or Retrohunt index writer is needed.
+* The uploaded ZIP contains the Python package only, so applying this archive
+  does **not** modify your real Retrohunt Dockerfile or Helm templates.
 
 ## S3 / SeaweedFS environment (example)
 
@@ -54,18 +71,19 @@ env:
 ```
 
 **AWS IAM:** do not inject keys; configure workload credentials and allow the
-Bedrock CLI to use its IAM path. The original POC CLI requires an endpoint; use
-its documented AWS endpoint format until Bedrock supports optional endpoint.
+Retroindexer CLI to use its IAM path. The Retroindexer CLI allows an empty
+endpoint for the default AWS S3 endpoint.
 
 **Azure Blob:** use `AZUL_INDEX_BACKEND=azure`,
 `AZUL_INDEX_AZURE_ENDPOINT`, `AZUL_INDEX_AZURE_CONTAINER`, and the supported
-account authentication env vars in the Bedrock implementation.
+`AZUL_INDEX_AZURE_ACCOUNT` and `AZUL_INDEX_AZURE_KEY` (or Azure workload
+identity supported by the underlying Bedrock storage client).
 
 Other worker settings:
 
 | Environment | Default | Meaning |
 |---|---|---|
-| `PLUGIN_INDEX_CLI_PATH` | `azul-index` | Installed Bedrock executable |
+| `PLUGIN_INDEX_CLI_PATH` | `azul-index` | Installed Retroindexer executable |
 | `PLUGIN_INDEX_CACHE_DIR` | `/tmp/retrohunt-index-cache` | Local verified cache, not a PVC |
 | `PLUGIN_INDEX_FETCH_WORKERS` | `4` | Concurrent index fetch subprocesses |
 | `PLUGIN_INDEX_LIST_TIMEOUT_SECONDS` | `120` | List deadline |
@@ -92,7 +110,7 @@ The CLI caches **full** indexes because `bgparse` requires local files for
 `mmap()`. The store must support reading all published `.bgi` objects. The
 actual disk size and download concurrency must be measured on real data before
 production deployment. Each pod has its own cache; no downloads are shared
-between pods. The existing Bedrock POC re-hashes a cache hit on every fetch,
+between pods. The Retroindexer CLI re-hashes a cache hit on every fetch,
 which adds sequential disk I/O but protects cache integrity.
 
 ## Consistency and failure behaviour
@@ -118,6 +136,12 @@ which adds sequential disk I/O but protects cache integrity.
 azul-index list | head
 azul-index fetch --id '<published-sha256>' --output /var/cache/retrohunt/indexes/test.bgi
 azul-plugin-retroworker  # normal Redis-driven worker process
+```
+
+Verify the command is available at runtime (this fails fast if it is missing):
+
+```bash
+command -v azul-index
 ```
 
 The Redis/API/cron configuration remains unchanged. Retire the Retrohunt

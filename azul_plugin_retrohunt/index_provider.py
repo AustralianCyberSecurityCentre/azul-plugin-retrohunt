@@ -1,12 +1,13 @@
 """Read-only access to indexes published by the external Retroindexer.
 
-The Bedrock ``azul-index`` CLI is the only object-store client. It discovers
+The ``azul-index`` CLI is built and published by Retroindexer. It discovers
 published indexes and fetches verified, immutable .bgi files into a local cache.
 There is deliberately no upload, ingest, indexing, or PVC fallback here.
 """
 
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,11 +20,11 @@ from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 logger = logging.getLogger("retrohunt.index_provider")
 
-# The Bedrock CLI's object key is the full lowercase SHA-256 of the .bgi bytes.
+# The Retroindexer CLI's object key is the full lowercase SHA-256 of the .bgi bytes.
 INDEX_ID = re.compile(r"^[0-9a-f]{64}$")
 
 # Count expensive external calls separately from successful hunts.
-index_fetch_count = Counter("retrohunt_index_fetch_total", "Bedrock index fetch attempts", ["status"])
+index_fetch_count = Counter("retrohunt_index_fetch_total", "Retroindexer CLI index fetch attempts", ["status"])
 index_fetch_seconds = Histogram("retrohunt_index_fetch_seconds", "Seconds spent ensuring a local .bgi")
 
 
@@ -42,13 +43,19 @@ class ObjectIndexProvider:
 
     def __init__(self, settings: RetrohuntSettings):
         self.cache_dir = Path(settings.index_cache_dir).expanduser().resolve()
-        self.cli = settings.index_cli_path
+        configured_cli = settings.index_cli_path
+        self.cli = shutil.which(configured_cli)
+        if not self.cli:
+            raise IndexUnavailable(
+                f"Retroindexer CLI executable not found: {configured_cli!r}. "
+                "Install azul-index in the Retrohunt image or set PLUGIN_INDEX_CLI_PATH."
+            )
         self.fetch_workers = settings.index_fetch_workers
         self.list_timeout = settings.index_list_timeout_seconds
         self.fetch_timeout = settings.index_fetch_timeout_seconds
 
     def _run_cli(self, *args: str, timeout: int) -> str:
-        """Run Bedrock without a shell; never include storage secrets in argv.
+        """Run Retroindexer's CLI without a shell; never include storage secrets in argv.
 
         The CLI inherits AZUL_INDEX_* environment variables and the pod's
         storage credentials. Capture only bounded output to avoid noisy logs.
@@ -65,8 +72,8 @@ class ObjectIndexProvider:
         except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
             # Avoid serialising the entire environment or CLI traceback: both
             # could expose credentials in diagnostics.
-            logger.error("Bedrock index command %s failed: %s", args[0], type(exc).__name__)
-            raise IndexUnavailable(f"Bedrock index {args[0]} failed ({type(exc).__name__})") from exc
+            logger.error("Retroindexer CLI command %s failed: %s", args[0], type(exc).__name__)
+            raise IndexUnavailable(f"Retroindexer CLI {args[0]} failed ({type(exc).__name__})") from exc
         return result.stdout
 
     def list_indexes(self) -> list[str]:
@@ -78,14 +85,14 @@ class ObjectIndexProvider:
         lines = self._run_cli("list", timeout=self.list_timeout).splitlines()
         ids = sorted(set(line.strip() for line in lines if line.strip()))
         if any(not INDEX_ID.fullmatch(index_id) for index_id in ids):
-            raise IndexUnavailable("Bedrock listed an invalid index ID")
+            raise IndexUnavailable("Retroindexer CLI listed an invalid index ID")
         if not ids:
             raise IndexUnavailable("No published BigGrep indexes found in object storage")
         logger.info("Found %d published BigGrep indexes", len(ids))
         return ids
 
     def fetch(self, index_id: str) -> Path:
-        """Ensure that a Bedrock-verified index is locally available.
+        """Ensure that a Retroindexer-verified index is locally available.
 
         Always call the CLI, even on a local cache hit. Its Go implementation
         uses a filesystem lock, validates the checksum and atomically replaces
@@ -106,7 +113,7 @@ class ObjectIndexProvider:
                     timeout=self.fetch_timeout,
                 )
                 if not destination.is_file() or destination.stat().st_size == 0:
-                    raise IndexUnavailable(f"Bedrock returned no local index for {index_id}")
+                    raise IndexUnavailable(f"Retroindexer CLI returned no local index for {index_id}")
                 index_fetch_count.labels("success").inc()
             except Exception:
                 index_fetch_count.labels("failed").inc()
@@ -132,7 +139,7 @@ class ObjectIndexProvider:
                     for remaining in futures:
                         remaining.cancel()
                     raise IndexUnavailable(f"Cannot prepare complete index snapshot: {futures[future]}") from exc
-        logger.info("Prepared %d BigGrep indexes from Bedrock object storage", len(paths))
+        logger.info("Prepared %d BigGrep indexes from Retroindexer object storage", len(paths))
         return sorted(paths)
 
     @contextmanager
