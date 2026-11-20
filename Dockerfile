@@ -6,7 +6,7 @@ ARG BASE_TAG='3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a
 
 # Required at build time: a pinned Retroindexer image containing azul-index.
 # Example: --build-arg RETROINDEXER_CLI_IMAGE=registry.example/retroindexer@sha256:<digest>
-ARG RETROINDEXER_CLI_IMAGE
+ARG RETROINDEXER_CLI_IMAGE=acr01apptestshared.azurecr.io/public/azul/plugin-retroindexer:20261120T0616-dev
 
 FROM $REGISTRY/$BUILD_IMAGE:$BUILD_TAG AS builder
 ENV DEBIAN_FRONTEND=noninteractive
