@@ -436,3 +436,24 @@ The debian.txt file manages the debian dependencies that need to be installed on
 
 Sometimes the debian.txt file is insufficient and in this case the Dockerfile may need to be modified directly to
 install complex dependencies.
+
+# Azul Retrohunt — object-storage-only search worker
+
+Retrohunt **only searches** already-published BigGrep `.bgi` indexes. The separate
+Retroindexer owns ingest, index creation, and publication through Bedrock's
+`azul-index put`. This repository contains no ingestion or indexing service.
+
+## Runtime design
+
+1. Retroindexer publishes immutable `.bgi` objects via `azul-index put`.
+2. On each hunt, the worker runs `azul-index list` to snapshot the published IDs.
+3. It fetches each required index into a **local ephemeral cache** with bounded
+   concurrency. Bedrock verifies SHA-256 and uses locks plus atomic renames.
+4. Existing BigGrep `bgparse` searches the local files; YARA-X/Suricata
+   verification and Dispatcher binary retrieval are unchanged.
+5. The Redis queue, cancellation, results API and cron cleanup remain.
+
+No shared index PVC is required. Each worker pod still needs sufficient local
+storage for its `.bgi` cache, because BigGrep uses local memory mapping.
+
+See [deployment and migration guide](docs/object-index-deployment.md).

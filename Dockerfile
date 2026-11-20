@@ -4,6 +4,10 @@ ARG BUILD_TAG='3.12-trixie@sha256:cad37dd20c7cac861af9003af8796d03ea7a998ec1e3a6
 ARG BASE_IMAGE='python'
 ARG BASE_TAG='3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b'
 
+# Required at build time: a pinned Retroindexer image containing azul-index.
+# Example: --build-arg RETROINDEXER_CLI_IMAGE=registry.example/retroindexer@sha256:<digest>
+ARG RETROINDEXER_CLI_IMAGE=acr01apptestshared.azurecr.io/public/azul/plugin-retroindexer:20261120T0616-dev
+
 FROM $REGISTRY/$BUILD_IMAGE:$BUILD_TAG AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_DISABLE_PIP_VERSION_CHECK=yes
@@ -49,6 +53,10 @@ RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ]; then \
     uv pip freeze | grep 'azul-.*==' | grep -v '^azul-plugin-retrohunt' | cut -d "=" -f 1 | xargs -I {} uv pip install --extra-index-url=$UV_INDEX_URL --system --upgrade --no-deps '{}>=0.0.0'; \
     fi
 
+# Retroindexer builds/publishes azul-index. Retrohunt only copies the binary;
+# it does not need Retroindexer's indexing tools, Go sources or Bedrock changes.
+FROM ${RETROINDEXER_CLI_IMAGE} AS index-cli
+
 FROM $REGISTRY/$BASE_IMAGE:$BASE_TAG AS base
 ENV DEBIAN_FRONTEND=noninteractive
 COPY debian.txt /tmp/src/
@@ -61,6 +69,8 @@ ARG UID=21000
 ARG GID=21000
 RUN groupadd -g $GID azul && useradd --create-home --shell /bin/bash -u $UID -g $GID azul
 COPY --from=builder /usr/local /usr/local
+COPY --from=index-cli /usr/local/bin/azul-index /usr/local/bin/azul-index
+RUN chmod 0755 /usr/local/bin/azul-index
 RUN chmod 0755 \
     /usr/local/lib/python3.12/site-packages/azul_plugin_retrohunt/yr
 USER azul

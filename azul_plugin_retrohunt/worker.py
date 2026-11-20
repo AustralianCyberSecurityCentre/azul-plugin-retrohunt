@@ -24,8 +24,9 @@ from azul_plugin_retrohunt.bigyara.search import (
     search,
     trigger_stop_event,
 )
+from azul_plugin_retrohunt.index_provider import ObjectIndexProvider
 from azul_plugin_retrohunt.retrohunt import CancelException, FatalException, RetrohuntService
-from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
+from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 prom_jobs_run = Counter(
     "retrohunt_worker_jobs_run",
@@ -165,7 +166,7 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
     return job
 
 
-def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
+def hunt(job: azm.RetrohuntEvent, logs: StringIO):
     """Execute the given retrohunt."""
     match_metadata: MatchMetadata = {}
     last_update: float | None = None
@@ -322,15 +323,20 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
         periodic_check_is_cancelled(force=True)
 
-        search(
-            search_query,
-            search_enum_type,
-            index_dirs,
-            get_data_from_azul,
-            update_job,
-            recursive=True,
-            data_release_callback=release_data_from_azul,
-        )
+        # Obtain a consistent snapshot of already-published indexes. The
+        # provider uses the Retroindexer-owned azul-index CLI and stages verified .bgi files in a
+        # per-pod cache. BigGrep still uses mmap against these local files.
+        with ObjectIndexProvider(RetrohuntSettings()).search_snapshot() as snapshot:
+            periodic_check_is_cancelled(force=True)
+            search(
+                search_query,
+                search_enum_type,
+                [str(snapshot)],
+                get_data_from_azul,
+                update_job,
+                recursive=False,
+                data_release_callback=release_data_from_azul,
+            )
 
         periodic_check_is_cancelled(force=True)
         logger.info("Successfully completed job.")
@@ -522,10 +528,8 @@ def main():
                 stop_event=heartbeat_stop_event,
             )
 
-            bgi_folders = []
-            for _name, indexer_cfg in settings.indexers.items():
-                path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
-                bgi_folders.append(path_to_bgi_folder)
+            # Index discovery and downloads occur inside hunt(), so failures
+            # are recorded against the job rather than crashing the worker.
 
             try:
                 # The search cancellation Event is module-global, so reset it
@@ -574,7 +578,7 @@ def main():
                 _update_progress(job, None)
 
                 with prom_worker_runtime.time():
-                    hunt(bgi_folders, job, logs)
+                    hunt(job, logs)
                 # Acknowledge the message
                 logger.info(f"Acknowledging job {rs.RETROHUNT_JOB} {rs.RETROHUNT_GROUP} {msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)
