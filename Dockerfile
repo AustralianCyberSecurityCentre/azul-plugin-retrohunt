@@ -53,8 +53,7 @@ RUN if [ "$GIT_BRANCH_NAME" = "refs/heads/dev" ]; then \
 # CI must provide a pinned image digest with /usr/local/bin/azul-index.
 # Keeping this as an external artifact avoids compiling or vendoring Bedrock
 # Go sources in the Retrohunt (Python) build.
-ARG INDEX_CLI_IMAGE=azul-index-cli:latest
-FROM ${INDEX_CLI_IMAGE} AS index-cli
+FROM azul-index-cli:latest AS index-cli
 
 FROM $REGISTRY/$BASE_IMAGE:$BASE_TAG AS base
 ENV DEBIAN_FRONTEND=noninteractive
