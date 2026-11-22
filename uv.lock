@@ -96,7 +96,7 @@ test-utils = [
 
 [[package]]
 name = "azul-metastore"
-version = "14.0.12"
+version = "14.0.14"
 source = { registry = "https://devpi.acsc.internal/azul/stable/" }
 dependencies = [
     { name = "azul-bedrock" },
@@ -121,7 +121,7 @@ dependencies = [
     { name = "xxhash" },
 ]
 wheels = [
-    { url = "https://devpi.acsc.internal/azul/stable/+f/864/07635ae1fa8e2/azul_metastore-14.0.12-py3-none-any.whl", hash = "sha256:86407635ae1fa8e2f57217de304d0f536cf162e9cfa764c44bddd3246f55e772" },
+    { url = "https://devpi.acsc.internal/azul/stable/+f/2a7/30e50b54d75d9/azul_metastore-14.0.14-py3-none-any.whl", hash = "sha256:2a730e50b54d75d9ccc3495b1ef8cc62fc3406a73f1bda7a847b0aac870023ae" },
 ]
 
 [[package]]
@@ -1272,10 +1272,10 @@ wheels = [
 
 [[package]]
 name = "malpz"
-version = "14.0.6"
+version = "14.0.8"
 source = { registry = "https://devpi.acsc.internal/azul/stable/" }
 wheels = [
-    { url = "https://devpi.acsc.internal/azul/stable/+f/d44/4269518ba262e/malpz-14.0.6-py3-none-any.whl", hash = "sha256:d444269518ba262e6c0d03a786819681e04d24894cac6cde15a013f6ca94e4fe" },
+    { url = "https://devpi.acsc.internal/azul/stable/+f/be1/f83fc51888fc6/malpz-14.0.8-py3-none-any.whl", hash = "sha256:be1f83fc51888fc6ac562f525fc3ebc15f4040d79463d141ff34ee2175592ebd" },
 ]
 
 [[package]]
