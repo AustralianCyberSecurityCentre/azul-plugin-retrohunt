@@ -55,9 +55,8 @@ class RetrohuntSettings(BaseSettings):
     # The index files are exclusively produced by the external Retroindexer.
     # Retrohunt never writes to the object store or creates BigGrep indexes.
     index_cache_dir: str = "/tmp/retrohunt-index-cache"  # noqa: S108
-    # Binary supplied by the version-pinned Retroindexer image during the Retrohunt image build.
-    index_cli_path: str = "azul-index"
     index_fetch_workers: int = Field(4, ge=1, le=16)
+    index_cache_max_bytes: int = Field(10 * 1024**3, ge=1)
     index_list_timeout_seconds: int = Field(120, ge=1)
     index_fetch_timeout_seconds: int = Field(1800, ge=1)
 

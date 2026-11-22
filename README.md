@@ -457,3 +457,23 @@ No shared index PVC is required. Each worker pod still needs sufficient local
 storage for its `.bgi` cache, because BigGrep uses local memory mapping.
 
 See [deployment and migration guide](docs/object-index-deployment.md).
+
+# Retrohunt Python shim follow-up patch
+
+Based on the latest uploaded `rhi (2).zip`. Extract at the root of the `azul-plugin-retrohunt` repository, keeping paths intact.
+
+## Modified files
+- `azul_plugin_retrohunt/bigyara/search.py`: bind batch-specific variables (`batch_count`, `completed_before`, `total_indices`) to each `batch_progress` callback, satisfying Ruff B023 while preserving accurate cumulative progress for all batches. Initial zero events in each new batch are translated to the cumulative prior work, not to zero for the whole hunt.
+- `azul_plugin_retrohunt/index_storage.py`: add docstrings required by Ruff D101/D102/D103; storage backend and transfer behaviour unchanged.
+
+No changes to worker integration, S3/Azure selection, local cache logic, Dockerfile or Helm values are included. The latest uploaded archive did not include the repository-root Dockerfile, dependency manifest, lockfile, or Helm charts; validate those independently.
+
+## Verify
+```sh
+uv run ruff check azul_plugin_retrohunt/bigyara/search.py azul_plugin_retrohunt/index_storage.py
+uv run ruff format --check azul_plugin_retrohunt/bigyara/search.py azul_plugin_retrohunt/index_storage.py
+uv run pytest -q tests/unit
+```
+
+Cache configuration should point to a mounted `emptyDir`, and use an adequate size budget such as `PLUGIN_INDEX_CACHE_MAX_BYTES=85899345920` for an approximately 100 GiB cache volume. A single `.bgi` exceeding this budget will still fail explicitly.
+

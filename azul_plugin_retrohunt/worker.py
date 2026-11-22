@@ -21,7 +21,7 @@ from azul_plugin_retrohunt.bigyara.search import (
     SearchPhaseEnum,
     clear_stop_event,
     release_unused_memory,
-    search,
+    search_batched,
     trigger_stop_event,
 )
 from azul_plugin_retrohunt.index_provider import ObjectIndexProvider
@@ -323,20 +323,17 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
 
         periodic_check_is_cancelled(force=True)
 
-        # Obtain a consistent snapshot of already-published indexes. The
-        # provider uses the Retroindexer-owned azul-index CLI and stages verified .bgi files in a
-        # per-pod cache. BigGrep still uses mmap against these local files.
-        with ObjectIndexProvider(RetrohuntSettings()).search_snapshot() as snapshot:
-            periodic_check_is_cancelled(force=True)
-            search(
-                search_query,
-                search_enum_type,
-                [str(snapshot)],
-                get_data_from_azul,
-                update_job,
-                recursive=False,
-                data_release_callback=release_data_from_azul,
-            )
+        # Each BigGrep batch is fetched, searched and deleted before the next.
+        # Narrow-phase verification happens once after all broad candidates are
+        # collected, so the complete index collection never resides on the PVC.
+        search_batched(
+            search_query,
+            search_enum_type,
+            ObjectIndexProvider(RetrohuntSettings()),
+            get_data_from_azul,
+            update_job,
+            data_release_callback=release_data_from_azul,
+        )
 
         periodic_check_is_cancelled(force=True)
         logger.info("Successfully completed job.")

@@ -1,162 +1,185 @@
-"""Read-only access to indexes published by the external Retroindexer.
+"""Read-only, bounded local batches for Retroindexer-published indexes.
 
-The ``azul-index`` CLI is built and published by Retroindexer. It discovers
-published indexes and fetches verified, immutable .bgi files into a local cache.
-There is deliberately no upload, ingest, indexing, or PVC fallback here.
+Uses native Python Azure Blob / S3 clients: no Retroindexer executable is needed.
 """
 
+from __future__ import annotations
+
+import fcntl
+import hashlib
 import logging
+import os
 import re
 import shutil
-import subprocess
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+import time
 from pathlib import Path
 
 from prometheus_client import Counter, Histogram
 
+from azul_plugin_retrohunt.index_storage import IndexStorage, IndexStorageError, create_storage, index_prefix
 from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 logger = logging.getLogger("retrohunt.index_provider")
-
-# The Retroindexer CLI's object key is the full lowercase SHA-256 of the .bgi bytes.
 INDEX_ID = re.compile(r"^[0-9a-f]{64}$")
-
-# Count expensive external calls separately from successful hunts.
-index_fetch_count = Counter("retrohunt_index_fetch_total", "Retroindexer CLI index fetch attempts", ["status"])
+index_fetch_count = Counter("retrohunt_index_fetch_total", "Published index cache fetch attempts", ["status"])
 index_fetch_seconds = Histogram("retrohunt_index_fetch_seconds", "Seconds spent ensuring a local .bgi")
 
 
 class IndexUnavailable(RuntimeError):
-    """Raised when Retrohunt cannot obtain the complete index snapshot."""
+    """Raised when Retrohunt cannot obtain the complete published index snapshot."""
 
 
 class ObjectIndexProvider:
-    """Resolve one immutable published-index snapshot for a hunt.
+    """List one published snapshot, verify SHA-256 and download atomically."""
 
-    Instantiating the provider has no side effects. ``prepare`` takes a fresh
-    published index listing once per hunt; the list is not refreshed while
-    broad-phase tasks run. This ensures indexes published halfway through a
-    hunt are not inconsistently included.
-    """
-
-    def __init__(self, settings: RetrohuntSettings):
+    def __init__(self, settings: RetrohuntSettings, storage: IndexStorage | None = None):
         self.cache_dir = Path(settings.index_cache_dir).expanduser().resolve()
-        configured_cli = settings.index_cli_path
-        self.cli = shutil.which(configured_cli)
-        if not self.cli:
-            raise IndexUnavailable(
-                f"Retroindexer CLI executable not found: {configured_cli!r}. "
-                "Install azul-index in the Retrohunt image or set PLUGIN_INDEX_CLI_PATH."
-            )
-        self.fetch_workers = settings.index_fetch_workers
+        self.max_cache_bytes = settings.index_cache_max_bytes
         self.list_timeout = settings.index_list_timeout_seconds
         self.fetch_timeout = settings.index_fetch_timeout_seconds
-
-    def _run_cli(self, *args: str, timeout: int) -> str:
-        """Run Retroindexer's CLI without a shell; never include storage secrets in argv.
-
-        The CLI inherits AZUL_INDEX_* environment variables and the pod's
-        storage credentials. Capture only bounded output to avoid noisy logs.
-        """
         try:
-            result = subprocess.run(  # noqa: S603
-                [self.cli, *args],
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-            )
-        except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
-            # Avoid serialising the entire environment or CLI traceback: both
-            # could expose credentials in diagnostics.
-            logger.error("Retroindexer CLI command %s failed: %s", args[0], type(exc).__name__)
-            raise IndexUnavailable(f"Retroindexer CLI {args[0]} failed ({type(exc).__name__})") from exc
-        return result.stdout
+            self.prefix = index_prefix()
+            self.storage = storage if storage is not None else create_storage()
+        except IndexStorageError as exc:
+            raise IndexUnavailable(str(exc)) from exc
 
     def list_indexes(self) -> list[str]:
-        """Return unique immutable IDs; reject malformed or empty listings.
+        """Only expose full SHA-256 IDs with both .bgi and .ready objects."""
+        try:
+            start = time.monotonic()
+            available: set[str] = set()
+            ready: set[str] = set()
+            for key in self.storage.list_keys(self.prefix):
+                if time.monotonic() - start > self.list_timeout:
+                    raise IndexUnavailable("Timed out listing published indexes")
+                if not key.startswith(self.prefix):
+                    continue
+                name = key[len(self.prefix) :]
+                if name.endswith(".bgi") and INDEX_ID.fullmatch(name[:-4]):
+                    available.add(name[:-4])
+                elif name.endswith(".ready") and INDEX_ID.fullmatch(name[:-6]):
+                    ready.add(name[:-6])
+            ids = sorted(ready & available)
+            if not ids:
+                raise IndexUnavailable("No published BigGrep indexes found in object storage")
+            logger.info("Found %d published BigGrep indexes", len(ids))
+            return ids
+        except IndexUnavailable:
+            raise
+        except Exception as exc:
+            logger.error("Unable to list published indexes: %s", type(exc).__name__)
+            raise IndexUnavailable("Failed to list published BigGrep indexes") from exc
 
-        An empty listing must fail, rather than making a hunt appear to
-        succeed with zero matches while an index publisher is unavailable.
-        """
-        lines = self._run_cli("list", timeout=self.list_timeout).splitlines()
-        ids = sorted(set(line.strip() for line in lines if line.strip()))
-        if any(not INDEX_ID.fullmatch(index_id) for index_id in ids):
-            raise IndexUnavailable("Retroindexer CLI listed an invalid index ID")
-        if not ids:
-            raise IndexUnavailable("No published BigGrep indexes found in object storage")
-        logger.info("Found %d published BigGrep indexes", len(ids))
-        return ids
-
-    def fetch(self, index_id: str) -> Path:
-        """Ensure that a Retroindexer-verified index is locally available.
-
-        Always call the CLI, even on a local cache hit. Its Go implementation
-        uses a filesystem lock, validates the checksum and atomically replaces
-        incomplete downloads, so two workers never read a partially written
-        file. Only use the returned path after the subprocess succeeds.
-        """
+    def _download_into(self, index_id: str, destination: Path, size_limit: int) -> int:
+        """Download a single immutable index, enforcing the budget while streaming."""
         if not INDEX_ID.fullmatch(index_id):
             raise IndexUnavailable("Invalid BigGrep index identifier")
-        destination = self.cache_dir / f"{index_id}.bgi"
+        started = time.monotonic()
+        digest = hashlib.sha256()
+        written = 0
+        tmp_name = None
         with index_fetch_seconds.time():
             try:
-                self._run_cli(
-                    "fetch",
-                    "--id",
-                    index_id,
-                    "--output",
-                    str(destination),
-                    timeout=self.fetch_timeout,
-                )
-                if not destination.is_file() or destination.stat().st_size == 0:
-                    raise IndexUnavailable(f"Retroindexer CLI returned no local index for {index_id}")
+                with tempfile.NamedTemporaryFile(
+                    prefix=f".{index_id}.", suffix=".tmp", dir=destination.parent, delete=False
+                ) as tmp:
+                    tmp_name = tmp.name
+                    with self.storage.read_chunks(self.prefix + f"{index_id}.bgi") as chunks:
+                        for block in chunks:
+                            if time.monotonic() - started > self.fetch_timeout:
+                                raise IndexUnavailable(f"Timed out downloading index {index_id}")
+                            if not block:
+                                continue
+                            written += len(block)
+                            if written > size_limit:
+                                raise IndexUnavailable(f"Index {index_id} exceeds configured local index budget")
+                            tmp.write(block)
+                            digest.update(block)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                if digest.hexdigest() != index_id:
+                    raise IndexUnavailable(f"Published index checksum mismatch: {index_id}")
+                os.replace(tmp_name, destination)
+                tmp_name = None
                 index_fetch_count.labels("success").inc()
-            except Exception:
+                return written
+            except Exception as exc:
                 index_fetch_count.labels("failed").inc()
-                raise
-        return destination
+                if isinstance(exc, IndexUnavailable):
+                    raise
+                logger.error("Index fetch failed for %s: %s", index_id, type(exc).__name__)
+                raise IndexUnavailable(f"Failed to fetch published index {index_id}") from exc
+            finally:
+                if tmp_name is not None:
+                    Path(tmp_name).unlink(missing_ok=True)
 
-    def prepare(self) -> list[Path]:
-        """Fetch the complete listing with bounded concurrency, then search.
+    def iter_search_batches(self):
+        """Yield local index batches, never retaining more than the byte budget.
 
-        A hunt cannot proceed with a partial index set: that would silently
-        produce false negatives. The completion order is irrelevant; sorted
-        paths make search task ordering deterministic.
+        The cache lock serialises hunts sharing a volume. Each batch is kept
+        alive until its broad-phase search finishes, then removed before the
+        next batch is downloaded. No complete local copy is ever prepared.
         """
-        ids = self.list_indexes()
+        ids = self.list_indexes()  # Fixed published snapshot, not live listing per batch.
+        if self.max_cache_bytes <= 0:
+            raise IndexUnavailable("Index cache budget must be positive")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        paths = []
-        with ThreadPoolExecutor(max_workers=self.fetch_workers) as pool:
-            futures = {pool.submit(self.fetch, index_id): index_id for index_id in ids}
-            for future in as_completed(futures):
-                try:
-                    paths.append(future.result())
-                except Exception as exc:
-                    for remaining in futures:
-                        remaining.cancel()
-                    raise IndexUnavailable(f"Cannot prepare complete index snapshot: {futures[future]}") from exc
-        logger.info("Prepared %d BigGrep indexes from Retroindexer object storage", len(paths))
-        return sorted(paths)
-
-    @contextmanager
-    def search_snapshot(self):
-        """Expose *only* this hunt's published indexes to the search engine.
-
-        A shared cache may contain old objects from earlier hunts. BigGrep
-        searches every .bgi in a directory, so using the cache directory itself
-        would incorrectly include old or unpublished-for-this-hunt indexes.
-        Cheap per-hunt symlinks create a fixed search directory without
-        copying index bytes, and are removed after the hunt finishes.
-        """
-        paths = self.prepare()
-        # The snapshot directory lives alongside cache contents on the same
-        # filesystem; the temporary links point only to verified .bgi files.
-        with tempfile.TemporaryDirectory(prefix=".snapshot-", dir=self.cache_dir) as directory:
-            snapshot = Path(directory)
-            for path in paths:
-                (snapshot / path.name).symlink_to(path)
-            yield snapshot
+        lock_path = self.cache_dir / ".batch-search.lock"
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                # Previous crashes can leave temporary batches on an emptyDir.
+                # Remove them only while holding the same inter-hunt lock.
+                for orphan in self.cache_dir.glob(".hunt-batch-*"):
+                    if orphan.is_dir() and not orphan.is_symlink():
+                        shutil.rmtree(orphan)
+                # Old versions stored persistent .bgi objects directly in the
+                # cache. Refuse to exceed the budget invisibly; require an
+                # operator to review/remove those files instead.
+                if any(self.cache_dir.glob("*.bgi")):
+                    raise IndexUnavailable(
+                        "Legacy .bgi files found in index cache; clear them before using bounded batches"
+                    )
+                offset = 0
+                while offset < len(ids):
+                    with tempfile.TemporaryDirectory(prefix=".hunt-batch-", dir=self.cache_dir) as dirname:
+                        batch_dir = Path(dirname)
+                        batch_bytes = 0
+                        batch_count = 0
+                        for index_id in ids[offset:]:
+                            # Object metadata lets us decide *before* downloading
+                            # whether an index fits in the remaining budget.
+                            try:
+                                size = self.storage.object_size(self.prefix + f"{index_id}.bgi")
+                            except Exception as exc:
+                                raise IndexUnavailable(f"Cannot determine size for index {index_id}") from exc
+                            if size <= 0 or size > self.max_cache_bytes:
+                                raise IndexUnavailable(
+                                    f"Published index {index_id} ({size} bytes) cannot fit "
+                                    f"within index cache budget ({self.max_cache_bytes} bytes)"
+                                )
+                            if batch_count and batch_bytes + size > self.max_cache_bytes:
+                                break
+                            destination = batch_dir / f"{index_id}.bgi"
+                            actual_size = self._download_into(
+                                index_id, destination, self.max_cache_bytes - batch_bytes
+                            )
+                            if actual_size != size:
+                                raise IndexUnavailable(f"Published index changed size during download: {index_id}")
+                            batch_bytes += actual_size
+                            batch_count += 1
+                        if not batch_count:
+                            raise IndexUnavailable("Unable to make progress preparing index batches")
+                        offset += batch_count
+                        logger.info(
+                            "Searching index batch of %d files (%d bytes); %d/%d indexes completed",
+                            batch_count,
+                            batch_bytes,
+                            offset,
+                            len(ids),
+                        )
+                        yield batch_dir, offset - batch_count, batch_count, len(ids)
+                    # The batch is deleted here, after the caller has finished bgparse.
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)

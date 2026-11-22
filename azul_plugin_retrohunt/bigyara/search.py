@@ -304,6 +304,136 @@ def search(
     return rule_matches
 
 
+def search_batched(
+    query: str,
+    query_type: QueryTypeEnum | int,
+    provider,
+    data_callback: DataCallback = None,
+    progress_callback: ProgressCallback = None,
+    data_release_callback=None,
+) -> RuleFileMatches:
+    """Search cloud indexes with bounded local disk and one exact narrow phase.
+
+    Parse the query once, search each disjoint index batch, and union broad
+    candidates before YARA-X verification. Never report a partial hunt as
+    success: any missing/corrupt index aborts the entire search.
+    """
+    if not isinstance(query, str):
+        raise TypeError("query must be str.")
+    if query_type in {QueryTypeEnum.YARA, QueryTypeEnum.SURICATA} and data_callback is None:
+        raise ValueError("A data callback is required for YARA and Suricata searches.")
+
+    def progress(phase, done, total, item):
+        if progress_callback:
+            try:
+                progress_callback(phase, done, total, item)
+            except CancelException:
+                raise
+            except Exception as exc:
+                raise ProgressCallbackException("Exception in progress callback") from exc
+
+    def data(path, config):
+        if data_callback is None:
+            raise ValueError("Invalid data callback")
+        try:
+            return data_callback(path, config)
+        except CancelException:
+            raise
+        except Exception as exc:
+            raise DataCallbackException("Exception in data callback") from exc
+
+    def release_data(path, matched):
+        if data_release_callback:
+            try:
+                data_release_callback(path, matched)
+            except CancelException:
+                raise
+            except Exception as exc:
+                raise DataCallbackException("Exception in data release callback") from exc
+
+    query_hash = hashlib.sha256(query.encode()).hexdigest()
+    _, rule_content, rule_search_plans = _atom_parse(query, query_type, progress)
+    all_matches: RuleFileMatches = {}
+    all_config: FileConfig = {}
+    found_any = False
+    logger.info("Starting bounded-batch broad search")
+    with prom_broad_phase_duration.labels(query_hash=query_hash).time():
+        for batch_path, completed_before, batch_count, total_indices in provider.iter_search_batches():
+            if stop_event.is_set():
+                raise CancelException("Broadphase cancelled by user.")
+            indices = _get_index_files([str(batch_path)], recursive=False)
+            if len(indices) != batch_count:
+                raise BiggrepException("Index batch is missing verified files")
+
+            def batch_progress(
+                phase,
+                done,
+                total,
+                item,
+                *,
+                batch_count=batch_count,
+                completed_before=completed_before,
+                total_indices=total_indices,
+            ):
+                if phase == SearchPhaseEnum.BROAD_PHASE:
+                    # Preserve the original physical-task progress units. All
+                    # batches use the same plan, budgeted against the entire
+                    # index snapshot, so tasks-per-index is invariant.
+                    tasks_per_index = total // batch_count
+                    progress(
+                        phase,
+                        completed_before * tasks_per_index + done,
+                        total_indices * tasks_per_index,
+                        item,
+                    )
+                else:
+                    progress(phase, done, total, item)
+
+            try:
+                matches, config = _broad_phase_search(
+                    query_type,
+                    indices,
+                    rule_search_plans,
+                    batch_progress,
+                    query_hash=query_hash,
+                    global_index_count=total_indices,
+                )
+            except NoIndexMatchesException:
+                # This batch may be empty while another has candidates.
+                continue
+            found_any = True
+            for rule_name, paths in matches.items():
+                target = all_matches.setdefault(rule_name, [])
+                target.extend(paths)
+            for path, cfg in config.items():
+                all_config.setdefault(path, cfg)
+            del matches, config
+            release_unused_memory()
+    if not found_any:
+        raise NoIndexMatchesException("Search aborted due to no index matches.")
+
+    # Overlapping indexes may contain the same source paths. Deduplicate before
+    # narrow phase so the user sees each match only once.
+    for rule_name, paths in all_matches.items():
+        all_matches[rule_name] = list(dict.fromkeys(paths))
+    logger.info("Starting narrow search across all index batches")
+    release_unused_memory()
+    with prom_narrow_phase_duration.labels(query_hash=query_hash).time():
+        result = _narrow_phase_search(
+            query_type,
+            all_matches,
+            rule_content,
+            all_config,
+            data,
+            progress,
+            query_hash=query_hash,
+            data_release_callback=release_data,
+        )
+    all_config.clear()
+    release_unused_memory()
+    return result
+
+
 def _get_index_files(directories: list[str], recursive: bool) -> list[str]:
     """Return list of .bgi files found in directories."""
     # taking a copy so we can add subdirectories and remove directories as they are searched.
@@ -1740,6 +1870,7 @@ def _broad_phase_search(
     rule_search_plans: RuleSearchPlans,
     progress_callback: ProgressCallback,
     query_hash: str,
+    global_index_count: int | None = None,
 ) -> tuple[RuleFileMatches, FileConfig]:
     """Plan and execute the atom-index broad phase for all rules in a hunt.
 
@@ -1787,13 +1918,18 @@ def _broad_phase_search(
     broad_phase_workers = settings.max_required_broad_phase_workers
     max_broad_phase_tasks = settings.max_broad_phase_tasks
 
-    if len(indices) > max_broad_phase_tasks:
+    # Batch execution must NOT reset the global task safety budget. Plan
+    # against the full published snapshot, even though only a subset is local.
+    planned_index_count = global_index_count if global_index_count is not None else len(indices)
+    if not indices or planned_index_count < len(indices):
+        raise ValueError("Invalid BigGrep index count for broad-phase planning")
+    if planned_index_count > max_broad_phase_tasks:
         raise BiggrepException(
-            f"{len(indices)} indexes already exceed max_broad_phase_tasks="
+            f"{planned_index_count} indexes already exceed max_broad_phase_tasks="
             f"{max_broad_phase_tasks}; even one search per index is impossible."
         )
 
-    hard_searches_per_index = max_broad_phase_tasks // len(indices)
+    hard_searches_per_index = max_broad_phase_tasks // planned_index_count
     broad_plans: dict[str, dict] = {}
 
     for rule_name, plan in rule_search_plans.items():
@@ -1891,10 +2027,11 @@ def _broad_phase_search(
     searches_per_index = sum(rule_plan["searches_per_index"] for rule_plan in broad_plans.values())
     search_count = len(indices) * searches_per_index
 
-    if search_count > max_broad_phase_tasks:
+    global_search_count = planned_index_count * searches_per_index
+    if global_search_count > max_broad_phase_tasks:
         raise BiggrepException(
-            f"Broad-phase plan would generate {search_count} tasks across "
-            f"{len(indices)} indexes, exceeding max_broad_phase_tasks="
+            f"Broad-phase plan would generate {global_search_count} tasks across "
+            f"{planned_index_count} indexes, exceeding max_broad_phase_tasks="
             f"{max_broad_phase_tasks}. Reduce the number of rules or increase "
             "the task limit. The planner will not use an unsafe fallback."
         )
