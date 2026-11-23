@@ -45,7 +45,6 @@ runtime = [
 
 [project.scripts]
 azul-plugin-retroworker = "azul_plugin_retrohunt.worker:main"
-azul-plugin-retroserver = "azul_plugin_retrohunt.server:main"
 azul-plugin-retrocron = "azul_plugin_retrohunt.cron:main"
 
 # [project.entry-points."my_plugin_group"]
