@@ -110,4 +110,4 @@ FROM base AS release
 
 COPY --from=tester /tmp/testingpassed /tmp/
 
-ENTRYPOINT []
+ENTRYPOINT ["azul-plugin-retroworker"]
