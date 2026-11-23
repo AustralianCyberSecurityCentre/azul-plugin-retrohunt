@@ -71,7 +71,7 @@ class ObjectIndexProvider:
             logger.error("Unable to list published indexes: %s", type(exc).__name__)
             raise IndexUnavailable("Failed to list published BigGrep indexes") from exc
 
-    def _download_into(self, index_id: str, destination: Path, size_limit: int) -> int:
+    def _download_into(self, index_id: str, destination: Path, size_limit: int, progress_callback=None) -> int:
         """Download a single immutable index, enforcing the budget while streaming."""
         if not INDEX_ID.fullmatch(index_id):
             raise IndexUnavailable("Invalid BigGrep index identifier")
@@ -96,6 +96,8 @@ class ObjectIndexProvider:
                                 raise IndexUnavailable(f"Index {index_id} exceeds configured local index budget")
                             tmp.write(block)
                             digest.update(block)
+                            if progress_callback is not None:
+                                progress_callback(written)
                     tmp.flush()
                     os.fsync(tmp.fileno())
                 if digest.hexdigest() != index_id:
@@ -122,6 +124,27 @@ class ObjectIndexProvider:
         next batch is downloaded. No complete local copy is ever prepared.
         """
         ids = self.list_indexes()  # Fixed published snapshot, not live listing per batch.
+        # Downloads precede bgparse, so report their progress separately from
+        # broad-phase search TASK completion. Never claim an index was searched
+        # just because its bytes have arrived.
+        next_download_percent = 10
+        logger.info("Broad-phase index download starting: 0/%d indexes", len(ids))
+
+        def report_download(index_offset: int, received: int, expected: int) -> None:
+            nonlocal next_download_percent
+            # Index-weighted progress avoids a separate HEAD request for every
+            # object up front. The current index contributes a fractional vote.
+            fraction = min(received / expected, 1.0) if expected else 0.0
+            current_percent = int(100 * (index_offset + fraction) / len(ids))
+            while current_percent >= next_download_percent and next_download_percent <= 100:
+                logger.info(
+                    "Broad-phase index download %d%% complete: %d/%d full indexes downloaded",
+                    next_download_percent,
+                    index_offset,
+                    len(ids),
+                )
+                next_download_percent += 10
+
         if self.max_cache_bytes <= 0:
             raise IndexUnavailable("Index cache budget must be positive")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -163,12 +186,18 @@ class ObjectIndexProvider:
                                 break
                             destination = batch_dir / f"{index_id}.bgi"
                             actual_size = self._download_into(
-                                index_id, destination, self.max_cache_bytes - batch_bytes
+                                index_id,
+                                destination,
+                                self.max_cache_bytes - batch_bytes,
+                                progress_callback=lambda received, index_offset=offset + batch_count, expected=size: (
+                                    report_download(index_offset, received, expected)
+                                ),
                             )
                             if actual_size != size:
                                 raise IndexUnavailable(f"Published index changed size during download: {index_id}")
                             batch_bytes += actual_size
                             batch_count += 1
+                            report_download(offset + batch_count, 0, size)
                         if not batch_count:
                             raise IndexUnavailable("Unable to make progress preparing index batches")
                         offset += batch_count

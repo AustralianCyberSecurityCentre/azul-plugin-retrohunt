@@ -56,6 +56,10 @@ log_root_handler.setFormatter(
 )
 log_root.addHandler(log_root_handler)
 
+# The Azure Blob SDK logs every HTTP request, response, and chunk download at
+# INFO level. Keep warnings/errors without flooding Retrohunt worker logs.
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+
 MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max of 500kB of logs
 
 rs = RetrohuntService()
@@ -96,6 +100,7 @@ def capture_logs(level: int = logging.INFO) -> StringIO:
     tracked_loggers: list[logging.Logger] = [
         logging.getLogger("retrohunt.worker"),
         logging.getLogger("bigyara"),
+        logging.getLogger("retrohunt.index_provider"),
     ]
 
     for logger in tracked_loggers:
