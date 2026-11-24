@@ -13,7 +13,10 @@ import re
 import shutil
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 from prometheus_client import Counter, Histogram
 
@@ -24,6 +27,15 @@ logger = logging.getLogger("retrohunt.index_provider")
 INDEX_ID = re.compile(r"^[0-9a-f]{64}$")
 index_fetch_count = Counter("retrohunt_index_fetch_total", "Published index cache fetch attempts", ["status"])
 index_fetch_seconds = Histogram("retrohunt_index_fetch_seconds", "Seconds spent ensuring a local .bgi")
+
+
+@dataclass
+class PreparedBatch:
+    """Metadata for a downloaded batch of verified indexes."""
+
+    batch_dir: Path
+    batch_bytes: int
+    batch_count: int
 
 
 class IndexUnavailable(RuntimeError):
@@ -43,6 +55,98 @@ class ObjectIndexProvider:
             self.storage = storage if storage is not None else create_storage()
         except IndexStorageError as exc:
             raise IndexUnavailable(str(exc)) from exc
+
+    def _prepare_batch(
+        self,
+        ids: list[str],
+        offset: int,
+        report_download,
+    ) -> PreparedBatch:
+        """Download and verify a cache-bounded batch of indexes.
+
+        Downloads indexes in parallel, verifies integrity, and returns a
+        temporary batch directory ready for broad-phase searching. The caller
+        is responsible for deleting the batch directory after use.
+        """
+        batch_dir = Path(tempfile.mkdtemp(prefix=".hunt-batch-", dir=self.cache_dir))
+
+        logger.info(
+            "Preparing index batch starting at offset %d",
+            offset,
+        )
+
+        try:
+            batch_bytes = 0
+            batch_count = 0
+            downloads = []
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                prefetch_budget = self.max_cache_bytes // 2
+                for index_id in ids[offset:]:
+                    try:
+                        size = self.storage.object_size(self.prefix + f"{index_id}.bgi")
+                    except Exception as exc:
+                        raise IndexUnavailable(f"Cannot determine size for index {index_id}") from exc
+
+                    if size <= 0 or size > self.max_cache_bytes:
+                        raise IndexUnavailable(
+                            f"Published index {index_id} ({size} bytes) "
+                            f"cannot fit within index cache budget "
+                            f"({self.max_cache_bytes} bytes)"
+                        )
+
+                    if batch_count and batch_bytes + size > prefetch_budget:
+                        break
+
+                    destination = batch_dir / f"{index_id}.bgi"
+
+                    current_index_offset = offset + batch_count
+                    current_size = size
+
+                    future = executor.submit(
+                        self._download_into,
+                        index_id,
+                        destination,
+                        current_size,
+                        lambda received, index_offset=current_index_offset, expected=current_size: report_download(
+                            index_offset,
+                            received,
+                            expected,
+                        ),
+                    )
+                    downloads.append((future, index_id, size))
+
+                    batch_bytes += size
+                    batch_count += 1
+
+                if not batch_count:
+                    raise IndexUnavailable("Unable to make progress preparing index batches")
+
+                actual_bytes = 0
+
+                for future, index_id, expected_size in downloads:
+                    actual_size = future.result()
+
+                    if actual_size != expected_size:
+                        raise IndexUnavailable(f"Published index changed size during download: {index_id}")
+
+                    actual_bytes += actual_size
+
+                logger.info(
+                    "Prepared batch of %d indexes (%d bytes)",
+                    batch_count,
+                    actual_bytes,
+                )
+
+                return PreparedBatch(
+                    batch_dir=batch_dir,
+                    batch_bytes=actual_bytes,
+                    batch_count=batch_count,
+                )
+
+        except Exception:
+            shutil.rmtree(batch_dir, ignore_errors=True)
+            raise
 
     def list_indexes(self) -> list[str]:
         """Only expose full SHA-256 IDs with both .bgi and .ready objects."""
@@ -71,7 +175,13 @@ class ObjectIndexProvider:
             logger.error("Unable to list published indexes: %s", type(exc).__name__)
             raise IndexUnavailable("Failed to list published BigGrep indexes") from exc
 
-    def _download_into(self, index_id: str, destination: Path, size_limit: int, progress_callback=None) -> int:
+    def _download_into(
+        self,
+        index_id: str,
+        destination: Path,
+        expected_size: int,
+        progress_callback=None,
+    ) -> int:
         """Download a single immutable index, enforcing the budget while streaming."""
         if not INDEX_ID.fullmatch(index_id):
             raise IndexUnavailable("Invalid BigGrep index identifier")
@@ -92,8 +202,8 @@ class ObjectIndexProvider:
                             if not block:
                                 continue
                             written += len(block)
-                            if written > size_limit:
-                                raise IndexUnavailable(f"Index {index_id} exceeds configured local index budget")
+                            if written > expected_size:
+                                raise IndexUnavailable(f"Published index changed size during download: {index_id}")
                             tmp.write(block)
                             digest.update(block)
                             if progress_callback is not None:
@@ -128,22 +238,29 @@ class ObjectIndexProvider:
         # broad-phase search TASK completion. Never claim an index was searched
         # just because its bytes have arrived.
         next_download_percent = 10
+        download_progress_lock = Lock()
         logger.info("Broad-phase index download starting: 0/%d indexes", len(ids))
 
-        def report_download(index_offset: int, received: int, expected: int) -> None:
+        def report_download(
+            index_offset: int,
+            received: int,
+            expected: int,
+        ) -> None:
             nonlocal next_download_percent
-            # Index-weighted progress avoids a separate HEAD request for every
-            # object up front. The current index contributes a fractional vote.
+
             fraction = min(received / expected, 1.0) if expected else 0.0
+
             current_percent = int(100 * (index_offset + fraction) / len(ids))
-            while current_percent >= next_download_percent and next_download_percent <= 100:
-                logger.info(
-                    "Broad-phase index download %d%% complete: %d/%d full indexes downloaded",
-                    next_download_percent,
-                    index_offset,
-                    len(ids),
-                )
-                next_download_percent += 10
+
+            with download_progress_lock:
+                while current_percent >= next_download_percent and next_download_percent <= 100:
+                    logger.info(
+                        "Broad-phase index download %d%% complete: %d/%d full indexes downloaded",
+                        next_download_percent,
+                        index_offset,
+                        len(ids),
+                    )
+                    next_download_percent += 10
 
         if self.max_cache_bytes <= 0:
             raise IndexUnavailable("Index cache budget must be positive")
@@ -165,50 +282,50 @@ class ObjectIndexProvider:
                         "Legacy .bgi files found in index cache; clear them before using bounded batches"
                     )
                 offset = 0
-                while offset < len(ids):
-                    with tempfile.TemporaryDirectory(prefix=".hunt-batch-", dir=self.cache_dir) as dirname:
-                        batch_dir = Path(dirname)
-                        batch_bytes = 0
-                        batch_count = 0
-                        for index_id in ids[offset:]:
-                            # Object metadata lets us decide *before* downloading
-                            # whether an index fits in the remaining budget.
-                            try:
-                                size = self.storage.object_size(self.prefix + f"{index_id}.bgi")
-                            except Exception as exc:
-                                raise IndexUnavailable(f"Cannot determine size for index {index_id}") from exc
-                            if size <= 0 or size > self.max_cache_bytes:
-                                raise IndexUnavailable(
-                                    f"Published index {index_id} ({size} bytes) cannot fit "
-                                    f"within index cache budget ({self.max_cache_bytes} bytes)"
-                                )
-                            if batch_count and batch_bytes + size > self.max_cache_bytes:
-                                break
-                            destination = batch_dir / f"{index_id}.bgi"
-                            actual_size = self._download_into(
-                                index_id,
-                                destination,
-                                self.max_cache_bytes - batch_bytes,
-                                progress_callback=lambda received, index_offset=offset + batch_count, expected=size: (
-                                    report_download(index_offset, received, expected)
-                                ),
+
+                with ThreadPoolExecutor(max_workers=1) as prefetch_pool:
+                    next_batch_future = prefetch_pool.submit(
+                        self._prepare_batch,
+                        ids,
+                        offset,
+                        report_download,
+                    )
+
+                    while next_batch_future is not None:
+                        batch = next_batch_future.result()
+
+                        batch_offset = offset
+                        offset += batch.batch_count
+
+                        if offset < len(ids):
+                            next_batch_future = prefetch_pool.submit(
+                                self._prepare_batch,
+                                ids,
+                                offset,
+                                report_download,
                             )
-                            if actual_size != size:
-                                raise IndexUnavailable(f"Published index changed size during download: {index_id}")
-                            batch_bytes += actual_size
-                            batch_count += 1
-                            report_download(offset + batch_count, 0, size)
-                        if not batch_count:
-                            raise IndexUnavailable("Unable to make progress preparing index batches")
-                        offset += batch_count
+                        else:
+                            next_batch_future = None
+
                         logger.info(
                             "Searching index batch of %d files (%d bytes); %d/%d indexes completed",
-                            batch_count,
-                            batch_bytes,
+                            batch.batch_count,
+                            batch.batch_bytes,
                             offset,
                             len(ids),
                         )
-                        yield batch_dir, offset - batch_count, batch_count, len(ids)
-                    # The batch is deleted here, after the caller has finished bgparse.
+
+                        try:
+                            yield (
+                                batch.batch_dir,
+                                batch_offset,
+                                batch.batch_count,
+                                len(ids),
+                            )
+                        finally:
+                            shutil.rmtree(
+                                batch.batch_dir,
+                                ignore_errors=True,
+                            )
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
