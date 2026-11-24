@@ -11,10 +11,10 @@ WATCH from all shard snapshots. Redis remains the only coordination service.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import shutil
+import fcntl
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
@@ -30,6 +30,15 @@ from azul_plugin_retrohunt.retrohunt import CancelException
 
 logger = logging.getLogger("retrohunt.distributed")
 MATCH_LIMIT = 200
+# Keep public hunt logs bounded, even with many parallel shards. The full
+# logs remain in the Kubernetes pod logs for detailed investigation.
+SHARD_LOG_TAIL_CHARS = 4000
+PUBLIC_LOG_MAX_CHARS = 64000
+LOGGED_SHARD_MODULES = (
+    "retrohunt.worker",
+    "bigyara",
+    "retrohunt.index_provider",
+)
 
 
 class AssignedIndexProvider(ObjectIndexProvider):
@@ -84,6 +93,19 @@ def _load(raw):
 def _identity(rule, value):
     """Retain distinct source/label identities for the same SHA-256."""
     return (rule, value.get("sha256") or value.get("sample"), value.get("stream_source"), value.get("stream_label"))
+
+
+def _public_result(value):
+    """Expose the exact match shape used by the original single-worker hunts.
+
+    The shard keeps ``sha256`` privately for reliable deduplication across
+    batches, but the public RetrohuntEvent result schema is unchanged.
+    """
+    return {
+        "stream_label": value["stream_label"],
+        "stream_source": value["stream_source"],
+        "sample": value["sample"],
+    }
 
 
 def partition_indexes(sized_indexes, requested):
@@ -164,28 +186,14 @@ def enqueue_hunt(redis_client, hunt_id, message_id, settings, service):
             initial = min(len(shards), settings.hunt_max_parallel_shards)
             pipe.set(_key(hunt_id, "next_shard"), initial)
             for number, shard in enumerate(shards):
-                pipe.set(
-                    _key(hunt_id, f"shard:{number}"),
-                    json.dumps(
-                        {
-                            "status": "pending",
-                            "index_count": len(shard["ids"]),
-                            "index_bytes": shard["bytes"],
-                            "progress": {},
-                            "results": {},
-                            "error": "",
-                        }
-                    ),
-                )
+                pipe.set(_key(hunt_id, f"shard:{number}"), json.dumps({
+                    "status": "pending", "index_count": len(shard["ids"]),
+                    "index_bytes": shard["bytes"], "progress": {}, "results": {}, "error": "",
+                }))
                 if number < initial:
-                    pipe.xadd(
-                        service.RETROHUNT_JOB,
-                        {
-                            "hunt_id": hunt_id,
-                            "action": "Shard",
-                            "shard": str(number),
-                        },
-                    )
+                    pipe.xadd(service.RETROHUNT_JOB, {
+                        "hunt_id": hunt_id, "action": "Shard", "shard": str(number),
+                    })
             pipe.xack(service.RETROHUNT_JOB, service.RETROHUNT_GROUP, message_id)
             pipe.execute()
         logger.info("Hunt %s split into %d shards over %d indexes", hunt_id, len(shards), len(ids))
@@ -200,9 +208,7 @@ def enqueue_hunt(redis_client, hunt_id, message_id, settings, service):
         # Do not accidentally remove a new owner's lock after TTL expiry.
         redis_client.eval(
             "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0",
-            1,
-            init_key,
-            init_token,
+            1, init_key, init_token,
         )
 
 
@@ -222,15 +228,9 @@ def _schedule_next(redis_client, hunt_id, shard_id, manifest, service):
     return 1
     """
     return redis_client.eval(
-        script,
-        4,
-        _key(hunt_id, "scheduled_after"),
-        _key(hunt_id, "next_shard"),
-        _key(hunt_id, "cancel"),
-        service.RETROHUNT_JOB,
-        str(shard_id),
-        len(manifest["shards"]),
-        hunt_id,
+        script, 4, _key(hunt_id, 'scheduled_after'), _key(hunt_id, 'next_shard'),
+        _key(hunt_id, 'cancel'), service.RETROHUNT_JOB,
+        str(shard_id), len(manifest['shards']), hunt_id,
     )
 
 
@@ -277,21 +277,27 @@ def _aggregate(redis_client, hunt_id):
                                 continue
                             seen.add(signature)
                             if len(seen) <= MATCH_LIMIT:
-                                merged.setdefault(rule, []).append(result)
+                                merged.setdefault(rule, []).append(_public_result(result))
                 event.entity.results = merged
                 event.entity.tool_match_count = min(len(seen), MATCH_LIMIT)
                 event.entity.updated = pendulum.now()
-                message = f"Distributed hunt: {len(statuses)} shards across {manifest['index_count']} indexes"
-                event.entity.logs = (
-                    message
-                    + "\n"
-                    + "\n".join(
-                        f"Shard {i + 1}: {state['status']} ({state.get('index_count', 0)} indexes)"
-                        + (f" — {state['error'][:160]}" if state.get("error") else "")
-                        for i, state in enumerate(statuses)
-                    )
-                    + "\n"
+                message = (
+                    f"Distributed hunt: {len(statuses)} shards across "
+                    f"{manifest['index_count']} indexes"
                 )
+                summary = "\n".join(
+                    f"Shard {i + 1}: {state['status']} ({state.get('index_count', 0)} indexes)"
+                    + (f" — {state['error'][:160]}" if state.get("error") else "")
+                    for i, state in enumerate(statuses)
+                )
+                # Worker process stdout is not automatically part of the hunt
+                # event. Include a bounded tail of each shard's captured logs.
+                details = "\n".join(
+                    f"\n--- Shard {i + 1} ({state['status']}) ---\n{state['logs']}"
+                    for i, state in enumerate(statuses)
+                    if state.get("logs")
+                )
+                event.entity.logs = (message + "\n" + summary + "\n" + details)[-PUBLIC_LOG_MAX_CHARS:]
                 stop_reason = None
                 if failed:
                     event.entity.status = azm.HuntState.FAILED
@@ -317,6 +323,11 @@ def _aggregate(redis_client, hunt_id):
                 if not event.entity.processing_start:
                     event.entity.processing_start = pendulum.now()
                 event.timestamp = pendulum.now()
+                # Match the original worker's public duration field.
+                event.entity.duration = (
+                    pendulum.instance(event.timestamp)
+                    - pendulum.instance(event.entity.processing_start)
+                ).total_seconds()
                 pipe.multi()
                 pipe.set(hunt_id, event.model_dump_json())
                 if stop_reason:
@@ -394,30 +405,16 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
     interval = max(1, min(settings.hunt_shard_lease_seconds // 4, settings.redis.ttl // 3, 10))
     heart = threading.Thread(
         target=_heartbeat,
-        args=(
-            redis_client,
-            lease_key,
-            token,
-            stream,
-            group,
-            worker_id,
-            msg_id,
-            stop,
-            interval,
-            settings.hunt_shard_lease_seconds,
-        ),
+        args=(redis_client, lease_key, token, stream, group, worker_id, msg_id, stop, interval,
+              settings.hunt_shard_lease_seconds),
         daemon=True,
     )
     heart.start()
     try:
         attempt = redis_client.incr(_key(hunt_id, f"attempts:{shard_id}"))
         state = {
-            "status": "starting",
-            "index_count": len(manifest["shards"][shard_id]["ids"]),
-            "progress": {},
-            "results": {},
-            "error": "",
-            "attempt": attempt,
+            "status": "starting", "index_count": len(manifest["shards"][shard_id]["ids"]),
+            "progress": {}, "results": {}, "error": "", "attempt": attempt,
         }
         if attempt > settings.hunt_shard_max_retries:
             state.update(
@@ -437,54 +434,53 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
         shard_job.entity.results = {}
         shard_job.entity.tool_match_count = 0
         for field in (
-            "atom_count",
-            "rules_parsed_total",
-            "rules_parsed_done",
-            "index_searches_total",
-            "index_searches_done",
-            "index_match_count",
-            "tool_matches_total",
-            "tool_matches_done",
+            "atom_count", "rules_parsed_total", "rules_parsed_done", "index_searches_total",
+            "index_searches_done", "index_match_count", "tool_matches_total", "tool_matches_done",
         ):
             setattr(shard_job.entity, field, 0)
         provider = AssignedIndexProvider(settings, manifest["shards"][shard_id]["ids"])
         logs = StringIO()
+        shard_log_handler = logging.StreamHandler(logs)
+        shard_log_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s", "%d/%m/%Y %H:%M:%S")
+        )
+        shard_loggers = [logging.getLogger(name) for name in LOGGED_SHARD_MODULES]
 
         def writer(job, _logs):
             if redis_client.get(_key(hunt_id, "cancel")):
                 raise CancelException("Distributed hunt cancelled")
             state["status"] = (
-                "narrow"
-                if job.entity.status == azm.HuntState.SEARCHING_NARROW
-                else "broad"
-                if job.entity.status == azm.HuntState.SEARCHING_WIDE
+                "narrow" if job.entity.status == azm.HuntState.SEARCHING_NARROW
+                else "broad" if job.entity.status == azm.HuntState.SEARCHING_WIDE
                 else "starting"
             )
             state["progress"] = {
                 key: getattr(job.entity, key, 0) or 0
                 for key in (
-                    "atom_count",
-                    "rules_parsed_total",
-                    "rules_parsed_done",
-                    "index_searches_total",
-                    "index_searches_done",
-                    "index_match_count",
-                    "tool_matches_total",
-                    "tool_matches_done",
+                    "atom_count", "rules_parsed_total", "rules_parsed_done", "index_searches_total",
+                    "index_searches_done", "index_match_count", "tool_matches_total", "tool_matches_done",
                 )
             }
             state["results"] = job.entity.results or {}
+            state["logs"] = logs.getvalue()[-SHARD_LOG_TAIL_CHARS:]
             _write_shard(redis_client, hunt_id, shard_id, token, state)
 
         logger.info(
             "Worker %s executing hunt %s shard %d/%d (%d indexes)",
-            worker_id,
-            hunt_id,
-            shard_id + 1,
-            len(manifest["shards"]),
+            worker_id, hunt_id, shard_id + 1, len(manifest["shards"]),
             len(manifest["shards"][shard_id]["ids"]),
         )
-        execute(shard_job, logs, provider, writer)
+        # capture_logs() in worker.py uses a process-wide stream. Capture
+        # this shard separately so the coordinator can expose its logs in UI.
+        for shard_logger in shard_loggers:
+            shard_logger.addHandler(shard_log_handler)
+        try:
+            execute(shard_job, logs, provider, writer)
+        finally:
+            for shard_logger in shard_loggers:
+                shard_logger.removeHandler(shard_log_handler)
+            shard_log_handler.flush()
+        state["logs"] = logs.getvalue()[-SHARD_LOG_TAIL_CHARS:]
         # hunt() captures ordinary exceptions as FAILED in its final local event.
         if shard_job.entity.status == azm.HuntState.FAILED:
             state["error"] = shard_job.entity.error or "Shard search failed"
@@ -516,7 +512,5 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
         heart.join(timeout=2)
         redis_client.eval(
             "if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('DEL',KEYS[1]) end return 0",
-            1,
-            lease_key,
-            token,
+            1, lease_key, token,
         )
