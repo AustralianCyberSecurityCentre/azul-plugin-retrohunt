@@ -17,6 +17,7 @@ from prometheus_client import Counter, Summary, start_http_server
 from redis.exceptions import ResponseError, WatchError
 
 from azul_plugin_retrohunt.bigyara.search import (
+    NoIndexMatchesException,
     QueryTypeEnum,
     SearchPhaseEnum,
     clear_stop_event,
@@ -171,12 +172,20 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
     return job
 
 
-def hunt(job: azm.RetrohuntEvent, logs: StringIO):
+def hunt(job: azm.RetrohuntEvent, logs: StringIO, *, provider=None, progress_writer=None):
     """Execute the given retrohunt."""
     match_metadata: MatchMetadata = {}
+
+    def save_progress(current_job, current_logs):
+        if progress_writer is not None:
+            progress_writer(current_job, current_logs)
+            return current_job
+        return _update_progress(current_job, current_logs)
+
     last_update: float | None = None
     last_cancel_check = 0.0
     cancel_check_lock = threading.Lock()
+    progress_lock = threading.RLock()
 
     def periodic_check_is_cancelled(force: bool = False) -> None:
         """Throttle Redis cancellation checks across narrow-phase threads."""
@@ -199,7 +208,7 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
         logs.truncate(0)
         logs.seek(0)
 
-    def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
+    def update_job_unlocked(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job, last_update
         periodic_check_is_cancelled()
 
@@ -231,6 +240,7 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
                     "stream_label": metadata[b"stream_label"].decode(),
                     "stream_source": metadata[b"stream_source"].decode(),
                     "sample": sample.decode() if sample is not None else match_path.rsplit("/", 1)[-1],
+                    **({"sha256": match_path.rsplit("/", 1)[-1]} if progress_writer is not None else {}),
                 }
 
                 job.entity.results.setdefault(new_match[0], []).append(match_result_dict)
@@ -239,7 +249,7 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
                 # reached. Setting the shared event before raising ensures
                 # in-flight narrow workers abort and release their file buffers
                 # instead of continuing to scan the remainder of the batch.
-                if job.entity.tool_match_count >= MATCH_LIMIT:
+                if progress_writer is None and job.entity.tool_match_count >= MATCH_LIMIT:
                     job.entity.status = azm.HuntState.CANCELLED
                     trigger_stop_event()
                     raise Exception(
@@ -250,8 +260,13 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
         now = monotonic()
         if last_update is None or now - last_update >= 1.0:
             job.action = azm.RetrohuntEvent.RetrohuntAction.Running
-            job = _update_progress(job, logs)
+            job = save_progress(job, logs)
             last_update = now
+
+    def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
+        # Callbacks can run concurrently from narrow-phase threads.
+        with progress_lock:
+            update_job_unlocked(phase, done, total, new_match)
 
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
         periodic_check_is_cancelled()
@@ -308,7 +323,7 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
         job.entity.status = azm.HuntState.STARTING
         job.action = azm.RetrohuntEvent.RetrohuntAction.Starting
         job.entity.results = {}
-        job = _update_progress(job, logs)
+        job = save_progress(job, logs)
         search_type_str = job.entity.search_type
         search_query: str = job.entity.search
 
@@ -334,7 +349,7 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
         search_batched(
             search_query,
             search_enum_type,
-            ObjectIndexProvider(RetrohuntSettings()),
+            provider if provider is not None else ObjectIndexProvider(RetrohuntSettings()),
             get_data_from_azul,
             update_job,
             data_release_callback=release_data_from_azul,
@@ -343,12 +358,19 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
         periodic_check_is_cancelled(force=True)
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
-        prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
+        if progress_writer is None:
+            prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
         logger.debug(job.entity)
+    except NoIndexMatchesException:
+        if progress_writer is None:
+            raise
+        logger.info("Shard has no broad-phase candidates; completed successfully")
+        job.entity.status = azm.HuntState.COMPLETED
     except CancelException as ex:
         trigger_stop_event()
         job.entity.status = azm.HuntState.CANCELLED
-        prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
+        if progress_writer is None:
+            prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
         logger.info("Hunt cancelled: %s", ex)
         raise
     except Exception as ex:
@@ -356,17 +378,19 @@ def hunt(job: azm.RetrohuntEvent, logs: StringIO):
         if ex.__cause__:
             exception_str += f": {str(repr(ex.__cause__))}"
         if job.entity.status == azm.HuntState.CANCELLED:
-            prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
+            if progress_writer is None:
+                prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
             logger.warning(f"Job cancelled: {exception_str}")
         else:
             logger.warning(f"Job failed: {exception_str}")
-            prom_jobs_run.labels(azm.HuntState.FAILED.name).inc()
+            if progress_writer is None:
+                prom_jobs_run.labels(azm.HuntState.FAILED.name).inc()
             job.entity.status = azm.HuntState.FAILED
             job.entity.error = exception_str
     finally:
         try:
             job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
-            job = _update_progress(job, logs)
+            job = save_progress(job, logs)
         finally:
             # Cleanup must not depend on the final Redis progress write
             # succeeding.
@@ -414,6 +438,8 @@ def main():
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
+    from azul_plugin_retrohunt import distributed
+
     MAX_HUNT_RETRIES = settings.search_settings.max_retries
     LOCK_TTL = settings.redis.ttl
     exception_sleep = settings.redis.exception_wait
@@ -496,6 +522,26 @@ def main():
 
                 _, msgs = events[0]
                 msg_id, payload = msgs[0]
+
+            # A single stream carries both new hunts and shard tasks, allowing
+            # idle workers to share one hunt without starving other queued hunts.
+            if payload.get(b"action") == b"Shard":
+                distributed.run_shard(
+                    rs.redis,
+                    payload,
+                    msg_id,
+                    worker_id,
+                    settings,
+                    rs,
+                    lambda shard_job, shard_logs, provider, writer: hunt(
+                        shard_job, shard_logs, provider=provider, progress_writer=writer
+                    ),
+                )
+                continue
+
+            if settings.distributed_hunts:
+                distributed.enqueue_hunt(rs.redis, payload[b"hunt_id"].decode(), msg_id, settings, rs)
+                continue
 
             # Load the full event from Redis
             event_json = rs.redis.get(payload[b"hunt_id"])

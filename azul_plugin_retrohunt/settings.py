@@ -60,6 +60,13 @@ class RetrohuntSettings(BaseSettings):
     index_list_timeout_seconds: int = Field(120, ge=1)
     index_fetch_timeout_seconds: int = Field(1800, ge=1)
 
+    # Opt-in distributed hunts. Only enable after all worker pods run the same version.
+    distributed_hunts: bool = False
+    hunt_shards: int = Field(4, ge=1, le=128)
+    hunt_max_parallel_shards: int = Field(4, ge=1, le=128)
+    hunt_shard_lease_seconds: int = Field(180, ge=30)
+    hunt_shard_max_retries: int = Field(3, ge=1, le=20)
+
     # NOTE - these settings are identical to the value taken from azul_runner's settings to
     # allow for easier config.
     # dispatcher to use for event interaction

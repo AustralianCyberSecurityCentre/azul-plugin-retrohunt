@@ -167,8 +167,12 @@ class RetrohuntService:
                 raise
 
         event_dict = event.model_dump()
-        self.redis.set(retrohunt_id, json.dumps(event_dict))
-        self.redis.xadd(self.RETROHUNT_JOB, {"hunt_id": retrohunt_id, "action": "Submitted"})
+        with self.redis.pipeline(transaction=True) as pipe:
+            pipe.set(retrohunt_id, json.dumps(event_dict))
+            if submission.shards is not None:
+                pipe.set(f"retrohunt:{retrohunt_id}:requested_shards", submission.shards)
+            pipe.xadd(self.RETROHUNT_JOB, {"hunt_id": retrohunt_id, "action": "Submitted"})
+            pipe.execute()
 
         return retrohunt_id
 
@@ -214,7 +218,10 @@ class RetrohuntService:
         event.source.timestamp = now
 
         # Save updated event back to Redis
-        self.redis.set(hunt_id, event.model_dump_json())
+        with self.redis.pipeline(transaction=True) as pipe:
+            pipe.set(hunt_id, event.model_dump_json())
+            pipe.set(f"retrohunt:{hunt_id}:cancel", "user")
+            pipe.execute()
 
         return entity
 
@@ -223,6 +230,14 @@ class RetrohuntService:
         # Delete the hunt record and lock
         self.redis.delete(hunt_id)
         self.redis.delete(f"retrohunt:{hunt_id}:lock")
+        # Distributed state is namespaced per hunt; remove it when deleting the hunt.
+        cursor = 0
+        while True:
+            cursor, keys = self.redis.scan(cursor=cursor, match=f"retrohunt:{hunt_id}:*", count=100)
+            if keys:
+                self.redis.delete(*keys)
+            if cursor == 0:
+                break
 
         stream = "retrohunt-jobs"
 
@@ -287,13 +302,13 @@ class RetrohuntService:
                 # Delete if older than 30 days
                 if submitted < cutoff_30d:
                     logger.info(f"Ageing off {key_str}")
-                    self.redis.delete(key_str)
+                    self.delete_hunt(key_str)
                     continue
 
                 # Delete if older than 3 days AND not completed
                 if submitted < cutoff_3d and status != azm.RetrohuntEvent.RetrohuntAction.Completed:
                     logger.info(f"Ageing off incomplete entry {key_str}")
-                    self.redis.delete(key_str)
+                    self.delete_hunt(key_str)
                     continue
 
             if cursor == 0:
