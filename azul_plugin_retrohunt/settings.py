@@ -54,18 +54,23 @@ class RetrohuntSettings(BaseSettings):
     search_settings: SearchSettings = Field(default_factory=lambda: RetrohuntSettings.SearchSettings())
     # The index files are exclusively produced by the external Retroindexer.
     # Retrohunt never writes to the object store or creates BigGrep indexes.
-    index_cache_dir: str = "/tmp/retrohunt-index-cache"  # noqa: S108
+    index_cache_dir: str = "/data/index-cache"
     index_fetch_workers: int = Field(4, ge=1, le=16)
-    index_cache_max_bytes: int = Field(10 * 1024**3, ge=1)
+    index_cache_max_bytes: int = Field(90 * 1024**3, ge=1)
+    index_cache_target_bytes: int = Field(80 * 1024**3, ge=1)
+    index_cache_free_bytes: int = Field(10 * 1024**3, ge=0)
     index_list_timeout_seconds: int = Field(120, ge=1)
     index_fetch_timeout_seconds: int = Field(1800, ge=1)
 
     # Opt-in distributed hunts. Only enable after all worker pods run the same version.
     distributed_hunts: bool = False
-    hunt_shards: int = Field(4, ge=1, le=128)
-    hunt_max_parallel_shards: int = Field(4, ge=1, le=128)
+    hunt_shards: int = Field(32, ge=1, le=128)
+    hunt_max_parallel_shards: int = Field(32, ge=1, le=128)
     hunt_shard_lease_seconds: int = Field(180, ge=30)
     hunt_shard_max_retries: int = Field(3, ge=1, le=20)
+    # Set identically for all workers sharing a scheduling pool.
+    hunt_worker_count: int = Field(1, ge=1)
+    hunt_worker_pool: str = "default"
 
     # NOTE - these settings are identical to the value taken from azul_runner's settings to
     # allow for easier config.

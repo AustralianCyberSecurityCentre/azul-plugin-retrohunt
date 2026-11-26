@@ -36,6 +36,144 @@ PROGRESS_UPDATE_INTERVAL_SECONDS = 1.0
 BAR_WIDTH = 16
 
 
+def worker_quotas(worker_count: int, hunts: list[str]) -> dict[str, int]:
+    """Give each waiting hunt two slots where possible; older hunts get the surplus.
+
+    With one worker, the minimum becomes one. With three workers, two
+    hunts receive 2/1 and a third waits. Rebalance only between shards.
+    """
+    remaining = worker_count
+    minimum = min(2, worker_count)
+    quotas = {hunt: 0 for hunt in hunts}
+    for hunt in hunts:
+        if remaining == 0:
+            break
+        allotted = min(minimum, remaining)
+        quotas[hunt] = allotted
+        remaining -= allotted
+    if remaining and hunts:
+        quotas[hunts[0]] += remaining
+    return quotas
+
+
+def _pool_keys(settings):
+    pool = settings.hunt_worker_pool
+    if not pool or any(
+        char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in pool
+    ):
+        raise ValueError("PLUGIN_HUNT_WORKER_POOL must contain only letters, digits, '-' or '_'")
+    return f"retrohunt:pool:{pool}:hunts", f"retrohunt:pool:{pool}:slots"
+
+
+def _reserve_worker(redis_client, hunt_id, token, settings):
+    """Atomically enforce job quotas using expiring Redis reservations."""
+    active, slots = _pool_keys(settings)
+    lua = """
+    redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[1])
+    local hunts = redis.call('ZRANGE', KEYS[1], 0, -1)
+    for _, hunt in ipairs(hunts) do
+      if redis.call('EXISTS', hunt) == 0 or redis.call('EXISTS', 'retrohunt:' .. hunt .. ':cancel') == 1 then
+        redis.call('ZREM', KEYS[1], hunt)
+      end
+    end
+    hunts = redis.call('ZRANGE', KEYS[1], 0, -1)
+    local count = tonumber(ARGV[2])
+    local baseline = math.min(2, count)
+    local remaining = count
+    local allowed = 0
+    for _, hunt in ipairs(hunts) do
+      local q = math.min(baseline, remaining)
+      remaining = remaining - q
+      if hunt == ARGV[3] then allowed = q end
+    end
+    if #hunts > 0 and hunts[1] == ARGV[3] then allowed = allowed + remaining end
+    if allowed == 0 then return 0 end
+    local current = 0
+    for _, item in ipairs(redis.call('ZRANGE', KEYS[2], 0, -1)) do
+      if string.sub(item, 1, string.len(ARGV[3]) + 1) == ARGV[3] .. ':' then
+        current = current + 1
+      end
+    end
+    if current >= allowed or redis.call('ZCARD', KEYS[2]) >= count then return 0 end
+    redis.call('ZADD', KEYS[2], ARGV[4], ARGV[3] .. ':' .. ARGV[5])
+    return 1
+    """
+    now = time()
+    return bool(
+        redis_client.eval(
+            lua,
+            2,
+            active,
+            slots,
+            now,
+            settings.hunt_worker_count,
+            hunt_id,
+            now + settings.hunt_shard_lease_seconds,
+            token,
+        )
+    )
+
+
+def _release_worker(redis_client, hunt_id, token, settings):
+    _, slots = _pool_keys(settings)
+    redis_client.zrem(slots, f"{hunt_id}:{token}")
+
+
+def _defer_shard(redis_client, hunt_id, shard_id, msg_id, settings, service):
+    """ACK an over-quota stream item only after saving its durable queue entry."""
+    queue = f"retrohunt:pool:{settings.hunt_worker_pool}:waiting"
+    with redis_client.pipeline(transaction=True) as pipe:
+        pipe.zadd(queue, {f"{hunt_id}:{shard_id}": time()}, nx=True)
+        pipe.xack(service.RETROHUNT_JOB, service.RETROHUNT_GROUP, msg_id)
+        pipe.execute()
+
+
+def pump_waiting(redis_client, settings, service):
+    """Reissue one deferred shard when a worker looks for more work.
+
+    If admission is still unavailable the consumer safely defers it again.
+    No executing shard is interrupted or forcibly reassigned.
+    """
+    queue = f"retrohunt:pool:{settings.hunt_worker_pool}:waiting"
+    active, slots = _pool_keys(settings)
+    lua = """
+    redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', ARGV[1])
+    local hunts = redis.call('ZRANGE', KEYS[3], 0, -1)
+    local capacity = tonumber(ARGV[2])
+    local baseline = math.min(2, capacity)
+    local quotas, remaining = {}, capacity
+    for _, hunt in ipairs(hunts) do
+      local allocation = math.min(baseline, remaining)
+      quotas[hunt] = allocation
+      remaining = remaining - allocation
+    end
+    if #hunts > 0 then quotas[hunts[1]] = quotas[hunts[1]] + remaining end
+    if redis.call('ZCARD', KEYS[4]) >= capacity then return 0 end
+    for _, item in ipairs(redis.call('ZRANGE', KEYS[1], 0, -1)) do
+      local hunt, shard = string.match(item, '^([^:]+):([0-9]+)$')
+      if not hunt or not quotas[hunt] or redis.call('EXISTS', hunt) == 0 or
+         redis.call('EXISTS', 'retrohunt:' .. hunt .. ':cancel') == 1 then
+        redis.call('ZREM', KEYS[1], item)
+      else
+        local in_use = 0
+        for _, slot in ipairs(redis.call('ZRANGE', KEYS[4], 0, -1)) do
+          if string.sub(slot, 1, string.len(hunt) + 1) == hunt .. ':' then
+            in_use = in_use + 1
+          end
+        end
+        if in_use < quotas[hunt] then
+          redis.call('ZREM', KEYS[1], item)
+          redis.call('XADD', KEYS[2], '*', 'hunt_id', hunt,
+                     'action', 'Shard', 'shard', shard)
+          return 1
+        end
+      end
+    end
+    return 0
+    """
+    redis_client.eval(lua, 4, queue, service.RETROHUNT_JOB, active, slots, time(), settings.hunt_worker_count)
+
+
 def _progress_bar(done, total):
     """Render a bounded progress bar; an unknown total is not 100%."""
     if not isinstance(total, (int, float)) or total <= 0:
@@ -104,7 +242,7 @@ class AssignedIndexProvider(ObjectIndexProvider):
         return list(self._assigned_index_ids)
 
     def iter_search_batches(self):
-        """Download only assigned IDs, bounded even for an oversized single file.
+        """Use retained local indexes for only the IDs assigned to this shard.
 
         Per-shard downloads retain parallel fetching and SHA verification. We do
         not prefetch a second batch because a single file may exceed half the
@@ -115,6 +253,13 @@ class AssignedIndexProvider(ObjectIndexProvider):
         with lock_path.open("a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
+                # Clean up interrupted searches while the PVC lock is held.
+                for partial in self.cache_dir.glob(".*.tmp"):
+                    if partial.is_file():
+                        partial.unlink()
+                for orphan in self.cache_dir.glob(".hunt-batch-*"):
+                    if orphan.is_dir() and not orphan.is_symlink():
+                        shutil.rmtree(orphan)
                 ids = self.list_indexes()
                 offset = 0
                 while offset < len(ids):
@@ -242,6 +387,10 @@ def enqueue_hunt(redis_client, hunt_id, message_id, settings, service):
             )
             current.entity.updated = started_at
             pipe.multi()
+            # Registration and shard publication must be atomic.
+            active, _ = _pool_keys(settings)
+            pipe.zadd(active, {hunt_id: time()}, nx=True)
+            pipe.set(_key(hunt_id, "pool"), settings.hunt_worker_pool)
             pipe.set(_key(hunt_id, "manifest"), json.dumps(manifest))
             pipe.set(hunt_id, current.model_dump_json())
             initial = min(len(shards), settings.hunt_max_parallel_shards)
@@ -430,6 +579,10 @@ def _aggregate(redis_client, hunt_id):
                 pipe.set(hunt_id, event.model_dump_json())
                 if stop_reason:
                     pipe.set(_key(hunt_id, "cancel"), stop_reason)
+                if terminal:
+                    pool = redis_client.get(_key(hunt_id, "pool"))
+                    if pool is not None:
+                        pipe.zrem(f"retrohunt:pool:{_text(pool)}:hunts", hunt_id)
                 pipe.execute()
                 return
         except WatchError:
@@ -464,12 +617,17 @@ def _write_shard(redis_client, hunt_id, shard_id, token, snapshot):
     raise RuntimeError("Excessive contention recording shard progress")
 
 
-def _heartbeat(redis_client, lease_key, token, stream, group, worker_id, msg_id, stop, interval, ttl):
+def _heartbeat(
+    redis_client, lease_key, token, stream, group, worker_id, msg_id, stop, interval, ttl, hunt_id, settings
+):
     script = "if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('EXPIRE',KEYS[1],ARGV[2]) end return 0"
     while not stop.wait(interval):
         try:
             if not redis_client.eval(script, 1, lease_key, token, ttl):
                 return
+            # Slot expires with the same TTL if the pod dies unexpectedly.
+            _, slots = _pool_keys(settings)
+            redis_client.zadd(slots, {f"{hunt_id}:{token}": time() + ttl}, xx=True)
             # Refresh Redis stream pending-entry idle time as well as our lease.
             redis_client.xclaim(stream, group, worker_id, min_idle_time=0, message_ids=[msg_id], justid=True)
         except Exception:
@@ -496,8 +654,13 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
         return
     lease_key = _key(hunt_id, f"lease:{shard_id}")
     token = uuid4().hex
+    # A worker that finishes a shard can switch jobs; running shards never move.
+    if not _reserve_worker(redis_client, hunt_id, token, settings):
+        _defer_shard(redis_client, hunt_id, shard_id, msg_id, settings, service)
+        return
     if not redis_client.set(lease_key, token, nx=True, ex=settings.hunt_shard_lease_seconds):
         # Another pod is working on this shard; leave the entry pending.
+        _release_worker(redis_client, hunt_id, token, settings)
         return
     stop = threading.Event()
     interval = max(1, min(settings.hunt_shard_lease_seconds // 4, settings.redis.ttl // 3, 10))
@@ -514,6 +677,8 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
             stop,
             interval,
             settings.hunt_shard_lease_seconds,
+            hunt_id,
+            settings,
         ),
         daemon=True,
     )
@@ -652,6 +817,7 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
     finally:
         stop.set()
         heart.join(timeout=2)
+        _release_worker(redis_client, hunt_id, token, settings)
         redis_client.eval(
             "if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('DEL',KEYS[1]) end return 0",
             1,

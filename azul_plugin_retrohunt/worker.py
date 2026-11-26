@@ -469,6 +469,8 @@ def main():
     # poll for retrohunt submissions to work on
     while True:
         try:
+            if settings.distributed_hunts:
+                distributed.pump_waiting(rs.redis, settings, rs)
             # Claim any stale jobs first
             try:
                 result = rs.redis.xautoclaim(

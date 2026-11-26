@@ -221,12 +221,20 @@ class RetrohuntService:
         with self.redis.pipeline(transaction=True) as pipe:
             pipe.set(hunt_id, event.model_dump_json())
             pipe.set(f"retrohunt:{hunt_id}:cancel", "user")
+            pool = self.redis.get(f"retrohunt:{hunt_id}:pool")
+            if pool:
+                pipe.zrem(f"retrohunt:pool:{pool.decode() if isinstance(pool, bytes) else pool}:hunts", hunt_id)
             pipe.execute()
 
         return entity
 
     def delete_hunt(self, hunt_id: str):
         """Helper function to delete hunts when user requests."""
+        # Remove any scheduler reservation before deleting this hunt.
+        pool = self.redis.get(f"retrohunt:{hunt_id}:pool")
+        if pool:
+            pool_name = pool.decode() if isinstance(pool, bytes) else pool
+            self.redis.zrem(f"retrohunt:pool:{pool_name}:hunts", hunt_id)
         # Delete the hunt record and lock
         self.redis.delete(hunt_id)
         self.redis.delete(f"retrohunt:{hunt_id}:lock")

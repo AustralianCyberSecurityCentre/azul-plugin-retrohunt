@@ -13,7 +13,6 @@ import re
 import shutil
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -48,6 +47,9 @@ class ObjectIndexProvider:
     def __init__(self, settings: RetrohuntSettings, storage: IndexStorage | None = None):
         self.cache_dir = Path(settings.index_cache_dir).expanduser().resolve()
         self.max_cache_bytes = settings.index_cache_max_bytes
+        # Smaller custom cache limits retain a proportional low watermark.
+        self.target_cache_bytes = min(settings.index_cache_target_bytes, self.max_cache_bytes * 8 // 9)
+        self.min_free_bytes = settings.index_cache_free_bytes
         self.list_timeout = settings.index_list_timeout_seconds
         self.fetch_timeout = settings.index_fetch_timeout_seconds
         try:
@@ -56,94 +58,81 @@ class ObjectIndexProvider:
         except IndexStorageError as exc:
             raise IndexUnavailable(str(exc)) from exc
 
-    def _prepare_batch(
-        self,
-        ids: list[str],
-        offset: int,
-        report_download,
-    ) -> PreparedBatch:
-        """Download and verify a cache-bounded batch of indexes.
+    def _cached_files(self):
+        """Return complete cache entries; temporary downloads are never reused."""
+        return [path for path in self.cache_dir.glob("*.bgi") if INDEX_ID.fullmatch(path.stem) and path.is_file()]
 
-        Downloads indexes in parallel, verifies integrity, and returns a
-        temporary batch directory ready for broad-phase searching. The caller
-        is responsible for deleting the batch directory after use.
-        """
+    def _make_room(self, incoming: int) -> None:
+        """Evict least recently used indexes before opening a download."""
+        entries = self._cached_files()
+        used = sum(path.stat().st_size for path in entries)
+        available = shutil.disk_usage(self.cache_dir).free
+        if used + incoming <= self.max_cache_bytes and available >= incoming + self.min_free_bytes:
+            return
+        # Once eviction starts, aim for the 80 GiB low watermark to avoid churn.
+        target = min(self.target_cache_bytes, self.max_cache_bytes - incoming)
+        for path in sorted(entries, key=lambda item: item.stat().st_mtime_ns):
+            stat = path.stat()
+            # A hardlinked index is still part of a running search batch.
+            if stat.st_nlink > 1:
+                continue
+            size = stat.st_size
+            path.unlink()
+            used -= size
+            available += size
+            if used <= target and available >= incoming + self.min_free_bytes:
+                break
+        if used + incoming > self.max_cache_bytes or available < incoming + self.min_free_bytes:
+            raise IndexUnavailable("Insufficient free PVC space for index download; refusing to download")
+
+    def _ensure_cached(self, index_id: str, expected_size: int, report_download=None) -> Path:
+        """Reuse verified index bytes, or atomically publish a new SHA-checked download."""
+        path = self.cache_dir / f"{index_id}.bgi"
+        if path.is_file():
+            if path.stat().st_size == expected_size:
+                digest = hashlib.sha256()
+                with path.open("rb") as cached:
+                    for block in iter(lambda: cached.read(1024 * 1024), b""):
+                        digest.update(block)
+                if digest.hexdigest() == index_id:
+                    os.utime(path, None)
+                    index_fetch_count.labels("hit").inc()
+                    if report_download:
+                        report_download(expected_size)
+                    return path
+            logger.warning("Discarding stale or damaged cached index %s", index_id)
+            path.unlink()
+        self._make_room(expected_size)
+        self._download_into(index_id, path, expected_size, report_download)
+        return path
+
+    def _prepare_batch(self, ids: list[str], offset: int, report_download) -> PreparedBatch:
+        """Create lightweight hardlinks to retained indexes for one search batch."""
         batch_dir = Path(tempfile.mkdtemp(prefix=".hunt-batch-", dir=self.cache_dir))
-
-        logger.info(
-            "Preparing index batch starting at offset %d",
-            offset,
-        )
-
+        batch_bytes = 0
+        count = 0
         try:
-            batch_bytes = 0
-            batch_count = 0
-            downloads = []
-
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                prefetch_budget = self.max_cache_bytes // 2
-                for index_id in ids[offset:]:
-                    try:
-                        size = self.storage.object_size(self.prefix + f"{index_id}.bgi")
-                    except Exception as exc:
-                        raise IndexUnavailable(f"Cannot determine size for index {index_id}") from exc
-
-                    if size <= 0 or size > self.max_cache_bytes:
-                        raise IndexUnavailable(
-                            f"Published index {index_id} ({size} bytes) "
-                            f"cannot fit within index cache budget "
-                            f"({self.max_cache_bytes} bytes)"
-                        )
-
-                    if batch_count and batch_bytes + size > prefetch_budget:
-                        break
-
-                    destination = batch_dir / f"{index_id}.bgi"
-
-                    current_index_offset = offset + batch_count
-                    current_size = size
-
-                    future = executor.submit(
-                        self._download_into,
-                        index_id,
-                        destination,
-                        current_size,
-                        lambda received, index_offset=current_index_offset, expected=current_size: report_download(
-                            index_offset,
-                            received,
-                            expected,
-                        ),
-                    )
-                    downloads.append((future, index_id, size))
-
-                    batch_bytes += size
-                    batch_count += 1
-
-                if not batch_count:
-                    raise IndexUnavailable("Unable to make progress preparing index batches")
-
-                actual_bytes = 0
-
-                for future, index_id, expected_size in downloads:
-                    actual_size = future.result()
-
-                    if actual_size != expected_size:
-                        raise IndexUnavailable(f"Published index changed size during download: {index_id}")
-
-                    actual_bytes += actual_size
-
-                logger.info(
-                    "Prepared batch of %d indexes (%d bytes)",
-                    batch_count,
-                    actual_bytes,
+            for index_id in ids[offset:]:
+                try:
+                    size = self.storage.object_size(self.prefix + f"{index_id}.bgi")
+                except Exception as exc:
+                    raise IndexUnavailable(f"Cannot determine size for index {index_id}") from exc
+                if size <= 0 or size > self.max_cache_bytes:
+                    raise IndexUnavailable(f"Published index {index_id} cannot fit in the local cache")
+                if count and batch_bytes + size > self.max_cache_bytes // 2:
+                    break
+                position = offset + count
+                path = self._ensure_cached(
+                    index_id,
+                    size,
+                    lambda received, number=position, expected=size: report_download(number, received, expected),
                 )
-
-                return PreparedBatch(
-                    batch_dir=batch_dir,
-                    batch_bytes=actual_bytes,
-                    batch_count=batch_count,
-                )
-
+                os.link(path, batch_dir / path.name)
+                batch_bytes += size
+                count += 1
+            if not count:
+                raise IndexUnavailable("Unable to prepare any index for searching")
+            return PreparedBatch(batch_dir, batch_bytes, count)
         except Exception:
             shutil.rmtree(batch_dir, ignore_errors=True)
             raise
@@ -210,6 +199,8 @@ class ObjectIndexProvider:
                                 progress_callback(written)
                     tmp.flush()
                     os.fsync(tmp.fileno())
+                if written != expected_size:
+                    raise IndexUnavailable(f"Published index changed size during download: {index_id}")
                 if digest.hexdigest() != index_id:
                     raise IndexUnavailable(f"Published index checksum mismatch: {index_id}")
                 os.replace(tmp_name, destination)
@@ -271,61 +262,27 @@ class ObjectIndexProvider:
             try:
                 # Previous crashes can leave temporary batches on an emptyDir.
                 # Remove them only while holding the same inter-hunt lock.
+                for partial in self.cache_dir.glob(".*.tmp"):
+                    if partial.is_file():
+                        partial.unlink()
                 for orphan in self.cache_dir.glob(".hunt-batch-*"):
                     if orphan.is_dir() and not orphan.is_symlink():
                         shutil.rmtree(orphan)
-                # Old versions stored persistent .bgi objects directly in the
-                # cache. Refuse to exceed the budget invisibly; require an
-                # operator to review/remove those files instead.
-                if any(self.cache_dir.glob("*.bgi")):
-                    raise IndexUnavailable(
-                        "Legacy .bgi files found in index cache; clear them before using bounded batches"
-                    )
                 offset = 0
-
-                with ThreadPoolExecutor(max_workers=1) as prefetch_pool:
-                    next_batch_future = prefetch_pool.submit(
-                        self._prepare_batch,
-                        ids,
+                while offset < len(ids):
+                    batch = self._prepare_batch(ids, offset, report_download)
+                    batch_offset = offset
+                    offset += batch.batch_count
+                    logger.info(
+                        "Searching index batch of %d files (%d bytes); %d/%d indexes prepared",
+                        batch.batch_count,
+                        batch.batch_bytes,
                         offset,
-                        report_download,
+                        len(ids),
                     )
-
-                    while next_batch_future is not None:
-                        batch = next_batch_future.result()
-
-                        batch_offset = offset
-                        offset += batch.batch_count
-
-                        if offset < len(ids):
-                            next_batch_future = prefetch_pool.submit(
-                                self._prepare_batch,
-                                ids,
-                                offset,
-                                report_download,
-                            )
-                        else:
-                            next_batch_future = None
-
-                        logger.info(
-                            "Searching index batch of %d files (%d bytes); %d/%d indexes completed",
-                            batch.batch_count,
-                            batch.batch_bytes,
-                            offset,
-                            len(ids),
-                        )
-
-                        try:
-                            yield (
-                                batch.batch_dir,
-                                batch_offset,
-                                batch.batch_count,
-                                len(ids),
-                            )
-                        finally:
-                            shutil.rmtree(
-                                batch.batch_dir,
-                                ignore_errors=True,
-                            )
+                    try:
+                        yield (batch.batch_dir, batch_offset, batch.batch_count, len(ids))
+                    finally:
+                        shutil.rmtree(batch.batch_dir, ignore_errors=True)
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
