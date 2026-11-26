@@ -45,6 +45,8 @@ def provider(tmp_path, store, limit=50):
         index_cache_dir=str(tmp_path),
         index_fetch_workers=2,
         index_cache_max_bytes=limit,
+        index_cache_target_bytes=limit * 8 // 9,
+        index_cache_free_bytes=0,
         index_list_timeout_seconds=30,
         index_fetch_timeout_seconds=30,
     )
@@ -86,7 +88,8 @@ def test_batches_enforce_limit_and_cleanup_before_next(tmp_path, monkeypatch):
 
     assert sorted(seen) == sorted(payloads)
     assert not list(tmp_path.glob(".hunt-batch-*"))
-    assert not list(tmp_path.glob("*.bgi"))
+    # Verified indexes persist between hunts, bounded by the cache budget.
+    assert 0 < sum(p.stat().st_size for p in tmp_path.glob("*.bgi")) <= 25
 
 
 def test_corrupt_index_never_exposed_and_cleans_up(tmp_path, monkeypatch):
@@ -118,7 +121,7 @@ def test_oversize_index_fails_before_fetch(tmp_path, monkeypatch):
 
 
 def test_stale_indexes_not_in_snapshot(tmp_path, monkeypatch):
-    """Legacy cache files must be detected rather than silently ignored."""
+    """Unlisted cached indexes are not searched or silently deleted."""
     monkeypatch.delenv("AZUL_INDEX_PREFIX", raising=False)
 
     value = b"current"
@@ -130,11 +133,31 @@ def test_stale_indexes_not_in_snapshot(tmp_path, monkeypatch):
 
     result = provider(tmp_path, FakeStorage({digest: value}))
 
-    with pytest.raises(IndexUnavailable, match=r"Legacy .bgi files found"):
-        list(result.iter_search_batches())
+    batches = []
+    for batch_dir, _, _, _ in result.iter_search_batches():
+        batches.extend(p.stem for p in batch_dir.glob("*.bgi"))
+    assert batches == [digest]
 
     # Existing data must not be silently deleted.
     assert stale_path.read_bytes() == b"old"
 
     # No new batch should have been retained.
     assert not list(tmp_path.glob(".hunt-batch-*"))
+
+
+def test_verified_cache_is_reused_across_hunts(tmp_path, monkeypatch):
+    """A second hunt should reuse a verified index from its worker's persistent cache."""
+    monkeypatch.delenv("AZUL_INDEX_PREFIX", raising=False)
+    data = b"persistent-index"
+    digest = hashlib.sha256(data).hexdigest()
+    store = FakeStorage({digest: data})
+    result = provider(tmp_path, store, limit=50)
+
+    for batch, *_ in result.iter_search_batches():
+        assert (batch / f"{digest}.bgi").read_bytes() == data
+    assert store.reads == 1
+    assert (tmp_path / f"{digest}.bgi").read_bytes() == data
+
+    for batch, *_ in result.iter_search_batches():
+        assert (batch / f"{digest}.bgi").read_bytes() == data
+    assert store.reads == 1  # Not downloaded again.

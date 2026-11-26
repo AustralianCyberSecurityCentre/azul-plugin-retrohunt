@@ -40,6 +40,8 @@ class MemoryStorage:
 
 class Settings:
     index_cache_max_bytes = 10
+    index_cache_target_bytes = 8
+    index_cache_free_bytes = 0
     index_list_timeout_seconds = 120
     index_fetch_timeout_seconds = 120
 
@@ -61,7 +63,7 @@ def test_s3_head_object_size():
     storage.client.head_object.assert_called_once_with(Bucket="test-bucket", Key="prefix/hash.bgi")
 
 
-def test_bounded_batches_leave_no_files(tmp_path):
+def test_bounded_batches_retain_verified_cache_files(tmp_path):
     storage = make_storage()
     provider = ObjectIndexProvider(Settings(tmp_path), storage=storage)
     seen = []
@@ -73,6 +75,7 @@ def test_bounded_batches_leave_no_files(tmp_path):
     assert len(seen) == 3
     assert not list(tmp_path.glob(".hunt-batch-*"))
     assert len(storage.reads) == 3
+    assert len(list(tmp_path.glob("*.bgi"))) == 1  # Cache retains the last verified index.
 
 
 def test_index_too_large_fails_without_partial_success(tmp_path):
@@ -112,9 +115,8 @@ def test_removes_orphan_batches_but_retains_unknown_files(tmp_path):
     list(provider.iter_search_batches())
     assert not orphan.exists()
     (tmp_path / "legacy.bgi").write_bytes(b"legacy")
-    with pytest.raises(IndexUnavailable, match="Legacy"):
-        list(provider.iter_search_batches())
-    assert (tmp_path / "legacy.bgi").exists()
+    list(provider.iter_search_batches())
+    assert (tmp_path / "legacy.bgi").exists()  # Unknown files are not deleted.
 
 
 def test_prefix_defaults(monkeypatch):
