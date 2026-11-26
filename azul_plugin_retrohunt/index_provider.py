@@ -13,6 +13,7 @@ import re
 import shutil
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -25,7 +26,11 @@ from azul_plugin_retrohunt.settings import RetrohuntSettings
 logger = logging.getLogger("retrohunt.index_provider")
 INDEX_ID = re.compile(r"^[0-9a-f]{64}$")
 index_fetch_count = Counter("retrohunt_index_fetch_total", "Published index cache fetch attempts", ["status"])
-index_fetch_seconds = Histogram("retrohunt_index_fetch_seconds", "Seconds spent ensuring a local .bgi")
+index_fetch_seconds = Histogram("retrohunt_index_fetch_seconds", "Seconds spent downloading an index")
+index_cache_verify_seconds = Histogram(
+    "retrohunt_index_cache_verify_seconds", "Seconds spent hashing a local cached index"
+)
+index_download_bytes = Counter("retrohunt_index_download_bytes_total", "Bytes downloaded from index object storage")
 
 
 @dataclass
@@ -52,6 +57,10 @@ class ObjectIndexProvider:
         self.min_free_bytes = settings.index_cache_free_bytes
         self.list_timeout = settings.index_list_timeout_seconds
         self.fetch_timeout = settings.index_fetch_timeout_seconds
+        self.fetch_workers = getattr(settings, "index_download_workers", 2)
+        self.cache_lock = Lock()
+        self.reserved_bytes = 0
+        self.inflight_ids: set[str] = set()
         self.cache_hits = 0
         self.cache_downloads = 0
         try:
@@ -69,80 +78,148 @@ class ObjectIndexProvider:
         entries = self._cached_files()
         used = sum(path.stat().st_size for path in entries)
         available = shutil.disk_usage(self.cache_dir).free
-        if used + incoming <= self.max_cache_bytes and available >= incoming + self.min_free_bytes:
+        if (
+            used + incoming + self.reserved_bytes <= self.max_cache_bytes
+            and available >= incoming + self.reserved_bytes + self.min_free_bytes
+        ):
             return
         # Once eviction starts, aim for the 80 GiB low watermark to avoid churn.
-        target = min(self.target_cache_bytes, self.max_cache_bytes - incoming)
+        target = min(self.target_cache_bytes, self.max_cache_bytes - incoming - self.reserved_bytes)
         for path in sorted(entries, key=lambda item: item.stat().st_mtime_ns):
             stat = path.stat()
             # A hardlinked index is still part of a running search batch.
-            if stat.st_nlink > 1:
+            if stat.st_nlink > 1 or path.stem in self.inflight_ids:
                 continue
             size = stat.st_size
             path.unlink()
             used -= size
             available += size
-            if used <= target and available >= incoming + self.min_free_bytes:
+            if used <= target and available >= incoming + self.reserved_bytes + self.min_free_bytes:
                 break
-        if used + incoming > self.max_cache_bytes or available < incoming + self.min_free_bytes:
+        if (
+            used + incoming + self.reserved_bytes > self.max_cache_bytes
+            or available < incoming + self.reserved_bytes + self.min_free_bytes
+        ):
             raise IndexUnavailable("Insufficient free PVC space for index download; refusing to download")
 
-    def _ensure_cached(self, index_id: str, expected_size: int, report_download=None, report_cache_hit=None) -> Path:
-        """Reuse verified index bytes, or atomically publish a new SHA-checked download."""
+    def _ensure_cached(
+        self,
+        index_id: str,
+        expected_size: int,
+        report_download=None,
+        report_cache_hit=None,
+        batch_dir: Path | None = None,
+    ) -> Path:
+        """Verify/cache one immutable index, reserving capacity before any concurrent transfer.
+
+        The per-provider mutex protects eviction, reservations and creation of hardlinks.
+        Each active search batch hardlink pins its cache entry against LRU eviction.
+        """
         path = self.cache_dir / f"{index_id}.bgi"
-        if path.is_file():
-            if path.stat().st_size == expected_size:
-                digest = hashlib.sha256()
-                with path.open("rb") as cached:
-                    for block in iter(lambda: cached.read(1024 * 1024), b""):
-                        digest.update(block)
-                if digest.hexdigest() == index_id:
+        with self.cache_lock:
+            if path.is_file():
+                started = time.monotonic()
+                valid = path.stat().st_size == expected_size
+                if valid:
+                    digest = hashlib.sha256()
+                    with path.open("rb") as cached:
+                        for block in iter(lambda: cached.read(1024 * 1024), b""):
+                            digest.update(block)
+                    valid = digest.hexdigest() == index_id
+                verify_seconds = time.monotonic() - started
+                index_cache_verify_seconds.observe(verify_seconds)
+                if valid:
                     os.utime(path, None)
+                    if batch_dir is not None:
+                        os.link(path, batch_dir / path.name)
                     index_fetch_count.labels("hit").inc()
                     self.cache_hits += 1
-                    logger.info("Index cache HIT %s (%d bytes, SHA-256 verified)", index_id, expected_size)
+                    logger.info(
+                        "Index cache HIT id=%s bytes=%d verify_seconds=%.3f downloaded_bytes=0",
+                        index_id,
+                        expected_size,
+                        verify_seconds,
+                    )
                     if report_cache_hit:
                         report_cache_hit(expected_size)
                     return path
-            logger.warning("Discarding stale or damaged cached index %s", index_id)
-            path.unlink()
-        self._make_room(expected_size)
-        logger.info("Index cache MISS %s: downloading %d bytes from object storage", index_id, expected_size)
-        self._download_into(index_id, path, expected_size, report_download)
-        self.cache_downloads += 1
-        logger.info("Index download COMPLETE %s (%d bytes, SHA-256 verified)", index_id, expected_size)
-        return path
+                logger.warning("Discarding stale or damaged cached index %s", index_id)
+                path.unlink()
+            self._make_room(expected_size)
+            self.reserved_bytes += expected_size
+            self.inflight_ids.add(index_id)
+
+        logger.info("Index download START id=%s bytes=%d", index_id, expected_size)
+        started = time.monotonic()
+        try:
+            self._download_into(index_id, path, expected_size, report_download)
+            with self.cache_lock:
+                if batch_dir is not None:
+                    os.link(path, batch_dir / path.name)
+                self.cache_downloads += 1
+            elapsed = max(time.monotonic() - started, 0.000001)
+            logger.info(
+                "Index download COMPLETE id=%s bytes=%d elapsed_seconds=%.3f throughput_MiBps=%.2f sha256_verified=true",
+                index_id,
+                expected_size,
+                elapsed,
+                expected_size / (1024**2) / elapsed,
+            )
+            return path
+        finally:
+            with self.cache_lock:
+                self.reserved_bytes -= expected_size
+                self.inflight_ids.discard(index_id)
 
     def _prepare_batch(self, ids: list[str], offset: int, report_download, report_cache_hit=None) -> PreparedBatch:
-        """Create lightweight hardlinks to retained indexes for one search batch."""
+        """Prepare one budget-bounded batch, downloading indexes concurrently.
+
+        Select the complete batch before starting transfers; all concurrent cache
+        misses reserve their bytes under a lock, so no two threads overcommit disk.
+        """
         batch_dir = Path(tempfile.mkdtemp(prefix=".hunt-batch-", dir=self.cache_dir))
+        selected = []
         batch_bytes = 0
-        count = 0
         try:
             for index_id in ids[offset:]:
                 try:
-                    size = self.storage.object_size(self.prefix + f"{index_id}.bgi")
+                    size = self.index_sizes.get(index_id) if hasattr(self, "index_sizes") else None
+                    if size is None:
+                        size = self.storage.object_size(self.prefix + f"{index_id}.bgi")
                 except Exception as exc:
                     raise IndexUnavailable(f"Cannot determine size for index {index_id}") from exc
                 if size <= 0 or size > self.max_cache_bytes:
                     raise IndexUnavailable(f"Published index {index_id} cannot fit in the local cache")
-                if count and batch_bytes + size > self.max_cache_bytes // 2:
+                if selected and batch_bytes + size > self.max_cache_bytes // 2:
                     break
-                position = offset + count
-                path = self._ensure_cached(
-                    index_id,
-                    size,
-                    lambda received, number=position, expected=size: report_download(number, received, expected),
-                    lambda cached_size, number=position: (
-                        report_cache_hit(number, cached_size) if report_cache_hit is not None else None
-                    ),
-                )
-                os.link(path, batch_dir / path.name)
+                selected.append((index_id, size, offset + len(selected)))
                 batch_bytes += size
-                count += 1
-            if not count:
+            if not selected:
                 raise IndexUnavailable("Unable to prepare any index for searching")
-            return PreparedBatch(batch_dir, batch_bytes, count)
+
+            with ThreadPoolExecutor(max_workers=min(self.fetch_workers, len(selected))) as executor:
+                futures = [
+                    executor.submit(
+                        self._ensure_cached,
+                        idx,
+                        size,
+                        lambda received, pos=pos, sz=size: report_download(pos, received, sz),
+                        lambda cached_size, pos=pos: (
+                            report_cache_hit(pos, cached_size) if report_cache_hit is not None else None
+                        ),
+                        batch_dir,
+                    )
+                    for idx, size, pos in selected
+                ]
+                errors = []
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        errors.append(exc)
+                if errors:
+                    raise errors[0]
+            return PreparedBatch(batch_dir, batch_bytes, len(selected))
         except Exception:
             shutil.rmtree(batch_dir, ignore_errors=True)
             raise
@@ -205,6 +282,7 @@ class ObjectIndexProvider:
                                 raise IndexUnavailable(f"Published index changed size during download: {index_id}")
                             tmp.write(block)
                             digest.update(block)
+                            index_download_bytes.inc(len(block))
                             if progress_callback is not None:
                                 progress_callback(written)
                     tmp.flush()
@@ -239,6 +317,7 @@ class ObjectIndexProvider:
         # broad-phase search TASK completion. Never claim an index was searched
         # just because its bytes have arrived.
         next_download_percent = 10
+        self.index_sizes = getattr(self, "index_sizes", {})
         download_progress_lock = Lock()
         logger.info("Broad-phase index preparation starting: %d indexes (checking persistent cache)", len(ids))
 

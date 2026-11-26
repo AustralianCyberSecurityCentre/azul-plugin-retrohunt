@@ -55,7 +55,8 @@ class RetrohuntSettings(BaseSettings):
     # The index files are exclusively produced by the external Retroindexer.
     # Retrohunt never writes to the object store or creates BigGrep indexes.
     index_cache_dir: str = "/data/index-cache"
-    index_fetch_workers: int = Field(4, ge=1, le=16)
+    index_fetch_workers: int = Field(4, ge=1, le=16)  # Parallel metadata HEAD lookups
+    index_download_workers: int = Field(2, ge=1, le=8)  # Concurrent .bgi transfers per worker pod
     index_cache_max_bytes: int = Field(90 * 1024**3, ge=1)
     index_cache_target_bytes: int = Field(80 * 1024**3, ge=1)
     index_cache_free_bytes: int = Field(10 * 1024**3, ge=0)

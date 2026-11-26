@@ -308,9 +308,10 @@ def _shard_summary(number, state):
 class AssignedIndexProvider(ObjectIndexProvider):
     """Use the existing bounded, SHA-verified downloader for one shard."""
 
-    def __init__(self, settings, index_ids):
+    def __init__(self, settings, index_ids, index_sizes=None):
         super().__init__(settings)
         self._assigned_index_ids = list(index_ids)
+        self.index_sizes = index_sizes or {}
         self.progress_callback = None
         self.cache_hit_callback = None
 
@@ -442,7 +443,13 @@ def enqueue_hunt(redis_client, hunt_id, message_id, settings, service):
         if not 1 <= requested <= 128:
             raise ValueError("Requested shard count must be between 1 and 128")
         shards = partition_indexes(list(zip(ids, sizes, strict=True)), requested)
-        manifest = {"v": 1, "shards": shards, "created": time(), "index_count": len(ids)}
+        manifest = {
+            "v": 1,
+            "shards": shards,
+            "created": time(),
+            "index_count": len(ids),
+            "index_sizes": dict(zip(ids, sizes, strict=True)),
+        }
 
         # All shard records, stream messages, manifest and public state are
         # published atomically: no worker can see a partially initialized hunt.
@@ -809,7 +816,7 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
             "tool_matches_done",
         ):
             setattr(shard_job.entity, field, 0)
-        provider = AssignedIndexProvider(settings, manifest["shards"][shard_id]["ids"])
+        provider = AssignedIndexProvider(settings, manifest["shards"][shard_id]["ids"], manifest.get("index_sizes"))
         logs = StringIO()
         index_count = state["index_count"]
         download_fractions = {}

@@ -118,6 +118,12 @@ class AzureIndexStorage:
             except ImportError as exc:
                 raise IndexStorageError("Azure keyless authentication requires azure-identity") from exc
             credential = DefaultAzureCredential()
+        try:
+            self.download_concurrency = int(os.getenv("AZUL_INDEX_AZURE_DOWNLOAD_CONCURRENCY", "4"))
+        except ValueError as exc:
+            raise IndexStorageError("AZUL_INDEX_AZURE_DOWNLOAD_CONCURRENCY must be an integer") from exc
+        if not 1 <= self.download_concurrency <= 16:
+            raise IndexStorageError("AZUL_INDEX_AZURE_DOWNLOAD_CONCURRENCY must be between 1 and 16")
         self.container = BlobServiceClient(account_url=endpoint, credential=credential).get_container_client(container)
 
     def list_keys(self, prefix: str) -> Iterator[str]:
@@ -132,7 +138,7 @@ class AzureIndexStorage:
     @contextmanager
     def read_chunks(self, key: str) -> Iterator[Iterator[bytes]]:
         """Stream Azure blob bytes in bounded chunks."""
-        stream = self.container.download_blob(key, max_concurrency=1)
+        stream = self.container.download_blob(key, max_concurrency=self.download_concurrency)
         yield stream.chunks()
 
 
