@@ -114,6 +114,71 @@ def _reserve_worker(redis_client, hunt_id, token, settings):
     )
 
 
+def register_submitted_hunt(redis_client, hunt_id, settings):
+    """Advertise a submitted hunt before any worker is free to initialise it.
+
+    This must not wait for the ordinary consumer group: all workers may be busy
+    running shards and the group's backlog can contain older shard messages.
+    Registration is idempotent and is performed only for live, submitted hunts.
+    """
+    raw = redis_client.get(hunt_id)
+    if raw is None or redis_client.exists(_key(hunt_id, "cancel")):
+        return False
+    event = azm.RetrohuntEvent.model_validate_json(raw)
+    if event.entity.status in {azm.HuntState.COMPLETED, azm.HuntState.FAILED, azm.HuntState.CANCELLED}:
+        return False
+    active, _ = _pool_keys(settings)
+    # Score is the submission timestamp (not the time a worker picked up the
+    # message), preserving FIFO ordering when multiple hunts arrive together.
+    submitted = event.entity.submitted_time
+    score = submitted.timestamp() if submitted is not None else time()
+    added = redis_client.zadd(active, {hunt_id: score}, nx=True)
+    if added:
+        logger.info(
+            "Registered pending hunt %s for fair worker allocation (pool=%s)", hunt_id, settings.hunt_worker_pool
+        )
+    return bool(added)
+
+
+def watch_hunt_submissions(redis_client, settings, service, stop):
+    """Watch the stream independently of the busy shard consumer loop.
+
+    XREAD (not XREADGROUP) observes submissions without consuming or ACKing
+    their messages. Any worker can continue the expensive manifest setup later.
+    A separate watcher on each worker is safe because registration uses ZADD NX.
+    """
+    stream = service.RETROHUNT_JOB
+    # Replay a bounded recent tail so restarts can observe queued submissions
+    # without scanning an unbounded historical stream on every worker boot.
+    cursor = "0-0"
+    try:
+        recent = redis_client.xrevrange(stream, count=500)
+        if recent:
+            cursor = recent[0][0]
+            for _, payload in reversed(recent):
+                action = payload.get(b"action", payload.get("action"))
+                if action in (b"Submitted", "Submitted"):
+                    raw_id = payload.get(b"hunt_id", payload.get("hunt_id"))
+                    if raw_id is not None:
+                        register_submitted_hunt(redis_client, _text(raw_id), settings)
+    except Exception:
+        logger.exception("Initial hunt-admission scan failed")
+    while not stop.is_set():
+        try:
+            events = redis_client.xread({stream: cursor}, count=100, block=1000)
+            for _, messages in events:
+                for message_id, payload in messages:
+                    cursor = message_id
+                    if payload.get(b"action", payload.get("action")) not in (b"Submitted", "Submitted"):
+                        continue
+                    raw_id = payload.get(b"hunt_id", payload.get("hunt_id"))
+                    if raw_id is not None:
+                        register_submitted_hunt(redis_client, _text(raw_id), settings)
+        except Exception:
+            logger.exception("Hunt admission watcher failed; retrying")
+            stop.wait(2)
+
+
 def _release_worker(redis_client, hunt_id, token, settings):
     _, slots = _pool_keys(settings)
     redis_client.zrem(slots, f"{hunt_id}:{token}")
@@ -206,7 +271,11 @@ def _shard_summary(number, state):
     downloaded = state.get("download") or {}
     if status == "completed":
         matches = sum(len(items) for items in state.get("results", {}).values())
-        return f"Shard {number}: {_progress_bar(1, 1)} Completed | {count} indexes | {matches} matches"
+        cached, fetched = state.get("cache_hits", 0), state.get("cache_downloads", 0)
+        return (
+            f"Shard {number}: {_progress_bar(1, 1)} Completed | {count} indexes "
+            f"({cached} cached, {fetched} downloaded) | {matches} matches"
+        )
     if status == "failed":
         error = str(state.get("error") or "Unknown error").replace("\n", " ")[:160]
         return f"Shard {number}: FAILED | {count} indexes | {error}"
@@ -215,7 +284,14 @@ def _shard_summary(number, state):
     if status == "downloading":
         done = downloaded.get("done", 0)
         total = downloaded.get("total", count)
-        return f"Shard {number}: {_progress_bar(done, total)} Downloading indexes ({done:.1f}/{total})"
+        cached = state.get("cache_hits", 0)
+        return (
+            f"Shard {number}: {_progress_bar(done, total)} Downloading indexes "
+            f"({done:.1f}/{total} transferred; {cached} cache hits)"
+        )
+    if status == "preparing":
+        cached = state.get("cache_hits", 0)
+        return f"Shard {number}: Preparing indexes | {cached} verified cache hits / {count} indexes"
     if status == "broad":
         done = progress.get("index_searches_done", 0)
         total = progress.get("index_searches_total", 0)
@@ -236,6 +312,7 @@ class AssignedIndexProvider(ObjectIndexProvider):
         super().__init__(settings)
         self._assigned_index_ids = list(index_ids)
         self.progress_callback = None
+        self.cache_hit_callback = None
 
     def list_indexes(self):
         """Return only the immutable index IDs assigned to this shard."""
@@ -264,12 +341,15 @@ class AssignedIndexProvider(ObjectIndexProvider):
                 offset = 0
                 while offset < len(ids):
                     callback = self.progress_callback or (lambda *_: None)
-                    prepared = self._prepare_batch(ids, offset, callback)
+                    prepared = self._prepare_batch(ids, offset, callback, self.cache_hit_callback)
                     try:
-                        logger.info("Shard index download: %d/%d complete", offset + prepared.batch_count, len(ids))
-                        if self.progress_callback is not None:
-                            for index_offset in range(offset, offset + prepared.batch_count):
-                                self.progress_callback(index_offset, 1, 1)
+                        logger.info(
+                            "Shard index preparation: %d/%d ready; %d cache hits, %d downloads",
+                            offset + prepared.batch_count,
+                            len(ids),
+                            self.cache_hits,
+                            self.cache_downloads,
+                        )
                         yield (prepared.batch_dir, offset, prepared.batch_count, len(ids))
                     finally:
                         shutil.rmtree(prepared.batch_dir, ignore_errors=True)
@@ -389,7 +469,11 @@ def enqueue_hunt(redis_client, hunt_id, message_id, settings, service):
             pipe.multi()
             # Registration and shard publication must be atomic.
             active, _ = _pool_keys(settings)
-            pipe.zadd(active, {hunt_id: time()}, nx=True)
+            pipe.zadd(
+                active,
+                {hunt_id: (current.entity.submitted_time.timestamp() if current.entity.submitted_time else time())},
+                nx=True,
+            )
             pipe.set(_key(hunt_id, "pool"), settings.hunt_worker_pool)
             pipe.set(_key(hunt_id, "manifest"), json.dumps(manifest))
             pipe.set(hunt_id, current.model_dump_json())
@@ -656,8 +740,12 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
     token = uuid4().hex
     # A worker that finishes a shard can switch jobs; running shards never move.
     if not _reserve_worker(redis_client, hunt_id, token, settings):
+        logger.info(
+            "Worker %s deferring hunt %s shard %d: current fair-share quota is full", worker_id, hunt_id, shard_id + 1
+        )
         _defer_shard(redis_client, hunt_id, shard_id, msg_id, settings, service)
         return
+    logger.info("Worker %s admitted to hunt %s shard %d", worker_id, hunt_id, shard_id + 1)
     if not redis_client.set(lease_key, token, nx=True, ex=settings.hunt_shard_lease_seconds):
         # Another pod is working on this shard; leave the entry pending.
         _release_worker(redis_client, hunt_id, token, settings)
@@ -728,9 +816,25 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
         publish_lock = threading.RLock()
         last_download_publish = 0.0
         last_download_percent = -1
+        state["cache_hits"] = 0
+
+        def report_cache_hit(index_offset, size):
+            """Record verified local reuse; never label this as a network download."""
+            with publish_lock:
+                state["cache_hits"] += 1
+                logger.info(
+                    "Hunt %s shard %d: cache HIT for index %d (%d bytes)",
+                    hunt_id,
+                    shard_id + 1,
+                    index_offset + 1,
+                    size,
+                )
+                if state["status"] != "downloading":
+                    state["status"] = "preparing"
+                _write_shard(redis_client, hunt_id, shard_id, token, state)
 
         def report_download(index_offset, received, expected):
-            """Publish throttled, index-weighted progress from download threads."""
+            """Only real object-store byte transfers enter the download phase."""
             nonlocal last_download_publish, last_download_percent
             with publish_lock:
                 fraction = min(1.0, max(0.0, received / expected)) if expected else 0.0
@@ -749,6 +853,7 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
                 last_download_percent = percent
 
         provider.progress_callback = report_download
+        provider.cache_hit_callback = report_cache_hit
 
         def writer(job, _logs):
             if redis_client.get(_key(hunt_id, "cancel")):
@@ -759,7 +864,7 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
                     state["status"] = "narrow"
                 elif job.entity.status == azm.HuntState.SEARCHING_WIDE:
                     state["status"] = "broad"
-                elif state["status"] != "downloading":
+                elif state["status"] not in {"downloading", "preparing"}:
                     state["status"] = "starting"
                 state["progress"] = {
                     key: getattr(job.entity, key, 0) or 0
@@ -788,6 +893,17 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
         # worker.py and BigGrep already write detailed logs to pod stdout.
         # Do not copy those logs into the public RetrohuntEvent.
         execute(shard_job, logs, provider, writer)
+        # Preserve the actual cache/download counts in the shard's final snapshot.
+        state["cache_hits"] = provider.cache_hits
+        state["cache_downloads"] = provider.cache_downloads
+        logger.info(
+            "Worker %s finished hunt %s shard %d: %d verified cache hits, %d object-store downloads",
+            worker_id,
+            hunt_id,
+            shard_id + 1,
+            provider.cache_hits,
+            provider.cache_downloads,
+        )
         # hunt() captures ordinary exceptions as FAILED in its final local event.
         if shard_job.entity.status == azm.HuntState.FAILED:
             state["error"] = shard_job.entity.error or "Shard search failed"

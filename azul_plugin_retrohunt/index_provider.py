@@ -52,6 +52,8 @@ class ObjectIndexProvider:
         self.min_free_bytes = settings.index_cache_free_bytes
         self.list_timeout = settings.index_list_timeout_seconds
         self.fetch_timeout = settings.index_fetch_timeout_seconds
+        self.cache_hits = 0
+        self.cache_downloads = 0
         try:
             self.prefix = index_prefix()
             self.storage = storage if storage is not None else create_storage()
@@ -85,7 +87,7 @@ class ObjectIndexProvider:
         if used + incoming > self.max_cache_bytes or available < incoming + self.min_free_bytes:
             raise IndexUnavailable("Insufficient free PVC space for index download; refusing to download")
 
-    def _ensure_cached(self, index_id: str, expected_size: int, report_download=None) -> Path:
+    def _ensure_cached(self, index_id: str, expected_size: int, report_download=None, report_cache_hit=None) -> Path:
         """Reuse verified index bytes, or atomically publish a new SHA-checked download."""
         path = self.cache_dir / f"{index_id}.bgi"
         if path.is_file():
@@ -97,16 +99,21 @@ class ObjectIndexProvider:
                 if digest.hexdigest() == index_id:
                     os.utime(path, None)
                     index_fetch_count.labels("hit").inc()
-                    if report_download:
-                        report_download(expected_size)
+                    self.cache_hits += 1
+                    logger.info("Index cache HIT %s (%d bytes, SHA-256 verified)", index_id, expected_size)
+                    if report_cache_hit:
+                        report_cache_hit(expected_size)
                     return path
             logger.warning("Discarding stale or damaged cached index %s", index_id)
             path.unlink()
         self._make_room(expected_size)
+        logger.info("Index cache MISS %s: downloading %d bytes from object storage", index_id, expected_size)
         self._download_into(index_id, path, expected_size, report_download)
+        self.cache_downloads += 1
+        logger.info("Index download COMPLETE %s (%d bytes, SHA-256 verified)", index_id, expected_size)
         return path
 
-    def _prepare_batch(self, ids: list[str], offset: int, report_download) -> PreparedBatch:
+    def _prepare_batch(self, ids: list[str], offset: int, report_download, report_cache_hit=None) -> PreparedBatch:
         """Create lightweight hardlinks to retained indexes for one search batch."""
         batch_dir = Path(tempfile.mkdtemp(prefix=".hunt-batch-", dir=self.cache_dir))
         batch_bytes = 0
@@ -126,6 +133,9 @@ class ObjectIndexProvider:
                     index_id,
                     size,
                     lambda received, number=position, expected=size: report_download(number, received, expected),
+                    lambda cached_size, number=position: (
+                        report_cache_hit(number, cached_size) if report_cache_hit is not None else None
+                    ),
                 )
                 os.link(path, batch_dir / path.name)
                 batch_bytes += size
@@ -230,7 +240,7 @@ class ObjectIndexProvider:
         # just because its bytes have arrived.
         next_download_percent = 10
         download_progress_lock = Lock()
-        logger.info("Broad-phase index download starting: 0/%d indexes", len(ids))
+        logger.info("Broad-phase index preparation starting: %d indexes (checking persistent cache)", len(ids))
 
         def report_download(
             index_offset: int,
@@ -246,7 +256,7 @@ class ObjectIndexProvider:
             with download_progress_lock:
                 while current_percent >= next_download_percent and next_download_percent <= 100:
                     logger.info(
-                        "Broad-phase index download %d%% complete: %d/%d full indexes downloaded",
+                        "Broad-phase transfer progress %d%%: %d/%d indexes examined (cache hits excluded)",
                         next_download_percent,
                         index_offset,
                         len(ids),

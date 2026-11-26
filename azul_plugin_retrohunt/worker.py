@@ -466,6 +466,24 @@ def main():
         else:
             raise
 
+    # Admission must continue even while all workers are running long shards.
+    # This independent watcher only registers submissions for fair-share quotas;
+    # ordinary XREADGROUP consumption still initialises and executes hunts.
+    admission_stop = threading.Event()
+    if settings.distributed_hunts:
+        admission_thread = threading.Thread(
+            target=distributed.watch_hunt_submissions,
+            args=(rs.redis, settings, rs, admission_stop),
+            daemon=True,
+            name="retrohunt-admission",
+        )
+        admission_thread.start()
+        logger.info(
+            "Distributed hunt admission watcher started (pool=%s, workers=%d)",
+            settings.hunt_worker_pool,
+            settings.hunt_worker_count,
+        )
+
     # poll for retrohunt submissions to work on
     while True:
         try:
