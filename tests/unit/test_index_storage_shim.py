@@ -166,10 +166,7 @@ def test_verified_cache_is_reused_across_hunts(tmp_path, monkeypatch):
 def test_mixed_legacy_and_partitioned_indexes_use_correct_keys(tmp_path, monkeypatch):
     """Legacy and partitioned indexes are all downloaded without type filtering."""
     monkeypatch.delenv("AZUL_INDEX_PREFIX", raising=False)
-    payloads = {
-        hashlib.sha256(blob).hexdigest(): blob
-        for blob in (b"legacy-index", b"windows-index", b"elf-index")
-    }
+    payloads = {hashlib.sha256(blob).hexdigest(): blob for blob in (b"legacy-index", b"windows-index", b"elf-index")}
     legacy, windows, elf = list(payloads)
     paths = {
         legacy: legacy,
@@ -214,10 +211,13 @@ def test_partition_ready_must_match_bgi_location(tmp_path, monkeypatch):
     data = b"unpublished"
     ident = hashlib.sha256(data).hexdigest()
     prefix = "retrohunt/indices/"
-    store = FakeStorage({ident: data}, [
-        f"{prefix}windows/lt1m/{ident}.bgi",
-        f"{prefix}elf/lt1m/{ident}.ready",
-    ])
+    store = FakeStorage(
+        {ident: data},
+        [
+            f"{prefix}windows/lt1m/{ident}.bgi",
+            f"{prefix}elf/lt1m/{ident}.ready",
+        ],
+    )
     with pytest.raises(IndexUnavailable, match="No published"):
         provider(tmp_path, store).list_indexes()
 

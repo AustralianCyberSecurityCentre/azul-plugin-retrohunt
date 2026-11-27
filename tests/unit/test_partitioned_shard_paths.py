@@ -39,9 +39,7 @@ def test_assigned_shard_uses_partitioned_manifest_keys(tmp_path, monkeypatch):
         index_fetch_timeout_seconds=30,
         index_download_workers=2,
     )
-    shard = distributed.AssignedIndexProvider(
-        settings, ids, {ident: len(payloads[ident]) for ident in ids}, keys
-    )
+    shard = distributed.AssignedIndexProvider(settings, ids, {ident: len(payloads[ident]) for ident in ids}, keys)
     seen = set()
     for batch, *_ in shard.iter_search_batches():
         seen.update(path.stem for path in batch.glob("*.bgi"))
