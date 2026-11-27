@@ -25,6 +25,48 @@ from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 logger = logging.getLogger("retrohunt.index_provider")
 INDEX_ID = re.compile(r"^[0-9a-f]{64}$")
+# Match Retroindexer's partition identifiers; legacy flat objects remain valid.
+FILE_TYPES = frozenset(
+    {
+        "windows",
+        "elf",
+        "macho",
+        "mobile",
+        "bytecode",
+        "document",
+        "archive",
+        "script",
+        "image",
+        "audio",
+        "video",
+        "executable-other",
+        "unknown",
+        "other",
+        "mixed",
+    }
+)
+SIZE_CLASSES = frozenset({"lt1m", "1m-10m", "10m-100m", "gte100m", "mixed"})
+
+
+def _index_object_name(relative_key: str, suffix: str) -> tuple[str, str] | None:
+    """Validate a legacy or partitioned index key and return its ID and path."""
+    if not relative_key.endswith(suffix):
+        return None
+    parts = relative_key[: -len(suffix)].split("/")
+    if not INDEX_ID.fullmatch(parts[-1]):
+        return None
+    if len(parts) == 1:
+        return parts[-1], parts[-1]
+    if (
+        len(parts) == 3
+        and parts[0] in FILE_TYPES
+        and parts[1] in SIZE_CLASSES
+        and ((parts[0] == "mixed") == (parts[1] == "mixed"))
+    ):
+        return parts[-1], "/".join(parts)
+    return None
+
+
 index_fetch_count = Counter("retrohunt_index_fetch_total", "Published index cache fetch attempts", ["status"])
 index_fetch_seconds = Histogram("retrohunt_index_fetch_seconds", "Seconds spent downloading an index")
 index_cache_verify_seconds = Histogram(
@@ -63,6 +105,8 @@ class ObjectIndexProvider:
         self.inflight_ids: set[str] = set()
         self.cache_hits = 0
         self.cache_downloads = 0
+        # IDs remain the unit of sharding/cache identity; keys locate the blob.
+        self.index_keys: dict[str, str] = {}
         try:
             self.prefix = index_prefix()
             self.storage = storage if storage is not None else create_storage()
@@ -171,6 +215,15 @@ class ObjectIndexProvider:
                 self.reserved_bytes -= expected_size
                 self.inflight_ids.discard(index_id)
 
+    def _object_key(self, index_id: str) -> str:
+        """Resolve a snapshot index ID to its published object key."""
+        if not INDEX_ID.fullmatch(index_id):
+            raise IndexUnavailable("Invalid BigGrep index identifier")
+        relative = self.index_keys.get(index_id, f"{index_id}.bgi")
+        if _index_object_name(relative, ".bgi") != (index_id, relative[:-4]):
+            raise IndexUnavailable(f"Invalid published object path for index {index_id}")
+        return self.prefix + relative
+
     def _prepare_batch(self, ids: list[str], offset: int, report_download, report_cache_hit=None) -> PreparedBatch:
         """Prepare one budget-bounded batch, downloading indexes concurrently.
 
@@ -185,7 +238,7 @@ class ObjectIndexProvider:
                 try:
                     size = self.index_sizes.get(index_id) if hasattr(self, "index_sizes") else None
                     if size is None:
-                        size = self.storage.object_size(self.prefix + f"{index_id}.bgi")
+                        size = self.storage.object_size(self._object_key(index_id))
                 except Exception as exc:
                     raise IndexUnavailable(f"Cannot determine size for index {index_id}") from exc
                 if size <= 0 or size > self.max_cache_bytes:
@@ -225,7 +278,12 @@ class ObjectIndexProvider:
             raise
 
     def list_indexes(self) -> list[str]:
-        """Only expose full SHA-256 IDs with both .bgi and .ready objects."""
+        """Snapshot committed legacy and partitioned indexes without reading bodies.
+
+        Match .bgi and .ready in the *same* partition. A duplicate hash can
+        occur under more than one prefix; the content is identical, so select
+        one deterministic key and preserve unique SHA IDs for work splitting.
+        """
         try:
             start = time.monotonic()
             available: set[str] = set()
@@ -235,14 +293,24 @@ class ObjectIndexProvider:
                     raise IndexUnavailable("Timed out listing published indexes")
                 if not key.startswith(self.prefix):
                     continue
-                name = key[len(self.prefix) :]
-                if name.endswith(".bgi") and INDEX_ID.fullmatch(name[:-4]):
-                    available.add(name[:-4])
-                elif name.endswith(".ready") and INDEX_ID.fullmatch(name[:-6]):
-                    ready.add(name[:-6])
-            ids = sorted(ready & available)
-            if not ids:
+                relative = key[len(self.prefix) :]
+                index = _index_object_name(relative, ".bgi")
+                if index is not None:
+                    available.add(index[1])
+                    continue
+                index = _index_object_name(relative, ".ready")
+                if index is not None:
+                    ready.add(index[1])
+
+            # Keep the snapshot immutable for batch preparation and shard manifests.
+            selected: dict[str, str] = {}
+            for relative in sorted(ready & available):
+                index_id = relative.rsplit("/", 1)[-1]
+                selected.setdefault(index_id, relative + ".bgi")
+            if not selected:
                 raise IndexUnavailable("No published BigGrep indexes found in object storage")
+            self.index_keys = selected
+            ids = sorted(selected)
             logger.info("Found %d published BigGrep indexes", len(ids))
             return ids
         except IndexUnavailable:
@@ -271,7 +339,7 @@ class ObjectIndexProvider:
                     prefix=f".{index_id}.", suffix=".tmp", dir=destination.parent, delete=False
                 ) as tmp:
                     tmp_name = tmp.name
-                    with self.storage.read_chunks(self.prefix + f"{index_id}.bgi") as chunks:
+                    with self.storage.read_chunks(self._object_key(index_id)) as chunks:
                         for block in chunks:
                             if time.monotonic() - started > self.fetch_timeout:
                                 raise IndexUnavailable(f"Timed out downloading index {index_id}")

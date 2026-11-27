@@ -161,3 +161,96 @@ def test_verified_cache_is_reused_across_hunts(tmp_path, monkeypatch):
     for batch, *_ in result.iter_search_batches():
         assert (batch / f"{digest}.bgi").read_bytes() == data
     assert store.reads == 1  # Not downloaded again.
+
+
+def test_mixed_legacy_and_partitioned_indexes_use_correct_keys(tmp_path, monkeypatch):
+    """Legacy and partitioned indexes are all downloaded without type filtering."""
+    monkeypatch.delenv("AZUL_INDEX_PREFIX", raising=False)
+    payloads = {
+        hashlib.sha256(blob).hexdigest(): blob
+        for blob in (b"legacy-index", b"windows-index", b"elf-index")
+    }
+    legacy, windows, elf = list(payloads)
+    paths = {
+        legacy: legacy,
+        windows: f"windows/1m-10m/{windows}",
+        elf: f"elf/lt1m/{elf}",
+    }
+    prefix = "retrohunt/indices/"
+    keys = [prefix + path + suffix for path in paths.values() for suffix in (".bgi", ".ready")]
+
+    class TrackingStorage(FakeStorage):
+        def __init__(self):
+            super().__init__(payloads, keys)
+            self.head_keys = []
+            self.download_keys = []
+
+        def object_size(self, key):
+            self.head_keys.append(key)
+            return super().object_size(key)
+
+        @contextmanager
+        def read_chunks(self, key):
+            self.download_keys.append(key)
+            with super().read_chunks(key) as chunks:
+                yield chunks
+
+    store = TrackingStorage()
+    result = provider(tmp_path, store, limit=100)
+    assert result.list_indexes() == sorted(payloads)
+    assert result.index_keys == {ident: path + ".bgi" for ident, path in paths.items()}
+
+    seen = set()
+    for batch, *_ in result.iter_search_batches():
+        seen.update(path.stem for path in batch.glob("*.bgi"))
+    assert seen == set(payloads)
+    assert set(store.head_keys) == {prefix + path + ".bgi" for path in paths.values()}
+    assert set(store.download_keys) == {prefix + path + ".bgi" for path in paths.values()}
+
+
+def test_partition_ready_must_match_bgi_location(tmp_path, monkeypatch):
+    """A marker in another partition cannot publish an incomplete index."""
+    monkeypatch.delenv("AZUL_INDEX_PREFIX", raising=False)
+    data = b"unpublished"
+    ident = hashlib.sha256(data).hexdigest()
+    prefix = "retrohunt/indices/"
+    store = FakeStorage({ident: data}, [
+        f"{prefix}windows/lt1m/{ident}.bgi",
+        f"{prefix}elf/lt1m/{ident}.ready",
+    ])
+    with pytest.raises(IndexUnavailable, match="No published"):
+        provider(tmp_path, store).list_indexes()
+
+
+def test_duplicate_index_hash_downloaded_once(tmp_path, monkeypatch):
+    """The same content in two partitions is a single sharding/cache identity."""
+    monkeypatch.delenv("AZUL_INDEX_PREFIX", raising=False)
+    data = b"same-index"
+    ident = hashlib.sha256(data).hexdigest()
+    prefix = "retrohunt/indices/"
+    keys = [
+        prefix + path + suffix
+        for path in (f"windows/lt1m/{ident}", f"elf/lt1m/{ident}")
+        for suffix in (".bgi", ".ready")
+    ]
+    store = FakeStorage({ident: data}, keys)
+    result = provider(tmp_path, store)
+    assert result.list_indexes() == [ident]
+    assert result.index_keys[ident] == f"elf/lt1m/{ident}.bgi"
+    assert sum(batch[2] for batch in result.iter_search_batches()) == 1
+    assert store.reads == 1
+
+
+def test_rejects_unrecognised_partition_paths(tmp_path, monkeypatch):
+    """Ignore unexpected nested keys instead of treating them as indexes."""
+    monkeypatch.delenv("AZUL_INDEX_PREFIX", raising=False)
+    data = b"index"
+    ident = hashlib.sha256(data).hexdigest()
+    prefix = "retrohunt/indices/"
+    keys = [
+        prefix + path + suffix
+        for path in (f"../../{ident}", f"windows/wrong-size/{ident}", f"badtype/lt1m/{ident}")
+        for suffix in (".bgi", ".ready")
+    ]
+    with pytest.raises(IndexUnavailable, match="No published"):
+        provider(tmp_path, FakeStorage({ident: data}, keys)).list_indexes()

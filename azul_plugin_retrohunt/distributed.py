@@ -308,10 +308,12 @@ def _shard_summary(number, state):
 class AssignedIndexProvider(ObjectIndexProvider):
     """Use the existing bounded, SHA-verified downloader for one shard."""
 
-    def __init__(self, settings, index_ids, index_sizes=None):
+    def __init__(self, settings, index_ids, index_sizes=None, index_keys=None):
         super().__init__(settings)
         self._assigned_index_ids = list(index_ids)
         self.index_sizes = index_sizes or {}
+        # Older shard manifests have no key map and still use flat paths.
+        self.index_keys = index_keys or {}
         self.progress_callback = None
         self.cache_hit_callback = None
 
@@ -435,7 +437,7 @@ def enqueue_hunt(redis_client, hunt_id, message_id, settings, service):
         ids = provider.list_indexes()
         # Bounded parallel HEAD requests; no sample bytes or index bytes copied.
         with ThreadPoolExecutor(max_workers=min(8, settings.index_fetch_workers * 2)) as pool:
-            sizes = list(pool.map(lambda idx: provider.storage.object_size(provider.prefix + idx + ".bgi"), ids))
+            sizes = list(pool.map(lambda idx: provider.storage.object_size(provider._object_key(idx)), ids))
         if any(size <= 0 or size > settings.index_cache_max_bytes for size in sizes):
             raise ValueError("An index is empty or exceeds the local index cache budget")
         requested_raw = redis_client.get(_key(hunt_id, "requested_shards"))
@@ -449,6 +451,7 @@ def enqueue_hunt(redis_client, hunt_id, message_id, settings, service):
             "created": time(),
             "index_count": len(ids),
             "index_sizes": dict(zip(ids, sizes, strict=True)),
+            "index_keys": {idx: provider.index_keys[idx] for idx in ids},
         }
 
         # All shard records, stream messages, manifest and public state are
@@ -816,7 +819,12 @@ def run_shard(redis_client, payload, msg_id, worker_id, settings, service, execu
             "tool_matches_done",
         ):
             setattr(shard_job.entity, field, 0)
-        provider = AssignedIndexProvider(settings, manifest["shards"][shard_id]["ids"], manifest.get("index_sizes"))
+        provider = AssignedIndexProvider(
+            settings,
+            manifest["shards"][shard_id]["ids"],
+            manifest.get("index_sizes"),
+            manifest.get("index_keys"),
+        )
         logs = StringIO()
         index_count = state["index_count"]
         download_fractions = {}
