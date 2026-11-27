@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "azul-plugin-retrohunt"
-description = "Azul plugins for indexing and searching historical samples efficiently."
+description = "Azul Retrohunt search service using Bedrock-published BigGrep indexes."
 dynamic = ["version"]
 readme = "README.md"
 license = "MIT"
@@ -44,10 +44,7 @@ runtime = [
 ]
 
 [project.scripts]
-azul-plugin-retroingestor = "azul_plugin_retrohunt.ingestor:main"
-azul-plugin-retroindexer = "azul_plugin_retrohunt.indexer:main"
 azul-plugin-retroworker = "azul_plugin_retrohunt.worker:main"
-azul-plugin-retroserver = "azul_plugin_retrohunt.server:main"
 azul-plugin-retrocron = "azul_plugin_retrohunt.cron:main"
 
 # [project.entry-points."my_plugin_group"]
@@ -95,8 +92,6 @@ version = "0.0.0"
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel.force-include]
-"azul_plugin_retrohunt/bigyara/bin/bgindex" = "azul_plugin_retrohunt/bigyara/bin/bgindex"
-"azul_plugin_retrohunt/bigyara/bin/bgdump" = "azul_plugin_retrohunt/bigyara/bin/bgdump"
 "azul_plugin_retrohunt/bigyara/bin/bgparse" = "azul_plugin_retrohunt/bigyara/bin/bgparse"
 "azul_plugin_retrohunt/yr" = "azul_plugin_retrohunt/yr"
 

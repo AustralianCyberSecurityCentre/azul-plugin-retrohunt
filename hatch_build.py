@@ -1,4 +1,4 @@
-"""Build retrohunt and yara ready to be bundled for install."""
+"""Bundle BigGrep search-only runtime tools."""
 
 # hatch_build.py
 import subprocess
@@ -11,7 +11,7 @@ class CustomBuildHook(BuildHookInterface):
     """Build hook for running actions at build time."""
 
     def initialize(self, version, build_data):
-        """Build retrohunt and yara ready to be bundled for install."""
+        """Bundle BigGrep search-only runtime tools."""
         # Runs before build
         print("Running custom build steps...")
         protoc_command = ["make", "compile"]

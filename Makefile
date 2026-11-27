@@ -3,7 +3,7 @@
 TARGETS = bdist
 BIGGREP_DIR = BigGrep-master
 BIN_DIR = azul_plugin_retrohunt/bigyara/bin
-BIGGREP_TOOLS = bgparse bgdump bgindex
+BIGGREP_TOOLS = bgparse
 BIGGREP_SOURCE_BINARIES = $(addprefix $(BIGGREP_DIR)/src/,$(BIGGREP_TOOLS))
 BIGGREP_BINARIES = $(addprefix $(BIN_DIR)/,$(BIGGREP_TOOLS))
 MISSING_BIGGREP_BINARIES := $(filter-out $(wildcard $(BIGGREP_BINARIES)),$(BIGGREP_BINARIES))

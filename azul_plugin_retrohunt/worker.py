@@ -17,15 +17,17 @@ from prometheus_client import Counter, Summary, start_http_server
 from redis.exceptions import ResponseError, WatchError
 
 from azul_plugin_retrohunt.bigyara.search import (
+    NoIndexMatchesException,
     QueryTypeEnum,
     SearchPhaseEnum,
     clear_stop_event,
     release_unused_memory,
-    search,
+    search_batched,
     trigger_stop_event,
 )
+from azul_plugin_retrohunt.index_provider import ObjectIndexProvider
 from azul_plugin_retrohunt.retrohunt import CancelException, FatalException, RetrohuntService
-from azul_plugin_retrohunt.settings import BGI_DIR_NAME, RetrohuntSettings
+from azul_plugin_retrohunt.settings import RetrohuntSettings
 
 prom_jobs_run = Counter(
     "retrohunt_worker_jobs_run",
@@ -54,6 +56,10 @@ log_root_handler.setFormatter(
     logging.Formatter("%(asctime)s %(levelname)-7s- %(name)-20s - %(message)s", "%d/%m/%Y %H:%M:%S")
 )
 log_root.addHandler(log_root_handler)
+
+# The Azure Blob SDK logs every HTTP request, response, and chunk download at
+# INFO level. Keep warnings/errors without flooding Retrohunt worker logs.
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
 
 MAX_LOG_CHARS = 1024 * 500  # Assuming each char is worth a byte (utf-8) - max of 500kB of logs
 
@@ -95,6 +101,7 @@ def capture_logs(level: int = logging.INFO) -> StringIO:
     tracked_loggers: list[logging.Logger] = [
         logging.getLogger("retrohunt.worker"),
         logging.getLogger("bigyara"),
+        logging.getLogger("retrohunt.index_provider"),
     ]
 
     for logger in tracked_loggers:
@@ -165,12 +172,20 @@ def _update_progress(job: azm.RetrohuntEvent, logs: StringIO) -> azm.RetrohuntEv
     return job
 
 
-def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
+def hunt(job: azm.RetrohuntEvent, logs: StringIO, *, provider=None, progress_writer=None):
     """Execute the given retrohunt."""
     match_metadata: MatchMetadata = {}
+
+    def save_progress(current_job, current_logs):
+        if progress_writer is not None:
+            progress_writer(current_job, current_logs)
+            return current_job
+        return _update_progress(current_job, current_logs)
+
     last_update: float | None = None
     last_cancel_check = 0.0
     cancel_check_lock = threading.Lock()
+    progress_lock = threading.RLock()
 
     def periodic_check_is_cancelled(force: bool = False) -> None:
         """Throttle Redis cancellation checks across narrow-phase threads."""
@@ -193,7 +208,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         logs.truncate(0)
         logs.seek(0)
 
-    def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
+    def update_job_unlocked(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
         nonlocal job, last_update
         periodic_check_is_cancelled()
 
@@ -225,6 +240,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
                     "stream_label": metadata[b"stream_label"].decode(),
                     "stream_source": metadata[b"stream_source"].decode(),
                     "sample": sample.decode() if sample is not None else match_path.rsplit("/", 1)[-1],
+                    **({"sha256": match_path.rsplit("/", 1)[-1]} if progress_writer is not None else {}),
                 }
 
                 job.entity.results.setdefault(new_match[0], []).append(match_result_dict)
@@ -233,7 +249,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
                 # reached. Setting the shared event before raising ensures
                 # in-flight narrow workers abort and release their file buffers
                 # instead of continuing to scan the remainder of the batch.
-                if job.entity.tool_match_count >= MATCH_LIMIT:
+                if progress_writer is None and job.entity.tool_match_count >= MATCH_LIMIT:
                     job.entity.status = azm.HuntState.CANCELLED
                     trigger_stop_event()
                     raise Exception(
@@ -244,8 +260,13 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         now = monotonic()
         if last_update is None or now - last_update >= 1.0:
             job.action = azm.RetrohuntEvent.RetrohuntAction.Running
-            job = _update_progress(job, logs)
+            job = save_progress(job, logs)
             last_update = now
+
+    def update_job(phase: int, done: int, total: int, new_match: tuple[str, list[str | bytes]]):
+        # Callbacks can run concurrently from narrow-phase threads.
+        with progress_lock:
+            update_job_unlocked(phase, done, total, new_match)
 
     def get_data_from_azul(match_path: str, config: dict[bytes, bytes]) -> bytes:
         periodic_check_is_cancelled()
@@ -302,7 +323,7 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         job.entity.status = azm.HuntState.STARTING
         job.action = azm.RetrohuntEvent.RetrohuntAction.Starting
         job.entity.results = {}
-        job = _update_progress(job, logs)
+        job = save_progress(job, logs)
         search_type_str = job.entity.search_type
         search_query: str = job.entity.search
 
@@ -322,25 +343,34 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
 
         periodic_check_is_cancelled(force=True)
 
-        search(
+        # Each BigGrep batch is fetched, searched and deleted before the next.
+        # Narrow-phase verification happens once after all broad candidates are
+        # collected, so the complete index collection never resides on the PVC.
+        search_batched(
             search_query,
             search_enum_type,
-            index_dirs,
+            provider if provider is not None else ObjectIndexProvider(RetrohuntSettings()),
             get_data_from_azul,
             update_job,
-            recursive=True,
             data_release_callback=release_data_from_azul,
         )
 
         periodic_check_is_cancelled(force=True)
         logger.info("Successfully completed job.")
         job.entity.status = azm.HuntState.COMPLETED
-        prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
+        if progress_writer is None:
+            prom_jobs_run.labels(azm.HuntState.COMPLETED.name).inc()
         logger.debug(job.entity)
+    except NoIndexMatchesException:
+        if progress_writer is None:
+            raise
+        logger.info("Shard has no broad-phase candidates; completed successfully")
+        job.entity.status = azm.HuntState.COMPLETED
     except CancelException as ex:
         trigger_stop_event()
         job.entity.status = azm.HuntState.CANCELLED
-        prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
+        if progress_writer is None:
+            prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
         logger.info("Hunt cancelled: %s", ex)
         raise
     except Exception as ex:
@@ -348,17 +378,19 @@ def hunt(index_dirs: list[str], job: azm.RetrohuntEvent, logs: StringIO):
         if ex.__cause__:
             exception_str += f": {str(repr(ex.__cause__))}"
         if job.entity.status == azm.HuntState.CANCELLED:
-            prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
+            if progress_writer is None:
+                prom_jobs_run.labels(azm.HuntState.CANCELLED.name).inc()
             logger.warning(f"Job cancelled: {exception_str}")
         else:
             logger.warning(f"Job failed: {exception_str}")
-            prom_jobs_run.labels(azm.HuntState.FAILED.name).inc()
+            if progress_writer is None:
+                prom_jobs_run.labels(azm.HuntState.FAILED.name).inc()
             job.entity.status = azm.HuntState.FAILED
             job.entity.error = exception_str
     finally:
         try:
             job.action = azm.RetrohuntEvent.RetrohuntAction.Completed
-            job = _update_progress(job, logs)
+            job = save_progress(job, logs)
         finally:
             # Cleanup must not depend on the final Redis progress write
             # succeeding.
@@ -406,6 +438,8 @@ def main():
     worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
     logs: StringIO = capture_logs(logging.INFO)
     settings = RetrohuntSettings()
+    from azul_plugin_retrohunt import distributed
+
     MAX_HUNT_RETRIES = settings.search_settings.max_retries
     LOCK_TTL = settings.redis.ttl
     exception_sleep = settings.redis.exception_wait
@@ -432,9 +466,29 @@ def main():
         else:
             raise
 
+    # Admission must continue even while all workers are running long shards.
+    # This independent watcher only registers submissions for fair-share quotas;
+    # ordinary XREADGROUP consumption still initialises and executes hunts.
+    admission_stop = threading.Event()
+    if settings.distributed_hunts:
+        admission_thread = threading.Thread(
+            target=distributed.watch_hunt_submissions,
+            args=(rs.redis, settings, rs, admission_stop),
+            daemon=True,
+            name="retrohunt-admission",
+        )
+        admission_thread.start()
+        logger.info(
+            "Distributed hunt admission watcher started (pool=%s, workers=%d)",
+            settings.hunt_worker_pool,
+            settings.hunt_worker_count,
+        )
+
     # poll for retrohunt submissions to work on
     while True:
         try:
+            if settings.distributed_hunts:
+                distributed.pump_waiting(rs.redis, settings, rs)
             # Claim any stale jobs first
             try:
                 result = rs.redis.xautoclaim(
@@ -489,6 +543,26 @@ def main():
                 _, msgs = events[0]
                 msg_id, payload = msgs[0]
 
+            # A single stream carries both new hunts and shard tasks, allowing
+            # idle workers to share one hunt without starving other queued hunts.
+            if payload.get(b"action") == b"Shard":
+                distributed.run_shard(
+                    rs.redis,
+                    payload,
+                    msg_id,
+                    worker_id,
+                    settings,
+                    rs,
+                    lambda shard_job, shard_logs, provider, writer: hunt(
+                        shard_job, shard_logs, provider=provider, progress_writer=writer
+                    ),
+                )
+                continue
+
+            if settings.distributed_hunts:
+                distributed.enqueue_hunt(rs.redis, payload[b"hunt_id"].decode(), msg_id, settings, rs)
+                continue
+
             # Load the full event from Redis
             event_json = rs.redis.get(payload[b"hunt_id"])
             if not event_json:
@@ -522,10 +596,8 @@ def main():
                 stop_event=heartbeat_stop_event,
             )
 
-            bgi_folders = []
-            for _name, indexer_cfg in settings.indexers.items():
-                path_to_bgi_folder = os.path.join(settings.root_path, indexer_cfg.name, BGI_DIR_NAME)
-                bgi_folders.append(path_to_bgi_folder)
+            # Index discovery and downloads occur inside hunt(), so failures
+            # are recorded against the job rather than crashing the worker.
 
             try:
                 # The search cancellation Event is module-global, so reset it
@@ -574,7 +646,7 @@ def main():
                 _update_progress(job, None)
 
                 with prom_worker_runtime.time():
-                    hunt(bgi_folders, job, logs)
+                    hunt(job, logs)
                 # Acknowledge the message
                 logger.info(f"Acknowledging job {rs.RETROHUNT_JOB} {rs.RETROHUNT_GROUP} {msg_id}")
                 rs.redis.xack(rs.RETROHUNT_JOB, rs.RETROHUNT_GROUP, msg_id)

@@ -2,7 +2,7 @@
 
 from azul_bedrock import models_network as azm
 from azul_bedrock.models_restapi.basic import Response as BedrockResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from azul_plugin_retrohunt.version import __version__
 
@@ -27,6 +27,7 @@ class RetrohuntSubmission(BaseModel):
 
     search_type: str
     search: str
+    shards: int | None = Field(default=None, ge=1, le=128)
     submitter: str = SERVICE_NAME
     security: str | None = None
 

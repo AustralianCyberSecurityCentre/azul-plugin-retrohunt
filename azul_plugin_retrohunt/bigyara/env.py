@@ -23,7 +23,5 @@ def find_executable(name, extra_paths=None):
 
 extra_paths = (os.path.join(os.path.dirname(__file__), "bin"),)
 executables = {
-    "bgdump": find_executable("bgdump", extra_paths=extra_paths),
-    "bgindex": find_executable("bgindex", extra_paths=extra_paths),
     "bgparse": find_executable("bgparse", extra_paths=extra_paths),
 }
